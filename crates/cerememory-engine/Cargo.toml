@@ -1,0 +1,32 @@
+[package]
+name = "cerememory-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Orchestrator that assembles all Cerememory stores and engines"
+rust-version.workspace = true
+
+[dependencies]
+cerememory-core = { workspace = true }
+cerememory-store-episodic = { workspace = true }
+cerememory-store-semantic = { workspace = true }
+cerememory-store-procedural = { workspace = true }
+cerememory-store-emotional = { workspace = true }
+cerememory-store-working = { workspace = true }
+cerememory-decay = { workspace = true }
+cerememory-association = { workspace = true }
+cerememory-evolution = { workspace = true }
+cerememory-index = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }

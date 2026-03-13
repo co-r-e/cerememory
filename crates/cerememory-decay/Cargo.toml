@@ -1,0 +1,17 @@
+[package]
+name = "cerememory-decay"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Memory decay engine - forgetting curves and noise accumulation"
+rust-version.workspace = true
+
+[dependencies]
+cerememory-core = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }

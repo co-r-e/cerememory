@@ -1,0 +1,20 @@
+[package]
+name = "cerememory-association"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Spreading activation engine for cross-modal memory association"
+rust-version.workspace = true
+
+[dependencies]
+cerememory-core = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

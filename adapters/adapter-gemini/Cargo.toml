@@ -1,0 +1,15 @@
+[package]
+name = "cerememory-adapter-gemini"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cerememory LLM adapter for gemini"
+rust-version.workspace = true
+
+[dependencies]
+cerememory-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

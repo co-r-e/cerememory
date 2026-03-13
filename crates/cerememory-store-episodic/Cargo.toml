@@ -1,0 +1,24 @@
+[package]
+name = "cerememory-store-episodic"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cerememory episodic store implementation"
+rust-version.workspace = true
+
+[dependencies]
+cerememory-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+redb = { workspace = true }
+rmp-serde = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

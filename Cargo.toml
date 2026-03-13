@@ -1,0 +1,78 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cerememory-core",
+    "crates/cerememory-store-episodic",
+    "crates/cerememory-store-semantic",
+    "crates/cerememory-store-procedural",
+    "crates/cerememory-store-emotional",
+    "crates/cerememory-store-working",
+    "crates/cerememory-decay",
+    "crates/cerememory-association",
+    "crates/cerememory-evolution",
+    "crates/cerememory-index",
+    "crates/cerememory-engine",
+    "crates/cerememory-transport-http",
+    "crates/cerememory-transport-grpc",
+    "crates/cerememory-archive",
+    "crates/cerememory-cli",
+    "adapters/adapter-claude",
+    "adapters/adapter-openai",
+    "adapters/adapter-gemini",
+    "tests/integration",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Masato Okuwaki <masato@co-r-e.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/co-r-e/cerememory"
+homepage = "https://github.com/co-r-e/cerememory"
+description = "A living memory database for the age of AI"
+rust-version = "1.77"
+
+[workspace.dependencies]
+# Core
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+thiserror = "2"
+anyhow = "1"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+rayon = "1"
+
+# Storage
+redb = "2"
+tantivy = "0.22"
+
+# Networking
+axum = "0.7"
+tonic = "0.12"
+prost = "0.13"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Testing
+tempfile = "3"
+criterion = "0.5"
+
+# Internal crates
+cerememory-core = { path = "crates/cerememory-core" }
+cerememory-store-episodic = { path = "crates/cerememory-store-episodic" }
+cerememory-store-semantic = { path = "crates/cerememory-store-semantic" }
+cerememory-store-procedural = { path = "crates/cerememory-store-procedural" }
+cerememory-store-emotional = { path = "crates/cerememory-store-emotional" }
+cerememory-store-working = { path = "crates/cerememory-store-working" }
+cerememory-decay = { path = "crates/cerememory-decay" }
+cerememory-association = { path = "crates/cerememory-association" }
+cerememory-evolution = { path = "crates/cerememory-evolution" }
+cerememory-index = { path = "crates/cerememory-index" }
+cerememory-engine = { path = "crates/cerememory-engine" }
+cerememory-archive = { path = "crates/cerememory-archive" }

@@ -1,0 +1,21 @@
+[package]
+name = "cerememory-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line interface for Cerememory"
+rust-version.workspace = true
+
+[[bin]]
+name = "cerememory"
+path = "src/main.rs"
+
+[dependencies]
+cerememory-core = { workspace = true }
+cerememory-engine = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

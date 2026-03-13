@@ -1,0 +1,41 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+
+# Python bindings
+bindings/python/__pycache__/
+bindings/python/*.egg-info/
+bindings/python/dist/
+bindings/python/build/
+*.pyc
+
+# TypeScript bindings
+bindings/typescript/node_modules/
+bindings/typescript/dist/
+bindings/typescript/*.js
+bindings/typescript/*.d.ts
+
+# Test artifacts
+*.profraw
+*.profdata

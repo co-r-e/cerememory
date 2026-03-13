@@ -1,0 +1,17 @@
+[package]
+name = "cerememory-transport-grpc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "gRPC transport binding for CMP"
+rust-version.workspace = true
+
+[dependencies]
+cerememory-core = { workspace = true }
+cerememory-engine = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
