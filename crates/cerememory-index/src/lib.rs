@@ -3,6 +3,13 @@
 //! Maps record_id → StoreType and maintains a global association index
 //! that spans all stores. Phase 1 keeps everything in-memory, rebuilt
 //! from stores on startup.
+//!
+//! Phase 2 adds:
+//! - [`text_index::TextIndex`] — Tantivy full-text search across all stores
+//! - [`vector_index::VectorIndex`] — Brute-force cosine similarity search
+
+pub mod text_index;
+pub mod vector_index;
 
 use cerememory_core::error::CerememoryError;
 use cerememory_core::traits::AssociationGraph;

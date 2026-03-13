@@ -60,6 +60,12 @@ prost = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Crypto
+sha2 = "0.10"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
 # Testing
 tempfile = "3"
 criterion = "0.5"
@@ -77,3 +83,4 @@ cerememory-evolution = { path = "crates/cerememory-evolution" }
 cerememory-index = { path = "crates/cerememory-index" }
 cerememory-engine = { path = "crates/cerememory-engine" }
 cerememory-archive = { path = "crates/cerememory-archive" }
+cerememory-transport-http = { path = "crates/cerememory-transport-http" }

@@ -19,6 +19,7 @@ cerememory-decay = { workspace = true }
 cerememory-association = { workspace = true }
 cerememory-evolution = { workspace = true }
 cerememory-index = { workspace = true }
+cerememory-archive = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

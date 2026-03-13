@@ -130,6 +130,8 @@ pub struct RecallCue {
     pub temporal: Option<TemporalRange>,
     pub spatial: Option<serde_json::Value>,
     pub semantic: Option<serde_json::Value>,
+    /// Optional embedding vector for semantic similarity search.
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// Temporal range filter for recall.
@@ -447,6 +449,9 @@ pub struct StatsResponse {
     pub total_recall_count: u64,
     #[serde(default)]
     pub evolution_metrics: Option<EvolutionMetrics>,
+    /// Whether background decay is enabled and running.
+    #[serde(default)]
+    pub background_decay_enabled: bool,
 }
 
 /// Parameter adjustment record.
@@ -723,6 +728,7 @@ mod tests {
             newest_record: None,
             total_recall_count: 100,
             evolution_metrics: None,
+            background_decay_enabled: false,
         };
 
         let json = serde_json::to_string(&stats).unwrap();

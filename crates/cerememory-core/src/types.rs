@@ -179,11 +179,15 @@ pub enum RecallMode {
     Perfect,
 }
 
+/// Maximum content size per modality.
+pub const MAX_TEXT_SIZE: usize = 1_048_576; // 1 MB
+pub const MAX_IMAGE_SIZE: usize = 10_485_760; // 10 MB
+pub const MAX_AUDIO_SIZE: usize = 52_428_800; // 50 MB
+
 impl MemoryRecord {
-    /// Create a new text-only memory record with sensible defaults.
-    pub fn new_text(store: StoreType, text: impl Into<String>) -> Self {
+    /// Create a new record with a single content block.
+    fn new_single_block(store: StoreType, block: ContentBlock) -> Self {
         let now = Utc::now();
-        let text_bytes = text.into().into_bytes();
         Self {
             id: Uuid::now_v7(),
             store,
@@ -192,12 +196,7 @@ impl MemoryRecord {
             last_accessed_at: now,
             access_count: 0,
             content: MemoryContent {
-                blocks: vec![ContentBlock {
-                    modality: Modality::Text,
-                    format: "text/plain".to_string(),
-                    data: text_bytes,
-                    embedding: None,
-                }],
+                blocks: vec![block],
                 summary: None,
             },
             fidelity: FidelityState::default(),
@@ -208,7 +207,33 @@ impl MemoryRecord {
         }
     }
 
-    /// Validate record invariants.
+    /// Create a new binary (non-text) memory record.
+    pub fn new_binary(
+        store: StoreType,
+        modality: Modality,
+        format: impl Into<String>,
+        data: Vec<u8>,
+        embedding: Option<Vec<f32>>,
+    ) -> Self {
+        Self::new_single_block(store, ContentBlock {
+            modality,
+            format: format.into(),
+            data,
+            embedding,
+        })
+    }
+
+    /// Create a new text-only memory record with sensible defaults.
+    pub fn new_text(store: StoreType, text: impl Into<String>) -> Self {
+        Self::new_single_block(store, ContentBlock {
+            modality: Modality::Text,
+            format: "text/plain".to_string(),
+            data: text.into().into_bytes(),
+            embedding: None,
+        })
+    }
+
+    /// Validate record invariants including modality-specific size limits.
     pub fn validate(&self) -> Result<(), crate::error::CerememoryError> {
         if self.content.blocks.is_empty() {
             return Err(crate::error::CerememoryError::Validation(
@@ -230,6 +255,34 @@ impl MemoryRecord {
                 return Err(crate::error::CerememoryError::Validation(
                     format!("Association weight {} out of range [0.0, 1.0]", assoc.weight),
                 ));
+            }
+        }
+        // Modality-specific size limits and embedding validation
+        for block in &self.content.blocks {
+            let limit = match block.modality {
+                Modality::Text => MAX_TEXT_SIZE,
+                Modality::Image => MAX_IMAGE_SIZE,
+                Modality::Audio | Modality::Video => MAX_AUDIO_SIZE,
+                Modality::Structured | Modality::Spatial | Modality::Temporal | Modality::Interoceptive => MAX_TEXT_SIZE,
+            };
+            if block.data.len() > limit {
+                return Err(crate::error::CerememoryError::ContentTooLarge {
+                    size: block.data.len(),
+                    limit,
+                });
+            }
+            // Validate embedding: reject empty, NaN, Inf
+            if let Some(ref emb) = block.embedding {
+                if emb.is_empty() {
+                    return Err(crate::error::CerememoryError::Validation(
+                        "Embedding vector must not be empty".to_string(),
+                    ));
+                }
+                if emb.iter().any(|v| v.is_nan() || v.is_infinite()) {
+                    return Err(crate::error::CerememoryError::Validation(
+                        "Embedding vector contains NaN or Inf".to_string(),
+                    ));
+                }
             }
         }
         Ok(())

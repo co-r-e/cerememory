@@ -416,7 +416,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
-                    .uri(&format!("/v1/introspect/record/{fake_id}"))
+                    .uri(format!("/v1/introspect/record/{fake_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )

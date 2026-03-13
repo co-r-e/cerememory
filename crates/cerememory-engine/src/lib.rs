@@ -3,6 +3,12 @@
 //! Assembles all stores, the decay engine, association engine,
 //! evolution engine, and the hippocampal coordinator into a
 //! unified system that implements the full CMP protocol.
+//!
+//! Phase 2 additions:
+//! - Tantivy full-text search integration (TextIndex)
+//! - Vector embedding similarity search (VectorIndex)
+//! - Background decay via tokio::spawn
+//! - Export/Import via cerememory-archive
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -34,6 +40,8 @@ use cerememory_core::traits::*;
 use cerememory_core::types::*;
 use cerememory_decay::{DecayParams, PowerLawDecayEngine};
 use cerememory_evolution::EvolutionEngine;
+use cerememory_index::text_index::TextIndex;
+use cerememory_index::vector_index::VectorIndex;
 use cerememory_index::HippocampalCoordinator;
 use cerememory_store_emotional::EmotionalStore;
 use cerememory_store_episodic::EpisodicStore;
@@ -48,6 +56,12 @@ pub struct EngineConfig {
     pub working_capacity: usize,
     pub decay_params: DecayParams,
     pub recall_mode: RecallMode,
+    /// Path for the Tantivy full-text search index directory.
+    pub index_path: Option<String>,
+    /// Path for the redb-backed vector index file.
+    pub vector_index_path: Option<String>,
+    /// If set, enables background decay at this interval (in seconds). None = disabled.
+    pub background_decay_interval_secs: Option<u64>,
 }
 
 impl Default for EngineConfig {
@@ -58,6 +72,9 @@ impl Default for EngineConfig {
             working_capacity: 7,
             decay_params: DecayParams::default(),
             recall_mode: RecallMode::Human,
+            index_path: None,
+            vector_index_path: None,
+            background_decay_interval_secs: None,
         }
     }
 }
@@ -79,8 +96,22 @@ pub struct CerememoryEngine {
     // Coordinator
     coordinator: Arc<HippocampalCoordinator>,
 
+    // Indexes (Phase 2)
+    text_index: TextIndex,
+    vector_index: VectorIndex,
+
     // State
     recall_mode: tokio::sync::RwLock<RecallMode>,
+
+    // Background decay
+    background_decay_interval_secs: Option<u64>,
+    decay_state: tokio::sync::Mutex<Option<BackgroundDecayState>>,
+}
+
+/// Tracks a running background decay task for clean shutdown.
+struct BackgroundDecayState {
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 impl CerememoryEngine {
@@ -96,6 +127,16 @@ impl CerememoryEngine {
             None => SemanticStore::open_in_memory()?,
         };
 
+        let text_index = match &config.index_path {
+            Some(p) => TextIndex::open(p)?,
+            None => TextIndex::open_in_memory()?,
+        };
+
+        let vector_index = match &config.vector_index_path {
+            Some(p) => VectorIndex::open(p)?,
+            None => VectorIndex::open_in_memory()?,
+        };
+
         let coordinator = Arc::new(HippocampalCoordinator::new());
         let activation = SpreadingActivationEngine::new(Arc::clone(&coordinator));
 
@@ -109,7 +150,11 @@ impl CerememoryEngine {
             activation,
             evolution: EvolutionEngine::new(),
             coordinator,
+            text_index,
+            vector_index,
             recall_mode: tokio::sync::RwLock::new(config.recall_mode),
+            background_decay_interval_secs: config.background_decay_interval_secs,
+            decay_state: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -118,10 +163,81 @@ impl CerememoryEngine {
         Self::new(EngineConfig::default())
     }
 
-    /// Rebuild the hippocampal coordinator from persistent stores.
+    /// Start the background decay task. Requires the engine to be wrapped in Arc.
+    /// No-op if already running or if `background_decay_interval_secs` is None.
+    pub fn start_background_decay(self: &Arc<Self>) {
+        let Some(interval_secs) = self.background_decay_interval_secs else {
+            return;
+        };
+
+        // Prevent double start
+        let mut guard = match self.decay_state.try_lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if guard.is_some() {
+            return; // Already running
+        }
+
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        let engine = Arc::clone(self);
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.tick().await; // skip first immediate tick
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let req = DecayTickRequest {
+                            header: None,
+                            tick_duration_seconds: Some(interval_secs as u32),
+                        };
+                        if let Err(e) = engine.lifecycle_decay_tick(req).await {
+                            warn!(error = %e, "Background decay tick failed");
+                        }
+                    }
+                    _ = rx.changed() => {
+                        if *rx.borrow() {
+                            info!("Background decay stopped");
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        *guard = Some(BackgroundDecayState {
+            shutdown_tx: tx,
+            handle,
+        });
+    }
+
+    /// Stop the background decay task and wait for it to finish.
+    pub async fn stop_background_decay(&self) {
+        let state = {
+            let mut guard = self.decay_state.lock().await;
+            guard.take()
+        };
+        if let Some(state) = state {
+            let _ = state.shutdown_tx.send(true);
+            let _ = state.handle.await;
+        }
+    }
+
+    /// Check if background decay is running.
+    pub async fn is_background_decay_enabled(&self) -> bool {
+        self.decay_state.lock().await.is_some()
+    }
+
+    /// Rebuild the hippocampal coordinator and all indexes from persistent stores.
     /// Must be called after construction when opening existing stores.
     pub async fn rebuild_coordinator(&self) -> Result<(), CerememoryError> {
+        // Clear vector index to avoid stale entries from previous runs
+        self.vector_index.clear()?;
+
         let mut entries = Vec::new();
+        let mut text_records = Vec::new();
 
         for store_type in [
             StoreType::Episodic,
@@ -132,22 +248,74 @@ impl CerememoryEngine {
             for id in ids {
                 if let Some(record) = dispatch_store!(self, store_type, get(&id))? {
                     entries.push((record.id, store_type, record.associations.clone()));
+
+                    // Collect text for full-text index rebuild
+                    if let Some(text) = record.text_content() {
+                        text_records.push((
+                            record.id,
+                            store_type,
+                            text.to_string(),
+                            record.content.summary.clone(),
+                        ));
+                    }
+
+                    // Rebuild vector index from embeddings
+                    for block in &record.content.blocks {
+                        if let Some(ref emb) = block.embedding {
+                            let _ = self.vector_index.upsert(record.id, emb);
+                        }
+                    }
                 }
             }
         }
 
         self.coordinator.rebuild(entries).await;
+        self.text_index.rebuild(&text_records)?;
+
         info!(
             records = self.coordinator.total_records().await,
-            "Coordinator rebuilt from persistent stores"
+            "Coordinator and indexes rebuilt from persistent stores"
         );
         Ok(())
+    }
+
+    // ─── Index helpers ─────────────────────────────────────────────
+
+    /// Index a record's text content and embeddings.
+    /// Uses only the first embedding found (one vector per record_id).
+    fn index_record(&self, record: &MemoryRecord) -> Result<(), CerememoryError> {
+        // Text index
+        if let Some(text) = record.text_content() {
+            self.text_index.add(
+                record.id,
+                record.store,
+                text,
+                record.content.summary.as_deref(),
+            )?;
+        }
+
+        // Vector index — use first embedding found (one vector per record_id)
+        if let Some(emb) = record
+            .content
+            .blocks
+            .iter()
+            .find_map(|b| b.embedding.as_ref())
+        {
+            self.vector_index.upsert(record.id, emb)?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove a record from all indexes.
+    fn unindex_record(&self, id: Uuid) {
+        let _ = self.text_index.remove(id);
+        let _ = self.vector_index.remove(id);
     }
 
     // ─── Store routing ───────────────────────────────────────────────
 
     fn route_store(&self, content: &MemoryContent) -> StoreType {
-        // Phase 1: simple heuristic — default to Episodic for text content
         if content.summary.is_some() {
             StoreType::Semantic
         } else {
@@ -211,19 +379,25 @@ impl CerememoryEngine {
         let id = record.id;
         let fidelity = record.fidelity.score;
 
-        // Register in coordinator
+        // 1. Store first (source of truth)
+        if store_type == StoreType::Working {
+            let (_, evicted) = self.working.store_with_eviction(record.clone()).await?;
+            if let Some(evicted_id) = evicted {
+                self.coordinator.unregister(&evicted_id).await;
+                self.unindex_record(evicted_id);
+            }
+        } else {
+            dispatch_store!(self, store_type, store(record.clone()))?;
+        }
+
+        // 2. Register in coordinator (in-memory, rebuildable)
         self.coordinator
             .register(id, store_type, record.associations.clone())
             .await;
 
-        // Store in the appropriate store, handling Working store LRU eviction
-        if store_type == StoreType::Working {
-            let (_, evicted) = self.working.store_with_eviction(record).await?;
-            if let Some(evicted_id) = evicted {
-                self.coordinator.unregister(&evicted_id).await;
-            }
-        } else {
-            dispatch_store!(self, store_type, store(record))?;
+        // 3. Index (rebuildable, log on failure)
+        if let Err(e) = self.index_record(&record) {
+            warn!(error = %e, record_id = %id, "Failed to index record, will be indexed on rebuild");
         }
 
         info!(record_id = %id, store = %store_type, "Encoded memory record");
@@ -280,23 +454,64 @@ impl CerememoryEngine {
 
     /// encode.update — Update an existing record (CMP Spec §3.3).
     pub async fn encode_update(&self, req: EncodeUpdateRequest) -> Result<(), CerememoryError> {
-        let (_, store_type) = self
+        let (mut record, store_type) = self
             .get_store_record(&req.record_id)
             .await?
             .ok_or_else(|| CerememoryError::RecordNotFound(req.record_id.to_string()))?;
 
-        dispatch_store!(self, store_type, update_record(&req.record_id, req.content, req.emotion, req.metadata))
+        // Apply updates to a clone and validate before persisting
+        record.apply_updates(req.content.clone(), req.emotion.clone(), req.metadata.clone());
+        record.validate()?;
+
+        // Persist the update
+        dispatch_store!(self, store_type, update_record(&req.record_id, req.content.clone(), req.emotion, req.metadata))?;
+
+        // Update indexes if content changed
+        if let Some(ref content) = req.content {
+            let text = content
+                .blocks
+                .iter()
+                .find(|b| b.modality == Modality::Text)
+                .and_then(|b| std::str::from_utf8(&b.data).ok())
+                .unwrap_or("");
+            if let Err(e) = self.text_index.update(
+                req.record_id,
+                store_type,
+                text,
+                content.summary.as_deref(),
+            ) {
+                warn!(error = %e, record_id = %req.record_id, "Failed to update text index");
+            }
+
+            // Remove old vector, then insert first new embedding
+            let _ = self.vector_index.remove(req.record_id);
+            if let Some(emb) = content.blocks.iter().find_map(|b| b.embedding.as_ref()) {
+                if let Err(e) = self.vector_index.upsert(req.record_id, emb) {
+                    warn!(error = %e, record_id = %req.record_id, "Failed to update vector index");
+                }
+            }
+        }
+
+        Ok(())
     }
 
     // ─── CMP Recall Operations ───────────────────────────────────────
 
     /// recall.query — Retrieve memories (CMP Spec §4.1).
+    ///
+    /// Phase 2 recall pipeline:
+    /// 1. Text search via Tantivy (if cue.text present)
+    /// 2. Vector similarity search (if cue.embedding present)
+    /// 3. Hybrid score merging
+    /// 4. Temporal range filter
+    /// 5. Spreading activation
+    /// 6. Reconsolidation + human noise rendering
     pub async fn recall_query(&self, req: RecallQueryRequest) -> Result<RecallQueryResponse, CerememoryError> {
         let mode = *self.recall_mode.read().await;
         let recall_mode = req.recall_mode;
         let effective_mode = if mode == RecallMode::Perfect { RecallMode::Perfect } else { recall_mode };
 
-        let stores = req.stores.unwrap_or_else(|| {
+        let stores = req.stores.clone().unwrap_or_else(|| {
             vec![
                 StoreType::Episodic,
                 StoreType::Semantic,
@@ -308,26 +523,86 @@ impl CerememoryEngine {
         let mut candidates: Vec<(MemoryRecord, f64)> = Vec::new();
         let mut seen_ids: HashSet<Uuid> = HashSet::new();
 
-        // Text search across requested stores
-        if let Some(text) = &req.cue.text {
-            for store_type in &stores {
-                let results = dispatch_store!(self, *store_type, query_text(text, req.limit as usize * 2))?;
-                for record in results {
-                    if !seen_ids.insert(record.id) {
-                        continue; // Already seen
+        // Score maps for hybrid merging
+        let mut text_scores: HashMap<Uuid, f64> = HashMap::new();
+        let mut vec_scores: HashMap<Uuid, f64> = HashMap::new();
+
+        // 1. Tantivy full-text search
+        if let Some(ref text) = req.cue.text {
+            let search_limit = req.limit as usize * 3;
+            match self.text_index.search(text, Some(&stores), search_limit) {
+                Ok(hits) => {
+                    for hit in hits {
+                        text_scores.insert(hit.record_id, hit.score as f64);
                     }
-                    if let Some(min_f) = req.min_fidelity {
-                        if record.fidelity.score < min_f && !req.include_decayed {
-                            continue;
+                }
+                Err(e) => {
+                    // Fallback to store-level text search if Tantivy fails
+                    warn!(error = %e, "Text index search failed, falling back to store query");
+                    for store_type in &stores {
+                        let results = dispatch_store!(self, *store_type, query_text(text, req.limit as usize * 2))?;
+                        for record in results {
+                            text_scores.insert(record.id, record.fidelity.score);
                         }
                     }
-                    let score = record.fidelity.score;
-                    candidates.push((record, score));
                 }
             }
         }
 
-        // Temporal range filter (apply same fidelity/store filters)
+        // 2. Vector similarity search
+        if let Some(ref embedding) = req.cue.embedding {
+            if let Ok(hits) = self.vector_index.search(embedding, req.limit as usize * 3) {
+                for hit in hits {
+                    if hit.similarity > 0.0 {
+                        vec_scores.insert(hit.record_id, hit.similarity as f64);
+                    }
+                }
+            }
+        }
+
+        // 3. Merge scores: collect all candidate IDs
+        let all_ids: HashSet<Uuid> = text_scores
+            .keys()
+            .chain(vec_scores.keys())
+            .copied()
+            .collect();
+
+        for id in all_ids {
+            if !seen_ids.insert(id) {
+                continue;
+            }
+            if let Some((record, _)) = self.get_store_record(&id).await? {
+                // Filter by requested stores
+                if !stores.contains(&record.store) {
+                    continue;
+                }
+                if let Some(min_f) = req.min_fidelity {
+                    if record.fidelity.score < min_f && !req.include_decayed {
+                        continue;
+                    }
+                }
+
+                // Hybrid scoring
+                let ts = text_scores.get(&id);
+                let vs = vec_scores.get(&id);
+                let score = match (ts, vs) {
+                    (Some(&t), Some(&v)) => t * 0.6 + v * 0.4,
+                    (Some(&t), None) => t,
+                    (None, Some(&v)) => v,
+                    (None, None) => 0.0,
+                };
+
+                candidates.push((record, score));
+            }
+        }
+
+        // If no index search was performed (no text or embedding cue),
+        // fall back to store-level text search for backward compatibility
+        if req.cue.text.is_none() && req.cue.embedding.is_none() {
+            // No search cue — candidates will come from temporal or activation only
+        }
+
+        // 4. Temporal range filter
         if let Some(ref temporal) = req.cue.temporal {
             let results = self
                 .episodic
@@ -347,7 +622,7 @@ impl CerememoryEngine {
             }
         }
 
-        // Spreading activation for top candidates
+        // 5. Spreading activation for top candidates
         let mut activated_ids: HashMap<Uuid, f64> = HashMap::new();
         if req.activation_depth > 0 && !candidates.is_empty() {
             let top_id = candidates
@@ -385,7 +660,7 @@ impl CerememoryEngine {
         let total_candidates = candidates.len() as u32;
         candidates.truncate(req.limit as usize);
 
-        // Build response with reconsolidation
+        // 6. Build response with reconsolidation
         let mut memories = Vec::with_capacity(candidates.len());
         for (mut record, relevance) in candidates {
             // Reconsolidate: update access metadata + fidelity
@@ -399,9 +674,7 @@ impl CerememoryEngine {
                 record.fidelity.reinforcement_count += 1;
 
                 if let Some(store_type) = self.coordinator.get_record_store_type(&record.id).await? {
-                    // Persist fidelity changes (stability boost + reinforcement count)
                     let _ = dispatch_store!(self, store_type, update_fidelity(&record.id, record.fidelity.clone()));
-                    // Persist access metadata (access count + last accessed timestamp)
                     let _ = dispatch_store!(self, store_type, update_access(&record.id, record.access_count, record.last_accessed_at));
                 }
             }
@@ -442,7 +715,6 @@ impl CerememoryEngine {
         let mut memories = Vec::new();
         for act in activated.iter().take(req.limit as usize) {
             if let Some(types) = &req.association_types {
-                // Filter by association type — check if the edge type matches
                 let assocs = self.coordinator.get_associations(&req.record_id).await?;
                 let matches = assocs
                     .iter()
@@ -498,7 +770,6 @@ impl CerememoryEngine {
                 semantic_record.store = StoreType::Semantic;
                 semantic_record.id = Uuid::now_v7();
 
-                // If the record has a summary, keep it; otherwise generate one from content
                 if semantic_record.content.summary.is_none() {
                     semantic_record.content.summary = semantic_record.text_content().map(|t| {
                         if t.len() > 100 {
@@ -518,7 +789,11 @@ impl CerememoryEngine {
                     )
                     .await;
 
-                // Create cross-reference association
+                // Index the new semantic record
+                if let Err(e) = self.index_record(&semantic_record) {
+                    warn!(error = %e, "Failed to index consolidated record");
+                }
+
                 let assoc = Association {
                     target_id: semantic_record.id,
                     association_type: AssociationType::Semantic,
@@ -530,10 +805,10 @@ impl CerememoryEngine {
 
                 migrated += 1;
 
-                // Prune original if fidelity is very low
                 if record.fidelity.score < 0.1 {
                     self.episodic.delete(&id).await?;
                     self.coordinator.unregister(&id).await;
+                    self.unindex_record(id);
                     pruned += 1;
                 }
             }
@@ -555,7 +830,6 @@ impl CerememoryEngine {
         let mut all_inputs = Vec::new();
         let mut record_stores: HashMap<Uuid, StoreType> = HashMap::new();
 
-        // Collect records from all persistent stores
         for store_type in [
             StoreType::Episodic,
             StoreType::Semantic,
@@ -576,7 +850,6 @@ impl CerememoryEngine {
             }
         }
 
-        // Run decay computation on rayon thread pool
         let decay = self.decay.clone();
         let result = tokio::task::spawn_blocking(move || {
             decay.compute_tick(&all_inputs, tick_secs)
@@ -584,12 +857,12 @@ impl CerememoryEngine {
         .await
         .map_err(|e| CerememoryError::Internal(format!("Decay task failed: {e}")))?;
 
-        // Apply results back to stores
         for output in &result.updates {
             if let Some(&store_type) = record_stores.get(&output.id) {
                 if output.should_prune {
                     dispatch_store!(self, store_type, delete(&output.id))?;
                     self.coordinator.unregister(&output.id).await;
+                    self.unindex_record(output.id);
                 } else {
                     dispatch_store!(self, store_type, update_fidelity(&output.id, output.new_fidelity.clone()))?;
                 }
@@ -628,7 +901,6 @@ impl CerememoryEngine {
         if let Some(ids) = req.record_ids {
             for id in ids {
                 if let Some(store_type) = self.coordinator.get_record_store_type(&id).await? {
-                    // Collect cascade targets BEFORE deleting the source
                     let cascade_targets = if req.cascade {
                         self.coordinator.get_associations(&id).await?
                     } else {
@@ -637,6 +909,7 @@ impl CerememoryEngine {
 
                     if dispatch_store!(self, store_type, delete(&id))? {
                         self.coordinator.unregister(&id).await;
+                        self.unindex_record(id);
                         deleted += 1;
                     }
 
@@ -644,6 +917,7 @@ impl CerememoryEngine {
                         if let Some(st) = self.coordinator.get_record_store_type(&assoc.target_id).await? {
                             if dispatch_store!(self, st, delete(&assoc.target_id))? {
                                 self.coordinator.unregister(&assoc.target_id).await;
+                                self.unindex_record(assoc.target_id);
                                 deleted += 1;
                             }
                         }
@@ -657,6 +931,7 @@ impl CerememoryEngine {
             for id in ids {
                 if dispatch_store!(self, store_type, delete(&id))? {
                     self.coordinator.unregister(&id).await;
+                    self.unindex_record(id);
                     deleted += 1;
                 }
             }
@@ -666,18 +941,84 @@ impl CerememoryEngine {
         Ok(deleted)
     }
 
-    /// lifecycle.export — Not implemented in Phase 1.
+    /// lifecycle.export — Export all records to a CMA archive.
     pub async fn lifecycle_export(&self, _req: ExportRequest) -> Result<ExportResponse, CerememoryError> {
+        let mut records = Vec::new();
+
+        for store_type in [
+            StoreType::Episodic,
+            StoreType::Semantic,
+            StoreType::Procedural,
+            StoreType::Emotional,
+            StoreType::Working,
+        ] {
+            let ids = dispatch_store!(self, store_type, list_ids())?;
+            for id in ids {
+                if let Some((record, _)) = self.get_store_record(&id).await? {
+                    records.push(record);
+                }
+            }
+        }
+
+        let (_, resp) = cerememory_archive::export(&records)?;
+        Ok(resp)
+    }
+
+    /// lifecycle.import — Import records from a CMA archive.
+    pub async fn lifecycle_import(&self, _req: ImportRequest) -> Result<(), CerememoryError> {
         Err(CerememoryError::Internal(
-            "Export not implemented in Phase 1".to_string(),
+            "Import requires archive_data. Use import_records() directly.".to_string(),
         ))
     }
 
-    /// lifecycle.import — Not implemented in Phase 1.
-    pub async fn lifecycle_import(&self, _req: ImportRequest) -> Result<(), CerememoryError> {
-        Err(CerememoryError::Internal(
-            "Import not implemented in Phase 1".to_string(),
-        ))
+    /// Import records from a serialized CMA archive.
+    pub async fn import_records(&self, data: &[u8]) -> Result<u32, CerememoryError> {
+        let records = cerememory_archive::import_records(data)?;
+        let mut imported = 0u32;
+
+        for record in records {
+            let store_type = record.store;
+
+            // Check for ID conflicts — skip if record already exists
+            if self.get_store_record(&record.id).await?.is_some() {
+                continue;
+            }
+
+            // Store first (source of truth)
+            dispatch_store!(self, store_type, store(record.clone()))?;
+
+            // Then coordinator + index (rebuildable)
+            self.coordinator
+                .register(record.id, store_type, record.associations.clone())
+                .await;
+            if let Err(e) = self.index_record(&record) {
+                warn!(error = %e, record_id = %record.id, "Failed to index imported record");
+            }
+            imported += 1;
+        }
+
+        info!(imported, "Import completed");
+        Ok(imported)
+    }
+
+    /// Collect all records for export (used by archive module).
+    pub async fn collect_all_records(&self) -> Result<Vec<MemoryRecord>, CerememoryError> {
+        let mut records = Vec::new();
+        for store_type in [
+            StoreType::Episodic,
+            StoreType::Semantic,
+            StoreType::Procedural,
+            StoreType::Emotional,
+            StoreType::Working,
+        ] {
+            let ids = dispatch_store!(self, store_type, list_ids())?;
+            for id in ids {
+                if let Some((record, _)) = self.get_store_record(&id).await? {
+                    records.push(record);
+                }
+            }
+        }
+        Ok(records)
     }
 
     // ─── CMP Introspect Operations ───────────────────────────────────
@@ -700,7 +1041,6 @@ impl CerememoryEngine {
             records_by_store.insert(store_type, count);
             total_records += count;
 
-            // Compute average fidelity per store
             if count > 0 {
                 let ids = dispatch_store!(self, store_type, list_ids())?;
                 let mut store_fidelity = 0.0f64;
@@ -730,6 +1070,7 @@ impl CerememoryEngine {
             newest_record: None,
             total_recall_count: 0,
             evolution_metrics: Some(self.evolution.get_metrics()),
+            background_decay_enabled: self.is_background_decay_enabled().await,
         })
     }
 
@@ -745,6 +1086,7 @@ impl CerememoryEngine {
 }
 
 /// Apply human-mode noise to content based on fidelity.
+/// Only applies to text blocks — non-text modalities are returned unchanged.
 fn apply_human_noise(content: &MemoryContent, fidelity: f64) -> MemoryContent {
     if fidelity >= 0.95 {
         return content.clone();
@@ -763,7 +1105,6 @@ fn apply_human_noise(content: &MemoryContent, fidelity: f64) -> MemoryContent {
 }
 
 /// Degrade text based on fidelity level.
-/// Low fidelity = more words replaced with "..." or removed.
 fn degrade_text(text: &str, fidelity: f64) -> String {
     if fidelity >= 0.9 {
         return text.to_string();
@@ -774,7 +1115,6 @@ fn degrade_text(text: &str, fidelity: f64) -> String {
         return text.to_string();
     }
 
-    // Fraction of words to degrade
     let degrade_fraction = (1.0 - fidelity).min(0.8);
     let step = (1.0 / degrade_fraction).max(2.0) as usize;
 
@@ -852,6 +1192,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tantivy_tokenized_search() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(text_store_req("The quick brown fox jumps over the lazy dog", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        // Tantivy should find "quick" via tokenized search
+        let query = RecallQueryRequest {
+            header: None,
+            cue: RecallCue {
+                text: Some("quick".to_string()),
+                ..Default::default()
+            },
+            stores: None,
+            limit: 10,
+            min_fidelity: None,
+            include_decayed: false,
+            reconsolidate: false,
+            activation_depth: 0,
+            recall_mode: RecallMode::Perfect,
+        };
+
+        let resp = engine.recall_query(query).await.unwrap();
+        assert!(!resp.memories.is_empty());
+        assert_eq!(
+            resp.memories[0].record.text_content(),
+            Some("The quick brown fox jumps over the lazy dog")
+        );
+    }
+
+    #[tokio::test]
+    async fn vector_search_recall() {
+        let engine = make_engine().await;
+
+        // Store with embedding
+        let req = EncodeStoreRequest {
+            header: None,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: b"Cats are fluffy animals".to_vec(),
+                    embedding: Some(vec![1.0, 0.0, 0.0]),
+                }],
+                summary: None,
+            },
+            store: Some(StoreType::Episodic),
+            emotion: None,
+            context: None,
+            associations: None,
+        };
+        engine.encode_store(req).await.unwrap();
+
+        // Recall with embedding
+        let query = RecallQueryRequest {
+            header: None,
+            cue: RecallCue {
+                embedding: Some(vec![1.0, 0.1, 0.0]),
+                ..Default::default()
+            },
+            stores: None,
+            limit: 10,
+            min_fidelity: None,
+            include_decayed: false,
+            reconsolidate: false,
+            activation_depth: 0,
+            recall_mode: RecallMode::Perfect,
+        };
+
+        let resp = engine.recall_query(query).await.unwrap();
+        assert!(!resp.memories.is_empty());
+        assert_eq!(
+            resp.memories[0].record.text_content(),
+            Some("Cats are fluffy animals")
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_text_vector_search() {
+        let engine = make_engine().await;
+
+        // Store two records, one with both text and embedding
+        let req1 = EncodeStoreRequest {
+            header: None,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: b"Machine learning is fascinating".to_vec(),
+                    embedding: Some(vec![1.0, 0.0, 0.0]),
+                }],
+                summary: None,
+            },
+            store: Some(StoreType::Episodic),
+            emotion: None,
+            context: None,
+            associations: None,
+        };
+        engine.encode_store(req1).await.unwrap();
+
+        // Search with both text and embedding
+        let query = RecallQueryRequest {
+            header: None,
+            cue: RecallCue {
+                text: Some("machine learning".to_string()),
+                embedding: Some(vec![1.0, 0.0, 0.0]),
+                ..Default::default()
+            },
+            stores: None,
+            limit: 10,
+            min_fidelity: None,
+            include_decayed: false,
+            reconsolidate: false,
+            activation_depth: 0,
+            recall_mode: RecallMode::Perfect,
+        };
+
+        let resp = engine.recall_query(query).await.unwrap();
+        assert!(!resp.memories.is_empty());
+    }
+
+    #[tokio::test]
     async fn encode_batch_with_associations() {
         let engine = make_engine().await;
 
@@ -867,7 +1331,7 @@ mod tests {
 
         let resp = engine.encode_batch(batch).await.unwrap();
         assert_eq!(resp.results.len(), 3);
-        assert_eq!(resp.associations_inferred, 4); // 2 pairs * 2 directions
+        assert_eq!(resp.associations_inferred, 4);
     }
 
     #[tokio::test]
@@ -887,7 +1351,7 @@ mod tests {
         let resp = engine
             .lifecycle_decay_tick(DecayTickRequest {
                 header: None,
-                tick_duration_seconds: Some(86400), // 24 hours
+                tick_duration_seconds: Some(86400),
             })
             .await
             .unwrap();
@@ -935,10 +1399,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(deleted, 1);
-
-        // Verify it's gone
         let record = engine.get_store_record(&resp.record_id).await.unwrap();
         assert!(record.is_none());
+
+        // Also verify removed from text index
+        let hits = engine.text_index.search("forget", None, 10).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[tokio::test]
@@ -970,20 +1436,19 @@ mod tests {
         assert_eq!(stats.total_records, 1);
         assert_eq!(stats.records_by_store[&StoreType::Episodic], 1);
         assert!((stats.avg_fidelity - 1.0).abs() < f64::EPSILON);
+        assert!(!stats.background_decay_enabled);
     }
 
     #[tokio::test]
     async fn auto_store_routing() {
         let engine = make_engine().await;
 
-        // Without summary → routes to Episodic
         let resp1 = engine
             .encode_store(text_store_req("An event", None))
             .await
             .unwrap();
         assert_eq!(resp1.store, StoreType::Episodic);
 
-        // With summary → routes to Semantic
         let req = EncodeStoreRequest {
             header: None,
             content: MemoryContent {
@@ -1016,11 +1481,9 @@ mod tests {
             summary: None,
         };
 
-        // High fidelity → no change
         let result = apply_human_noise(&content, 0.95);
         assert_eq!(result.blocks[0].data, content.blocks[0].data);
 
-        // Low fidelity → degraded
         let result = apply_human_noise(&content, 0.3);
         let text = std::str::from_utf8(&result.blocks[0].data).unwrap();
         assert!(text.contains("..."));
@@ -1063,5 +1526,125 @@ mod tests {
         }).await.unwrap();
 
         assert_eq!(record.text_content(), Some("Updated content"));
+
+        // Verify text index was updated
+        let hits = engine.text_index.search("Updated", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        let hits = engine.text_index.search("Original", None, 10).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn background_decay_runs() {
+        let config = EngineConfig {
+            background_decay_interval_secs: Some(1), // 1 second for test
+            ..EngineConfig::default()
+        };
+        let engine = Arc::new(CerememoryEngine::new(config).unwrap());
+
+        // Store a record
+        engine
+            .encode_store(text_store_req("Decay me", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        engine.start_background_decay();
+        assert!(engine.is_background_decay_enabled().await);
+
+        // Wait for at least one tick
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+        engine.stop_background_decay().await;
+        assert!(!engine.is_background_decay_enabled().await);
+    }
+
+    #[tokio::test]
+    async fn background_decay_disabled_by_default() {
+        let engine = Arc::new(make_engine().await);
+        engine.start_background_decay(); // should be a no-op
+        assert!(!engine.is_background_decay_enabled().await);
+    }
+
+    #[tokio::test]
+    async fn multimodal_store_and_retrieve() {
+        let engine = make_engine().await;
+
+        // Store an image record with embedding
+        let req = EncodeStoreRequest {
+            header: None,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Image,
+                    format: "image/png".to_string(),
+                    data: vec![0x89, 0x50, 0x4E, 0x47], // PNG header bytes
+                    embedding: Some(vec![0.5, 0.3, 0.8]),
+                }],
+                summary: Some("A photo of a sunset".to_string()),
+            },
+            store: Some(StoreType::Episodic),
+            emotion: None,
+            context: None,
+            associations: None,
+        };
+
+        let resp = engine.encode_store(req).await.unwrap();
+
+        // Retrieve by ID
+        let record = engine.introspect_record(RecordIntrospectRequest {
+            header: None,
+            record_id: resp.record_id,
+            include_history: false,
+            include_associations: false,
+            include_versions: false,
+        }).await.unwrap();
+
+        assert_eq!(record.content.blocks[0].modality, Modality::Image);
+        assert_eq!(record.content.blocks[0].data, vec![0x89, 0x50, 0x4E, 0x47]);
+
+        // Search by embedding should find it
+        let query = RecallQueryRequest {
+            header: None,
+            cue: RecallCue {
+                embedding: Some(vec![0.5, 0.3, 0.8]),
+                ..Default::default()
+            },
+            stores: None,
+            limit: 10,
+            min_fidelity: None,
+            include_decayed: false,
+            reconsolidate: false,
+            activation_depth: 0,
+            recall_mode: RecallMode::Perfect,
+        };
+
+        let recall_resp = engine.recall_query(query).await.unwrap();
+        assert!(!recall_resp.memories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn size_limit_validation() {
+        let engine = make_engine().await;
+
+        // Text exceeding 1MB should fail
+        let big_text = vec![b'A'; 1_048_577]; // 1MB + 1
+        let req = EncodeStoreRequest {
+            header: None,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: big_text,
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            store: Some(StoreType::Episodic),
+            emotion: None,
+            context: None,
+            associations: None,
+        };
+
+        let result = engine.encode_store(req).await;
+        assert!(matches!(result, Err(CerememoryError::ContentTooLarge { .. })));
     }
 }
