@@ -401,9 +401,8 @@ impl CerememoryEngine {
                 if let Some(store_type) = self.coordinator.get_record_store_type(&record.id).await? {
                     // Persist fidelity changes (stability boost + reinforcement count)
                     let _ = dispatch_store!(self, store_type, update_fidelity(&record.id, record.fidelity.clone()));
-                    // NOTE: access_count and last_accessed_at are updated in the local
-                    // record (returned to caller) but not yet persisted to the store.
-                    // Phase 2 will add a dedicated Store::update_access method.
+                    // Persist access metadata (access count + last accessed timestamp)
+                    let _ = dispatch_store!(self, store_type, update_access(&record.id, record.access_count, record.last_accessed_at));
                 }
             }
 

@@ -53,6 +53,16 @@ pub trait Store: Send + Sync {
         emotion: Option<EmotionVector>,
         metadata: Option<serde_json::Value>,
     ) -> impl Future<Output = Result<(), CerememoryError>> + Send;
+
+    /// Update access metadata (access count and last accessed timestamp).
+    ///
+    /// Used by reconsolidation to persist retrieval statistics.
+    fn update_access(
+        &self,
+        id: &Uuid,
+        access_count: u32,
+        last_accessed_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = Result<(), CerememoryError>> + Send;
 }
 
 /// Graph-based association access trait.

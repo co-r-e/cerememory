@@ -210,6 +210,23 @@ impl Store for WorkingMemoryStore {
         record.version = record.version.saturating_add(1);
         Ok(())
     }
+
+    async fn update_access(
+        &self,
+        id: &Uuid,
+        access_count: u32,
+        last_accessed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), CerememoryError> {
+        let mut inner = self.inner.write().await;
+        let record = inner
+            .records
+            .get_mut(id)
+            .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
+        record.access_count = access_count;
+        record.last_accessed_at = last_accessed_at;
+        record.updated_at = Utc::now();
+        Ok(())
+    }
 }
 
 #[cfg(test)]

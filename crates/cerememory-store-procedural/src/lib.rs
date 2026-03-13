@@ -98,6 +98,24 @@ impl Store for ProceduralStore {
             None => Err(CerememoryError::RecordNotFound(id.to_string())),
         }
     }
+
+    async fn update_access(
+        &self,
+        id: &Uuid,
+        access_count: u32,
+        last_accessed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), CerememoryError> {
+        let mut records = self.records.write().await;
+        match records.get_mut(id) {
+            Some(r) => {
+                r.access_count = access_count;
+                r.last_accessed_at = last_accessed_at;
+                r.updated_at = chrono::Utc::now();
+                Ok(())
+            }
+            None => Err(CerememoryError::RecordNotFound(id.to_string())),
+        }
+    }
 }
 
 #[cfg(test)]

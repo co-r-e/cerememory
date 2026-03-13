@@ -516,6 +516,7 @@ pub enum CMPErrorCode {
     RecordNotFound,
     StoreInvalid,
     ContentTooLarge,
+    ValidationError,
     ModalityUnsupported,
     WorkingMemoryFull,
     DecayEngineBusy,
@@ -589,7 +590,7 @@ impl From<&crate::error::CerememoryError> for CMPError {
                 CMPError::new(CMPErrorCode::VersionMismatch, format!("Expected {expected}, got {got}"))
             }
             CerememoryError::Validation(msg) => {
-                CMPError::new(CMPErrorCode::StoreInvalid, format!("Validation: {msg}"))
+                CMPError::new(CMPErrorCode::ValidationError, msg.clone())
             }
             CerememoryError::Storage(msg) => {
                 CMPError::new(CMPErrorCode::InternalError, format!("Storage: {msg}"))

@@ -823,6 +823,48 @@ impl Store for SemanticStore {
         .await
         .map_err(|e| CerememoryError::Internal(e.to_string()))?
     }
+
+    async fn update_access(
+        &self,
+        id: &Uuid,
+        access_count: u32,
+        last_accessed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), CerememoryError> {
+        let db = self.db.clone();
+        let id = *id;
+        tokio::task::spawn_blocking(move || {
+            let txn = db
+                .begin_write()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            {
+                let mut nodes = txn
+                    .open_table(NODES)
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                let val = nodes
+                    .get(id.as_bytes().as_slice())
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?
+                    .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
+                let mut rec: MemoryRecord = rmp_serde::from_slice(val.value())
+                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                drop(val);
+
+                rec.access_count = access_count;
+                rec.last_accessed_at = last_accessed_at;
+                rec.updated_at = Utc::now();
+
+                let bytes = rmp_serde::to_vec(&rec)
+                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                nodes
+                    .insert(id.as_bytes().as_slice(), bytes.as_slice())
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            }
+            txn.commit()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(e.to_string()))?
+    }
 }
 
 // ---------------------------------------------------------------------------

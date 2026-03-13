@@ -287,37 +287,46 @@ impl Store for EpisodicStore {
         let db = self.db.clone();
         let id = *id;
         tokio::task::spawn_blocking(move || {
-            // First, read the record so we can remove its index entries.
-            let existing = {
-                let txn = db.begin_read().map_err(storage_err)?;
-                let table = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
-                get_record_sync(&table, &id)?
-            };
-
-            let record = match existing {
-                Some(r) => r,
-                None => return Ok(false),
-            };
-
             let txn = db.begin_write().map_err(storage_err)?;
-            {
+            let existed = {
                 let mut records = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
-                records
-                    .remove(id.as_bytes().as_slice())
-                    .map_err(storage_err)?;
 
-                let mut time_idx = txn.open_table(EPISODIC_TIME_INDEX).map_err(storage_err)?;
-                let tk = time_key(&record.created_at, &id);
-                time_idx.remove(tk.as_slice()).map_err(storage_err)?;
+                // Read within the write transaction to avoid TOCTOU
+                let existing: Option<MemoryRecord> =
+                    match records.get(id.as_bytes().as_slice()).map_err(storage_err)? {
+                        Some(guard) => {
+                            let record: MemoryRecord = rmp_serde::from_slice(guard.value())
+                                .map_err(|e| {
+                                    CerememoryError::Serialization(format!("msgpack decode: {e}"))
+                                })?;
+                            drop(guard);
+                            Some(record)
+                        }
+                        None => None,
+                    };
 
-                let mut fidelity_idx =
-                    txn.open_table(EPISODIC_FIDELITY_INDEX).map_err(storage_err)?;
-                let fk = fidelity_key(record.fidelity.score, &id);
-                fidelity_idx.remove(fk.as_slice()).map_err(storage_err)?;
-            }
+                if let Some(record) = existing {
+                    records
+                        .remove(id.as_bytes().as_slice())
+                        .map_err(storage_err)?;
+
+                    let mut time_idx =
+                        txn.open_table(EPISODIC_TIME_INDEX).map_err(storage_err)?;
+                    let tk = time_key(&record.created_at, &id);
+                    time_idx.remove(tk.as_slice()).map_err(storage_err)?;
+
+                    let mut fidelity_idx =
+                        txn.open_table(EPISODIC_FIDELITY_INDEX).map_err(storage_err)?;
+                    let fk = fidelity_key(record.fidelity.score, &id);
+                    fidelity_idx.remove(fk.as_slice()).map_err(storage_err)?;
+
+                    true
+                } else {
+                    false
+                }
+            };
             txn.commit().map_err(storage_err)?;
-
-            Ok(true)
+            Ok(existed)
         })
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
@@ -331,27 +340,29 @@ impl Store for EpisodicStore {
         let db = self.db.clone();
         let id = *id;
         tokio::task::spawn_blocking(move || {
-            // Read existing record.
-            let existing = {
-                let txn = db.begin_read().map_err(storage_err)?;
-                let table = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
-                get_record_sync(&table, &id)?
-            };
-
-            let mut record = existing.ok_or_else(|| {
-                CerememoryError::RecordNotFound(id.to_string())
-            })?;
-
-            let old_fidelity_score = record.fidelity.score;
-            record.fidelity = fidelity;
-            record.updated_at = Utc::now();
-
-            let packed = rmp_serde::to_vec(&record)
-                .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
-
             let txn = db.begin_write().map_err(storage_err)?;
             {
                 let mut records = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
+
+                // Read within the write transaction to avoid TOCTOU
+                let guard = records
+                    .get(id.as_bytes().as_slice())
+                    .map_err(storage_err)?
+                    .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
+                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
+                    .map_err(|e| {
+                        CerememoryError::Serialization(format!("msgpack decode: {e}"))
+                    })?;
+                drop(guard);
+
+                let old_fidelity_score = record.fidelity.score;
+                record.fidelity = fidelity;
+                record.updated_at = Utc::now();
+
+                let packed = rmp_serde::to_vec(&record)
+                    .map_err(|e| {
+                        CerememoryError::Serialization(format!("msgpack encode: {e}"))
+                    })?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -367,7 +378,6 @@ impl Store for EpisodicStore {
                     .map_err(storage_err)?;
             }
             txn.commit().map_err(storage_err)?;
-
             Ok(())
         })
         .await
@@ -453,40 +463,84 @@ impl Store for EpisodicStore {
         let db = self.db.clone();
         let id = *id;
         tokio::task::spawn_blocking(move || {
-            let existing = {
-                let txn = db.begin_read().map_err(storage_err)?;
-                let table = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
-                get_record_sync(&table, &id)?
-            };
-
-            let mut record = existing.ok_or_else(|| {
-                CerememoryError::RecordNotFound(id.to_string())
-            })?;
-
-            if let Some(c) = content {
-                record.content = c;
-            }
-            if let Some(e) = emotion {
-                record.emotion = e;
-            }
-            if let Some(m) = metadata {
-                record.metadata = m;
-            }
-            record.updated_at = Utc::now();
-            record.version += 1;
-
-            let packed = rmp_serde::to_vec(&record)
-                .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
-
             let txn = db.begin_write().map_err(storage_err)?;
             {
                 let mut records = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
+
+                // Read within the write transaction to avoid TOCTOU
+                let guard = records
+                    .get(id.as_bytes().as_slice())
+                    .map_err(storage_err)?
+                    .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
+                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
+                    .map_err(|e| {
+                        CerememoryError::Serialization(format!("msgpack decode: {e}"))
+                    })?;
+                drop(guard);
+
+                if let Some(c) = content {
+                    record.content = c;
+                }
+                if let Some(e) = emotion {
+                    record.emotion = e;
+                }
+                if let Some(m) = metadata {
+                    record.metadata = m;
+                }
+                record.updated_at = Utc::now();
+                record.version += 1;
+
+                let packed = rmp_serde::to_vec(&record)
+                    .map_err(|e| {
+                        CerememoryError::Serialization(format!("msgpack encode: {e}"))
+                    })?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
             }
             txn.commit().map_err(storage_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
+    }
 
+    async fn update_access(
+        &self,
+        id: &Uuid,
+        access_count: u32,
+        last_accessed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), CerememoryError> {
+        let db = self.db.clone();
+        let id = *id;
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write().map_err(storage_err)?;
+            {
+                let mut records = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
+
+                let guard = records
+                    .get(id.as_bytes().as_slice())
+                    .map_err(storage_err)?
+                    .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
+                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
+                    .map_err(|e| {
+                        CerememoryError::Serialization(format!("msgpack decode: {e}"))
+                    })?;
+                drop(guard);
+
+                record.access_count = access_count;
+                record.last_accessed_at = last_accessed_at;
+                record.updated_at = Utc::now();
+
+                let packed = rmp_serde::to_vec(&record)
+                    .map_err(|e| {
+                        CerememoryError::Serialization(format!("msgpack encode: {e}"))
+                    })?;
+                records
+                    .insert(id.as_bytes().as_slice(), packed.as_slice())
+                    .map_err(storage_err)?;
+            }
+            txn.commit().map_err(storage_err)?;
             Ok(())
         })
         .await
