@@ -821,9 +821,11 @@ impl CerememoryEngine {
                 }
             }
 
-            // Apply emotion filter (basic: check if dominant emotion matches)
-            if let Some(ref _filter) = req.emotion_filter {
-                // Emotion filtering is best-effort; include all for now
+            // Apply emotion filter: cosine similarity between emotion vectors
+            if let Some(ref filter) = req.emotion_filter {
+                if !Self::emotion_matches(&record.emotion, filter) {
+                    continue;
+                }
             }
 
             let bucket_key = Self::bucket_key(record.created_at, req.granularity);
@@ -842,6 +844,11 @@ impl CerememoryEngine {
                     if record.created_at >= req.range.start && record.created_at <= req.range.end {
                         if let Some(min_f) = req.min_fidelity {
                             if record.fidelity.score < min_f {
+                                continue;
+                            }
+                        }
+                        if let Some(ref filter) = req.emotion_filter {
+                            if !Self::emotion_matches(&record.emotion, filter) {
                                 continue;
                             }
                         }
@@ -877,6 +884,43 @@ impl CerememoryEngine {
             .collect();
 
         Ok(RecallTimelineResponse { buckets })
+    }
+
+    /// Check if a record's emotion matches the filter.
+    /// Uses cosine similarity on the 8-dimensional emotion vector (Plutchik axes).
+    /// A match requires similarity > 0.5 (moderate alignment).
+    fn emotion_matches(record_emotion: &EmotionVector, filter: &EmotionVector) -> bool {
+        let r = [
+            record_emotion.joy,
+            record_emotion.trust,
+            record_emotion.fear,
+            record_emotion.surprise,
+            record_emotion.sadness,
+            record_emotion.disgust,
+            record_emotion.anger,
+            record_emotion.anticipation,
+        ];
+        let f = [
+            filter.joy,
+            filter.trust,
+            filter.fear,
+            filter.surprise,
+            filter.sadness,
+            filter.disgust,
+            filter.anger,
+            filter.anticipation,
+        ];
+
+        let dot: f64 = r.iter().zip(f.iter()).map(|(a, b)| a * b).sum();
+        let norm_r: f64 = r.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let norm_f: f64 = f.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        if norm_r < f64::EPSILON || norm_f < f64::EPSILON {
+            return false; // Neutral emotion — no match
+        }
+
+        let similarity = dot / (norm_r * norm_f);
+        similarity > 0.5
     }
 
     fn bucket_key(ts: chrono::DateTime<Utc>, granularity: TimeGranularity) -> i64 {
@@ -1602,26 +1646,30 @@ impl CerememoryEngine {
                 .ok_or_else(|| CerememoryError::RecordNotFound(record_id.to_string()))?;
 
             let current_fidelity = record.fidelity.score;
-            let elapsed_secs = (req.forecast_at - record.last_accessed_at)
-                .num_seconds()
-                .max(0) as f64;
+            // Match real decay engine: baseline = max(last_accessed_at, last_decay_tick)
+            let last_access_secs = record.last_accessed_at.timestamp() as f64;
+            let last_tick_secs = record.fidelity.last_decay_tick.timestamp() as f64;
+            let baseline_secs = last_access_secs.max(last_tick_secs);
+            let forecast_secs = req.forecast_at.timestamp() as f64;
+            let elapsed_secs = (forecast_secs - baseline_secs).max(0.0);
 
-            // Forward-calculate fidelity using the decay formula
-            let params = self.decay.params();
+            // Use per-record decay_rate (not global params), matching real decay engine
+            let decay_exponent = record.fidelity.decay_rate;
             let emotion_mod = cerememory_decay::math::compute_emotion_mod(record.emotion.intensity);
             let forecasted_fidelity = cerememory_decay::math::compute_fidelity(
                 current_fidelity,
                 elapsed_secs,
                 record.fidelity.stability,
-                params.decay_exponent,
+                decay_exponent,
                 emotion_mod,
             );
 
             // Binary search for threshold crossing date
+            let params = self.decay.params();
             let estimated_threshold_date = if current_fidelity > params.prune_threshold {
                 Self::estimate_threshold_date(
                     &record,
-                    params.decay_exponent,
+                    decay_exponent,
                     params.prune_threshold,
                     emotion_mod,
                 )
@@ -1648,7 +1696,10 @@ impl CerememoryEngine {
         prune_threshold: f64,
         emotion_mod: f64,
     ) -> Option<chrono::DateTime<Utc>> {
-        let base_time = record.last_accessed_at;
+        // Match real decay engine: baseline = max(last_accessed_at, last_decay_tick)
+        let base_time = record
+            .last_accessed_at
+            .max(record.fidelity.last_decay_tick);
         let f0 = record.fidelity.score;
         let stability = record.fidelity.stability;
 
@@ -2799,6 +2850,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timeline_emotion_filter() {
+        let engine = make_engine().await;
+
+        // Store a record with high joy
+        let req = EncodeStoreRequest {
+            header: None,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: b"Happy event".to_vec(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            store: Some(StoreType::Episodic),
+            emotion: Some(EmotionVector {
+                joy: 0.9,
+                ..Default::default()
+            }),
+            context: None,
+            associations: None,
+        };
+        engine.encode_store(req).await.unwrap();
+
+        // Store a record with high sadness
+        let req2 = EncodeStoreRequest {
+            header: None,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: b"Sad event".to_vec(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            store: Some(StoreType::Episodic),
+            emotion: Some(EmotionVector {
+                sadness: 0.9,
+                ..Default::default()
+            }),
+            context: None,
+            associations: None,
+        };
+        engine.encode_store(req2).await.unwrap();
+
+        let now = Utc::now();
+
+        // Filter for joy — should only include the happy event
+        let resp = engine
+            .recall_timeline(RecallTimelineRequest {
+                header: None,
+                range: TemporalRange {
+                    start: now - chrono::Duration::hours(1),
+                    end: now + chrono::Duration::hours(1),
+                },
+                granularity: TimeGranularity::Hour,
+                min_fidelity: None,
+                emotion_filter: Some(EmotionVector {
+                    joy: 1.0,
+                    ..Default::default()
+                }),
+            })
+            .await
+            .unwrap();
+
+        let total: u32 = resp.buckets.iter().map(|b| b.count).sum();
+        assert_eq!(total, 1, "Only the joyful event should match");
+    }
+
+    #[tokio::test]
     async fn timeline_multi_store() {
         let engine = make_engine().await;
         engine
@@ -2983,6 +3106,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(forecast.forecasts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn decay_forecast_uses_per_record_decay_rate() {
+        let engine = make_engine().await;
+        let resp = engine
+            .encode_store(text_store_req("Test record", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        // Run a decay tick so last_decay_tick advances
+        engine
+            .lifecycle_decay_tick(DecayTickRequest {
+                header: None,
+                tick_duration_seconds: Some(3600),
+            })
+            .await
+            .unwrap();
+
+        // Forecast should use the record's own decay_rate, not global params
+        let forecast = engine
+            .introspect_decay_forecast(DecayForecastRequest {
+                header: None,
+                record_ids: vec![resp.record_id],
+                forecast_at: Utc::now() + chrono::Duration::days(30),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(forecast.forecasts.len(), 1);
+        // After a decay tick, last_decay_tick is updated, so the forecast baseline
+        // should use max(last_accessed_at, last_decay_tick) — not just last_accessed_at
+        assert!(forecast.forecasts[0].forecasted_fidelity > 0.0);
+        assert!(forecast.forecasts[0].forecasted_fidelity < 1.0);
     }
 
     // ─── introspect.evolution tests ──────────────────────────────────
