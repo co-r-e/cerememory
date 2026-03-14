@@ -539,4 +539,39 @@ mod tests {
         // Nothing should have been written
         assert_eq!(idx.count().unwrap(), 0);
     }
+
+    // --- Embedding validation negative tests ---
+
+    #[test]
+    fn search_rejects_empty_embedding() {
+        let idx = VectorIndex::open_in_memory().unwrap();
+        let result = idx.search(&[], 10);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("empty"), "error should mention empty: {err}");
+    }
+
+    #[test]
+    fn search_rejects_nan_embedding() {
+        let idx = VectorIndex::open_in_memory().unwrap();
+        let result = idx.search(&[f32::NAN, 0.5, 0.5], 10);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("NaN") || err.contains("Inf"),
+            "error should mention NaN or Inf: {err}"
+        );
+    }
+
+    #[test]
+    fn search_rejects_inf_embedding() {
+        let idx = VectorIndex::open_in_memory().unwrap();
+        let result = idx.search(&[f32::INFINITY, 0.5, 0.5], 10);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("NaN") || err.contains("Inf"),
+            "error should mention NaN or Inf: {err}"
+        );
+    }
 }

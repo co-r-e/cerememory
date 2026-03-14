@@ -2100,4 +2100,74 @@ mod tests {
         let err = format!("{:?}", result.unwrap_err());
         assert!(err.contains("encryption_key is required"));
     }
+
+    #[tokio::test]
+    async fn import_conflict_cross_store_keep_imported_count_stays_one() {
+        let engine = make_engine().await;
+
+        // Store a record in Episodic
+        let resp = engine
+            .encode_store(text_store_req("Original in episodic", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+        let record_id = resp.record_id;
+
+        // Export the archive (record is tagged as Episodic)
+        let (bytes, _) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        // Import with KeepImported — the same record exists in Episodic,
+        // and the archive also has it as Episodic. After conflict resolution
+        // with KeepImported, the old record must be deleted first and then
+        // the imported one stored. The total count must remain 1, not 2.
+        let imported = engine
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "test".to_string(),
+                strategy: ImportStrategy::Merge,
+                conflict_resolution: ConflictResolution::KeepImported,
+                decryption_key: None,
+                archive_data: Some(bytes),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 1);
+
+        // Total count must be exactly 1 — proves delete-before-store worked
+        let stats = engine.introspect_stats().await.unwrap();
+        assert_eq!(stats.total_records, 1);
+
+        // The record should still be retrievable by its original ID
+        let record = engine.get_store_record(&record_id).await.unwrap();
+        assert!(record.is_some());
+    }
+
+    #[tokio::test]
+    async fn import_strategy_replace_rejected() {
+        let engine = make_engine().await;
+
+        let result = engine
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "test".to_string(),
+                strategy: ImportStrategy::Replace,
+                conflict_resolution: ConflictResolution::KeepNewer,
+                decryption_key: None,
+                archive_data: Some(vec![]),
+            })
+            .await;
+
+        assert!(result.is_err());
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(err.contains("Replace"));
+    }
 }
