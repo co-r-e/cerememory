@@ -55,13 +55,19 @@ tantivy = "0.22"
 axum = "0.7"
 tonic = "0.12"
 prost = "0.13"
+tonic-build = "0.12"
 
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Numeric
+ordered-float = "4"
+
 # Crypto
 sha2 = "0.10"
+chacha20poly1305 = "0.10"
+rand = "0.8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -84,3 +90,4 @@ cerememory-index = { path = "crates/cerememory-index" }
 cerememory-engine = { path = "crates/cerememory-engine" }
 cerememory-archive = { path = "crates/cerememory-archive" }
 cerememory-transport-http = { path = "crates/cerememory-transport-http" }
+cerememory-transport-grpc = { path = "crates/cerememory-transport-grpc" }

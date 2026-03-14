@@ -53,6 +53,8 @@ use cerememory_store_working::WorkingMemoryStore;
 pub struct EngineConfig {
     pub episodic_path: Option<String>,
     pub semantic_path: Option<String>,
+    pub procedural_path: Option<String>,
+    pub emotional_path: Option<String>,
     pub working_capacity: usize,
     pub decay_params: DecayParams,
     pub recall_mode: RecallMode,
@@ -69,6 +71,8 @@ impl Default for EngineConfig {
         Self {
             episodic_path: None,
             semantic_path: None,
+            procedural_path: None,
+            emotional_path: None,
             working_capacity: 7,
             decay_params: DecayParams::default(),
             recall_mode: RecallMode::Human,
@@ -137,14 +141,24 @@ impl CerememoryEngine {
             None => VectorIndex::open_in_memory()?,
         };
 
+        let procedural = match &config.procedural_path {
+            Some(p) => ProceduralStore::open(p)?,
+            None => ProceduralStore::open_in_memory()?,
+        };
+
+        let emotional = match &config.emotional_path {
+            Some(p) => EmotionalStore::open(p)?,
+            None => EmotionalStore::open_in_memory()?,
+        };
+
         let coordinator = Arc::new(HippocampalCoordinator::new());
         let activation = SpreadingActivationEngine::new(Arc::clone(&coordinator));
 
         Ok(Self {
             episodic,
             semantic,
-            procedural: ProceduralStore::new(),
-            emotional: EmotionalStore::new(),
+            procedural,
+            emotional,
             working: WorkingMemoryStore::with_capacity(config.working_capacity),
             decay: PowerLawDecayEngine::new(config.decay_params),
             activation,
@@ -243,6 +257,7 @@ impl CerememoryEngine {
             StoreType::Episodic,
             StoreType::Semantic,
             StoreType::Procedural,
+            StoreType::Emotional,
         ] {
             let ids = dispatch_store!(self, store_type, list_ids())?;
             for id in ids {
@@ -516,6 +531,7 @@ impl CerememoryEngine {
                 StoreType::Episodic,
                 StoreType::Semantic,
                 StoreType::Procedural,
+                StoreType::Emotional,
                 StoreType::Working,
             ]
         });
@@ -693,6 +709,15 @@ impl CerememoryEngine {
             });
         }
 
+        // Notify evolution engine about recall performance
+        if !memories.is_empty() {
+            let hit_count = memories.iter().filter(|m| m.relevance_score > 0.0).count();
+            let hit_rate = hit_count as f64 / memories.len() as f64;
+            // Use the first memory's store type as representative
+            let store = memories[0].record.store;
+            self.evolution.observe_recall(store, hit_rate);
+        }
+
         Ok(RecallQueryResponse {
             memories,
             activation_trace: None,
@@ -834,6 +859,7 @@ impl CerememoryEngine {
             StoreType::Episodic,
             StoreType::Semantic,
             StoreType::Procedural,
+            StoreType::Emotional,
         ] {
             let ids = dispatch_store!(self, store_type, list_ids())?;
             for id in ids {
@@ -867,6 +893,20 @@ impl CerememoryEngine {
                     dispatch_store!(self, store_type, update_fidelity(&output.id, output.new_fidelity.clone()))?;
                 }
             }
+        }
+
+        // Notify evolution engine about fidelity distributions
+        let mut fidelity_by_store: HashMap<StoreType, Vec<f64>> = HashMap::new();
+        for output in &result.updates {
+            if let Some(&store_type) = record_stores.get(&output.id) {
+                fidelity_by_store
+                    .entry(store_type)
+                    .or_default()
+                    .push(output.new_fidelity.score);
+            }
+        }
+        for (store_type, scores) in &fidelity_by_store {
+            self.evolution.observe_decay_tick(*store_type, scores);
         }
 
         info!(
@@ -941,37 +981,96 @@ impl CerememoryEngine {
         Ok(deleted)
     }
 
-    /// lifecycle.export — Export all records to a CMA archive.
-    pub async fn lifecycle_export(&self, _req: ExportRequest) -> Result<ExportResponse, CerememoryError> {
-        let mut records = Vec::new();
+    /// lifecycle.export — Export records to a CMA archive with optional store
+    /// filtering and encryption.
+    pub async fn lifecycle_export(
+        &self,
+        req: ExportRequest,
+    ) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
+        let records = self.collect_all_records().await?;
 
-        for store_type in [
-            StoreType::Episodic,
-            StoreType::Semantic,
-            StoreType::Procedural,
-            StoreType::Emotional,
-            StoreType::Working,
-        ] {
-            let ids = dispatch_store!(self, store_type, list_ids())?;
-            for id in ids {
-                if let Some((record, _)) = self.get_store_record(&id).await? {
-                    records.push(record);
-                }
-            }
+        let encryption_key = if req.encrypt {
+            let key_str = req.encryption_key.as_deref().ok_or_else(|| {
+                CerememoryError::Validation(
+                    "encryption_key is required when encrypt=true".to_string(),
+                )
+            })?;
+            Some(cerememory_archive::crypto::derive_key(key_str))
+        } else {
+            None
+        };
+
+        cerememory_archive::export_filtered(
+            &records,
+            req.stores.as_deref(),
+            encryption_key.as_ref(),
+        )
+    }
+
+    /// lifecycle.import — Import records from a CMA archive with optional
+    /// decryption and conflict resolution.
+    pub async fn lifecycle_import(&self, req: ImportRequest) -> Result<u32, CerememoryError> {
+        if req.strategy == ImportStrategy::Replace {
+            return Err(CerememoryError::Validation(
+                "ImportStrategy::Replace is not yet supported; use Merge".to_string(),
+            ));
         }
 
-        let (_, resp) = cerememory_archive::export(&records)?;
-        Ok(resp)
+        let data = req.archive_data.ok_or_else(|| {
+            CerememoryError::ImportConflict("Import requires archive_data".to_string())
+        })?;
+
+        let decryption_key = req
+            .decryption_key
+            .as_deref()
+            .map(cerememory_archive::crypto::derive_key);
+        let records =
+            cerememory_archive::import_records_with_key(&data, decryption_key.as_ref())?;
+
+        let conflict_resolution = req.conflict_resolution;
+        let mut imported = 0u32;
+
+        for record in records {
+            let store_type = record.store;
+
+            // Check for ID conflicts
+            if let Some((existing, existing_store)) = self.get_store_record(&record.id).await? {
+                match conflict_resolution {
+                    ConflictResolution::KeepExisting => continue,
+                    ConflictResolution::KeepImported => {
+                        // Delete existing, then store new
+                        dispatch_store!(self, existing_store, delete(&record.id))?;
+                        self.coordinator.unregister(&record.id).await;
+                        self.unindex_record(record.id);
+                    }
+                    ConflictResolution::KeepNewer => {
+                        if record.updated_at <= existing.updated_at {
+                            continue;
+                        }
+                        dispatch_store!(self, existing_store, delete(&record.id))?;
+                        self.coordinator.unregister(&record.id).await;
+                        self.unindex_record(record.id);
+                    }
+                }
+            }
+
+            dispatch_store!(self, store_type, store(record.clone()))?;
+            self.coordinator
+                .register(record.id, store_type, record.associations.clone())
+                .await;
+            if let Err(e) = self.index_record(&record) {
+                warn!(error = %e, record_id = %record.id, "Failed to index imported record");
+            }
+            imported += 1;
+        }
+
+        info!(imported, "Import completed");
+        Ok(imported)
     }
 
-    /// lifecycle.import — Import records from a CMA archive.
-    pub async fn lifecycle_import(&self, _req: ImportRequest) -> Result<(), CerememoryError> {
-        Err(CerememoryError::Internal(
-            "Import requires archive_data. Use import_records() directly.".to_string(),
-        ))
-    }
-
-    /// Import records from a serialized CMA archive.
+    /// Import records from a serialized CMA archive (convenience method).
+    ///
+    /// Uses `KeepExisting` conflict resolution (skips duplicates).
     pub async fn import_records(&self, data: &[u8]) -> Result<u32, CerememoryError> {
         let records = cerememory_archive::import_records(data)?;
         let mut imported = 0u32;
@@ -1646,5 +1745,359 @@ mod tests {
 
         let result = engine.encode_store(req).await;
         assert!(matches!(result, Err(CerememoryError::ContentTooLarge { .. })));
+    }
+
+    // ─── Export/Import API tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn lifecycle_export_returns_bytes_and_response() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(text_store_req("Export me", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        let (bytes, resp) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.record_count, 1);
+        assert!(!bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_export_store_filter() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(text_store_req("Episodic", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+        engine
+            .encode_store(text_store_req("Semantic", Some(StoreType::Semantic)))
+            .await
+            .unwrap();
+
+        let (_, resp) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: Some(vec![StoreType::Episodic]),
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.record_count, 1);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_export_encrypted_roundtrip() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(text_store_req("Secret data", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        let (encrypted_bytes, resp) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                encrypt: true,
+                encryption_key: Some("my-passphrase".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.record_count, 1);
+
+        // Verify the encrypted data cannot be imported without the key
+        let result = engine.import_records(&encrypted_bytes).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_import_with_archive_data() {
+        let engine = make_engine().await;
+
+        // Store a record and export it
+        engine
+            .encode_store(text_store_req("Import me", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        let (bytes, _) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        // Create a fresh engine and import
+        let engine2 = make_engine().await;
+        let imported = engine2
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "test".to_string(),
+                strategy: ImportStrategy::Merge,
+                conflict_resolution: ConflictResolution::KeepExisting,
+                decryption_key: None,
+                archive_data: Some(bytes),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 1);
+        let stats = engine2.introspect_stats().await.unwrap();
+        assert_eq!(stats.total_records, 1);
+    }
+
+    #[tokio::test]
+    async fn import_conflict_keep_existing() {
+        let engine = make_engine().await;
+
+        // Store a record
+        let resp = engine
+            .encode_store(text_store_req("Original", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        // Export it
+        let (bytes, _) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        // Import with keep_existing — should skip the duplicate
+        let imported = engine
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "test".to_string(),
+                strategy: ImportStrategy::Merge,
+                conflict_resolution: ConflictResolution::KeepExisting,
+                decryption_key: None,
+                archive_data: Some(bytes),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 0);
+        let record = engine.introspect_record(RecordIntrospectRequest {
+            header: None,
+            record_id: resp.record_id,
+            include_history: false,
+            include_associations: false,
+            include_versions: false,
+        }).await.unwrap();
+        assert_eq!(record.text_content(), Some("Original"));
+    }
+
+    #[tokio::test]
+    async fn import_conflict_keep_imported() {
+        let engine = make_engine().await;
+
+        // Store a record
+        let resp = engine
+            .encode_store(text_store_req("Original text", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        // Export
+        let (bytes, _) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        // Import with keep_imported — should replace the existing record
+        let imported = engine
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "test".to_string(),
+                strategy: ImportStrategy::Merge,
+                conflict_resolution: ConflictResolution::KeepImported,
+                decryption_key: None,
+                archive_data: Some(bytes),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 1);
+        // Record should still exist (replaced with same data)
+        let record = engine.get_store_record(&resp.record_id).await.unwrap();
+        assert!(record.is_some());
+    }
+
+    #[tokio::test]
+    async fn import_conflict_keep_newer() {
+        let engine = make_engine().await;
+
+        // Store a record
+        let resp = engine
+            .encode_store(text_store_req("First version", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        // Export the archive (captures the record with its current timestamp)
+        let (bytes, _) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        // Update the record so the in-store version is newer
+        engine
+            .encode_update(EncodeUpdateRequest {
+                header: None,
+                record_id: resp.record_id,
+                content: Some(MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Text,
+                        format: "text/plain".to_string(),
+                        data: b"Updated version".to_vec(),
+                        embedding: None,
+                    }],
+                    summary: None,
+                }),
+                emotion: None,
+                metadata: None,
+            })
+            .await
+            .unwrap();
+
+        // Import with keep_newer — the archive version is older, so it should be skipped
+        let imported = engine
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "test".to_string(),
+                strategy: ImportStrategy::Merge,
+                conflict_resolution: ConflictResolution::KeepNewer,
+                decryption_key: None,
+                archive_data: Some(bytes),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 0);
+        let record = engine.introspect_record(RecordIntrospectRequest {
+            header: None,
+            record_id: resp.record_id,
+            include_history: false,
+            include_associations: false,
+            include_versions: false,
+        }).await.unwrap();
+        assert_eq!(record.text_content(), Some("Updated version"));
+    }
+
+    #[tokio::test]
+    async fn import_encrypted_archive() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(text_store_req("Encrypted import", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        let (encrypted, _) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                encrypt: true,
+                encryption_key: Some("pass123".to_string()),
+            })
+            .await
+            .unwrap();
+
+        // Import into a fresh engine with the correct key
+        let engine2 = make_engine().await;
+        let imported = engine2
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "test".to_string(),
+                strategy: ImportStrategy::Merge,
+                conflict_resolution: ConflictResolution::KeepExisting,
+                decryption_key: Some("pass123".to_string()),
+                archive_data: Some(encrypted),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 1);
+    }
+
+    #[tokio::test]
+    async fn import_missing_archive_data() {
+        let engine = make_engine().await;
+
+        let result = engine
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "test".to_string(),
+                strategy: ImportStrategy::Merge,
+                conflict_resolution: ConflictResolution::KeepExisting,
+                decryption_key: None,
+                archive_data: None,
+            })
+            .await;
+
+        assert!(result.is_err());
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(err.contains("archive_data"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_export_encrypt_without_key_fails() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(text_store_req("Some data", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        let result = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                encrypt: true,
+                encryption_key: None,
+            })
+            .await;
+
+        assert!(result.is_err());
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(err.contains("encryption_key is required"));
     }
 }

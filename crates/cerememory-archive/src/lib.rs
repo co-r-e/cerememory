@@ -7,13 +7,14 @@
 //! - Lines 2..N: One MemoryRecord per line (JSON)
 //! - Last line: Footer (SHA-256 checksum of record lines)
 
+pub mod crypto;
 pub mod exporter;
 pub mod format;
 pub mod importer;
 
 use cerememory_core::error::CerememoryError;
 use cerememory_core::protocol::ExportResponse;
-use cerememory_core::types::MemoryRecord;
+use cerememory_core::types::{MemoryRecord, StoreType};
 
 /// Export records to CMA archive format. Returns both the archive bytes and metadata.
 pub fn export(records: &[MemoryRecord]) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
@@ -29,6 +30,57 @@ pub fn export_to_bytes(records: &[MemoryRecord]) -> Result<Vec<u8>, CerememoryEr
 /// Import records from CMA archive bytes with checksum verification.
 pub fn import_records(data: &[u8]) -> Result<Vec<MemoryRecord>, CerememoryError> {
     importer::import(data)
+}
+
+/// Export records with optional store filtering and encryption.
+///
+/// When `stores` is `Some`, only records whose `store` field matches one of
+/// the given store types are included. When `encryption_key` is `Some`, the
+/// serialized archive is encrypted with ChaCha20-Poly1305 AEAD.
+pub fn export_filtered(
+    records: &[MemoryRecord],
+    stores: Option<&[StoreType]>,
+    encryption_key: Option<&[u8; 32]>,
+) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
+    // Filter by stores if specified
+    let filtered: Vec<&MemoryRecord> = if let Some(store_filter) = stores {
+        records
+            .iter()
+            .filter(|r| store_filter.contains(&r.store))
+            .collect()
+    } else {
+        records.iter().collect()
+    };
+
+    // Convert to owned for serialization
+    let owned: Vec<MemoryRecord> = filtered.into_iter().cloned().collect();
+    let (bytes, resp) = export(&owned)?;
+
+    // Encrypt if key provided
+    if let Some(key) = encryption_key {
+        let encrypted = crypto::encrypt(&bytes, key)?;
+        let mut resp = resp;
+        resp.size_bytes = encrypted.len() as u64;
+        Ok((encrypted, resp))
+    } else {
+        Ok((bytes, resp))
+    }
+}
+
+/// Import records with optional decryption.
+///
+/// If `decryption_key` is `Some`, the data is decrypted before parsing.
+/// Otherwise, the data is treated as plaintext CMA archive bytes.
+pub fn import_records_with_key(
+    data: &[u8],
+    decryption_key: Option<&[u8; 32]>,
+) -> Result<Vec<MemoryRecord>, CerememoryError> {
+    let plaintext = if let Some(key) = decryption_key {
+        crypto::decrypt(data, key)?
+    } else {
+        data.to_vec()
+    };
+    import_records(&plaintext)
 }
 
 #[cfg(test)]
@@ -148,5 +200,111 @@ mod tests {
         assert_eq!(resp.record_count, 5);
         assert_eq!(resp.size_bytes, bytes.len() as u64);
         assert!(!resp.checksum.is_empty());
+    }
+
+    // ─── Store filter tests ─────────────────────────────────────────
+
+    fn make_mixed_records() -> Vec<MemoryRecord> {
+        vec![
+            MemoryRecord::new_text(StoreType::Episodic, "Episodic memory 1".to_string()),
+            MemoryRecord::new_text(StoreType::Semantic, "Semantic memory 1".to_string()),
+            MemoryRecord::new_text(StoreType::Procedural, "Procedural memory 1".to_string()),
+            MemoryRecord::new_text(StoreType::Episodic, "Episodic memory 2".to_string()),
+            MemoryRecord::new_text(StoreType::Emotional, "Emotional memory 1".to_string()),
+        ]
+    }
+
+    #[test]
+    fn export_single_store_filter() {
+        let records = make_mixed_records();
+        let (bytes, resp) =
+            export_filtered(&records, Some(&[StoreType::Episodic]), None).unwrap();
+        assert_eq!(resp.record_count, 2);
+        let imported = import_records(&bytes).unwrap();
+        assert_eq!(imported.len(), 2);
+        assert!(imported.iter().all(|r| r.store == StoreType::Episodic));
+    }
+
+    #[test]
+    fn export_multi_store_filter() {
+        let records = make_mixed_records();
+        let (bytes, resp) = export_filtered(
+            &records,
+            Some(&[StoreType::Semantic, StoreType::Procedural]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(resp.record_count, 2);
+        let imported = import_records(&bytes).unwrap();
+        assert_eq!(imported.len(), 2);
+        assert!(imported
+            .iter()
+            .all(|r| r.store == StoreType::Semantic || r.store == StoreType::Procedural));
+    }
+
+    #[test]
+    fn export_no_filter() {
+        let records = make_mixed_records();
+        let (_, resp) = export_filtered(&records, None, None).unwrap();
+        assert_eq!(resp.record_count, 5);
+    }
+
+    #[test]
+    fn export_encrypted() {
+        let records = make_records(3);
+        let key = crypto::derive_key("test-key");
+        let (encrypted_bytes, resp) = export_filtered(&records, None, Some(&key)).unwrap();
+        assert_eq!(resp.record_count, 3);
+
+        // Encrypted data should not be valid CMA archive
+        let result = import_records(&encrypted_bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypted_roundtrip() {
+        let records = make_records(5);
+        let key = crypto::derive_key("roundtrip-key");
+
+        let (encrypted, _) = export_filtered(&records, None, Some(&key)).unwrap();
+        let imported = import_records_with_key(&encrypted, Some(&key)).unwrap();
+        assert_eq!(imported.len(), 5);
+        for (orig, imp) in records.iter().zip(imported.iter()) {
+            assert_eq!(orig.id, imp.id);
+            assert_eq!(orig.text_content(), imp.text_content());
+        }
+    }
+
+    #[test]
+    fn encrypted_wrong_key_fails() {
+        let records = make_records(2);
+        let key = crypto::derive_key("correct-key");
+        let wrong = crypto::derive_key("wrong-key");
+
+        let (encrypted, _) = export_filtered(&records, None, Some(&key)).unwrap();
+        let result = import_records_with_key(&encrypted, Some(&wrong));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unencrypted_import_with_no_key() {
+        let records = make_records(3);
+        let bytes = export_to_bytes(&records).unwrap();
+        let imported = import_records_with_key(&bytes, None).unwrap();
+        assert_eq!(imported.len(), 3);
+    }
+
+    #[test]
+    fn export_filter_and_encrypt_combined() {
+        let records = make_mixed_records();
+        let key = crypto::derive_key("combined-test");
+
+        let (encrypted, resp) =
+            export_filtered(&records, Some(&[StoreType::Emotional]), Some(&key)).unwrap();
+        assert_eq!(resp.record_count, 1);
+
+        let imported = import_records_with_key(&encrypted, Some(&key)).unwrap();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].store, StoreType::Emotional);
     }
 }

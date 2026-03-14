@@ -947,8 +947,10 @@ mod tests {
         let rec = make_record("Fidelity test");
         let id = store.store(rec).await.unwrap();
 
-        let mut new_fidelity = FidelityState::default();
-        new_fidelity.score = 0.42;
+        let new_fidelity = FidelityState {
+            score: 0.42,
+            ..Default::default()
+        };
         store.update_fidelity(&id, new_fidelity).await.unwrap();
 
         let fetched = store.get(&id).await.unwrap().unwrap();

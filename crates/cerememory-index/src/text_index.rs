@@ -228,6 +228,55 @@ impl TextIndex {
         Ok(hits)
     }
 
+    /// Add multiple documents in a single write transaction (one lock, one commit).
+    /// Uses upsert semantics: deletes any existing document with the same ID
+    /// before adding the new one, preventing duplicates.
+    pub fn add_batch(
+        &self,
+        records: &[(Uuid, StoreType, &str, Option<&str>)],
+    ) -> Result<(), CerememoryError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut writer = self.lock_writer()?;
+        for (id, store_type, body, summary) in records {
+            // Delete existing document first (upsert semantics)
+            let term = tantivy::Term::from_field_text(self.fields.id, &id.to_string());
+            writer.delete_term(term);
+
+            let mut doc = TantivyDocument::new();
+            doc.add_text(self.fields.id, id.to_string());
+            doc.add_text(self.fields.store_type, store_type.to_string());
+            doc.add_text(self.fields.body, body);
+            if let Some(s) = summary {
+                doc.add_text(self.fields.summary, s);
+            }
+            writer.add_document(doc).map_err(|e| {
+                CerememoryError::Storage(format!("Failed to add document to text index: {e}"))
+            })?;
+        }
+        writer.commit().map_err(|e| {
+            CerememoryError::Storage(format!("Failed to commit text index: {e}"))
+        })?;
+        Ok(())
+    }
+
+    /// Remove multiple documents in a single write transaction.
+    pub fn remove_batch(&self, ids: &[Uuid]) -> Result<(), CerememoryError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut writer = self.lock_writer()?;
+        for id in ids {
+            let term = tantivy::Term::from_field_text(self.fields.id, &id.to_string());
+            writer.delete_term(term);
+        }
+        writer.commit().map_err(|e| {
+            CerememoryError::Storage(format!("Failed to commit text index removal: {e}"))
+        })?;
+        Ok(())
+    }
+
     /// Rebuild the entire index from a set of records.
     pub fn rebuild(
         &self,
@@ -400,5 +449,86 @@ mod tests {
         let hits = idx.search("quick brown", None, 10).unwrap();
         assert!(!hits.is_empty());
         assert_eq!(hits[0].record_id, id);
+    }
+
+    // --- Batch tests ---
+
+    #[test]
+    fn add_batch_commit() {
+        let idx = TextIndex::open_in_memory().unwrap();
+        let id1 = Uuid::now_v7();
+        let id2 = Uuid::now_v7();
+
+        idx.add_batch(&[
+            (id1, StoreType::Episodic, "First batch record", None),
+            (id2, StoreType::Semantic, "Second batch record", Some("summary")),
+        ])
+        .unwrap();
+
+        // Both should be searchable
+        let hits = idx.search("batch record", None, 10).unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn add_batch_empty() {
+        let idx = TextIndex::open_in_memory().unwrap();
+        // Empty batch should be a no-op without error
+        idx.add_batch(&[]).unwrap();
+    }
+
+    #[test]
+    fn add_batch_searchable() {
+        let idx = TextIndex::open_in_memory().unwrap();
+        let id1 = Uuid::now_v7();
+        let id2 = Uuid::now_v7();
+        let id3 = Uuid::now_v7();
+
+        idx.add_batch(&[
+            (id1, StoreType::Episodic, "Apples are delicious fruit", None),
+            (id2, StoreType::Semantic, "Bananas contain potassium", None),
+            (id3, StoreType::Episodic, "Cherries grow on trees", None),
+        ])
+        .unwrap();
+
+        let hits = idx.search("potassium", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record_id, id2);
+
+        // Filter by store type
+        let hits = idx
+            .search("delicious OR potassium OR trees", Some(&[StoreType::Episodic]), 10)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn remove_batch() {
+        let idx = TextIndex::open_in_memory().unwrap();
+        let id1 = Uuid::now_v7();
+        let id2 = Uuid::now_v7();
+        let id3 = Uuid::now_v7();
+
+        idx.add_batch(&[
+            (id1, StoreType::Episodic, "Alpha content", None),
+            (id2, StoreType::Episodic, "Beta content", None),
+            (id3, StoreType::Episodic, "Gamma content", None),
+        ])
+        .unwrap();
+
+        // Remove two in a single batch
+        idx.remove_batch(&[id1, id2]).unwrap();
+
+        // Only id3 should remain
+        let hits = idx.search("content", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record_id, id3);
+    }
+
+    #[test]
+    fn remove_batch_empty() {
+        let idx = TextIndex::open_in_memory().unwrap();
+        // Empty remove batch should be a no-op without error
+        idx.remove_batch(&[]).unwrap();
     }
 }

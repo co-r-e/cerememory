@@ -19,6 +19,7 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 tantivy = { workspace = true }
 redb = { workspace = true }
+ordered-float = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

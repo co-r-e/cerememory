@@ -442,7 +442,7 @@ mod tests {
 
         // Readers + deleters in parallel
         let mut handles = Vec::new();
-        for id in ids.iter().copied() {
+        for &id in &ids {
             let s = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
                 // Read

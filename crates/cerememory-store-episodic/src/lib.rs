@@ -880,9 +880,11 @@ mod tests {
         let id = store.store(record).await.unwrap();
 
         // Update fidelity to 0.3
-        let mut new_fidelity = FidelityState::default();
-        new_fidelity.score = 0.3;
-        new_fidelity.noise_level = 0.5;
+        let new_fidelity = FidelityState {
+            score: 0.3,
+            noise_level: 0.5,
+            ..Default::default()
+        };
         store.update_fidelity(&id, new_fidelity).await.unwrap();
 
         // Verify the record has updated fidelity

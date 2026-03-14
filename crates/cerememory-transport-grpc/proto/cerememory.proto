@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+package cerememory.v1;
+
+// CMP (Cerememory Protocol) gRPC service.
+//
+// Complex CMP types are serialized as JSON bytes in `json_payload` fields.
+// This avoids duplicating the entire CMP type system in protobuf while
+// still benefiting from gRPC's streaming, flow control, and HTTP/2.
+service CerememoryService {
+  // ── Encode operations ──
+  rpc EncodeStore(EncodeStoreRequest) returns (EncodeStoreResponse);
+  rpc EncodeBatch(EncodeBatchRequest) returns (EncodeBatchResponse);
+  rpc EncodeUpdate(EncodeUpdateRequest) returns (Empty);
+
+  // ── Recall operations ──
+  rpc RecallQuery(RecallQueryRequest) returns (RecallQueryResponse);
+  rpc RecallAssociate(RecallAssociateRequest) returns (RecallAssociateResponse);
+
+  // ── Lifecycle operations ──
+  rpc Consolidate(ConsolidateRequest) returns (ConsolidateResponse);
+  rpc DecayTick(DecayTickRequest) returns (DecayTickResponse);
+  rpc SetMode(SetModeRequest) returns (Empty);
+  rpc Forget(ForgetRequest) returns (ForgetResponse);
+  rpc Export(ExportRequest) returns (stream ExportChunk);
+  rpc Import(stream ImportChunk) returns (ImportResponse);
+
+  // ── Introspect operations ──
+  rpc Stats(Empty) returns (StatsResponse);
+  rpc IntrospectRecord(IntrospectRecordRequest) returns (RecordResponse);
+}
+
+// Shared empty message (avoids google.protobuf.Empty dependency).
+message Empty {}
+
+// ── Encode ──
+
+message EncodeStoreRequest {
+  bytes json_payload = 1;
+}
+
+message EncodeStoreResponse {
+  bytes json_payload = 1;
+}
+
+message EncodeBatchRequest {
+  bytes json_payload = 1;
+}
+
+message EncodeBatchResponse {
+  bytes json_payload = 1;
+}
+
+message EncodeUpdateRequest {
+  bytes json_payload = 1;
+}
+
+// ── Recall ──
+
+message RecallQueryRequest {
+  bytes json_payload = 1;
+}
+
+message RecallQueryResponse {
+  bytes json_payload = 1;
+}
+
+message RecallAssociateRequest {
+  bytes json_payload = 1;
+}
+
+message RecallAssociateResponse {
+  bytes json_payload = 1;
+}
+
+// ── Lifecycle ──
+
+message ConsolidateRequest {
+  bytes json_payload = 1;
+}
+
+message ConsolidateResponse {
+  bytes json_payload = 1;
+}
+
+message DecayTickRequest {
+  bytes json_payload = 1;
+}
+
+message DecayTickResponse {
+  bytes json_payload = 1;
+}
+
+message SetModeRequest {
+  bytes json_payload = 1;
+}
+
+message ForgetRequest {
+  bytes json_payload = 1;
+}
+
+message ForgetResponse {
+  uint32 records_deleted = 1;
+}
+
+message ExportRequest {
+  bytes json_payload = 1;
+}
+
+// A chunk of export archive data (server-streaming).
+// The first chunk carries json_metadata with the ExportResponse (archive_id,
+// size_bytes, record_count, checksum). Subsequent chunks carry only data.
+message ExportChunk {
+  bytes data = 1;
+  bool is_last = 2;
+  bytes json_metadata = 3;
+}
+
+// A chunk of import archive data (client-streaming).
+// The first chunk should carry json_metadata with the ImportRequest fields
+// (strategy, conflict_resolution, etc.).  Subsequent chunks carry only data.
+message ImportChunk {
+  bytes data = 1;
+  bytes json_metadata = 2;
+}
+
+message ImportResponse {
+  uint32 records_imported = 1;
+}
+
+// ── Introspect ──
+
+message StatsResponse {
+  bytes json_payload = 1;
+}
+
+message IntrospectRecordRequest {
+  string record_id = 1;
+}
+
+message RecordResponse {
+  bytes json_payload = 1;
+}

@@ -8,15 +8,30 @@ publish = false
 name = "phase1"
 path = "phase1.rs"
 
+[[test]]
+name = "phase2"
+path = "phase2.rs"
+
+[[test]]
+name = "phase3"
+path = "phase3.rs"
+
 [dependencies]
 
 [dev-dependencies]
 cerememory-core = { path = "../../crates/cerememory-core" }
 cerememory-engine = { path = "../../crates/cerememory-engine" }
+cerememory-archive = { path = "../../crates/cerememory-archive" }
 cerememory-transport-http = { path = "../../crates/cerememory-transport-http" }
+cerememory-transport-grpc = { path = "../../crates/cerememory-transport-grpc" }
+cerememory-store-procedural = { path = "../../crates/cerememory-store-procedural" }
+cerememory-store-emotional = { path = "../../crates/cerememory-store-emotional" }
 tokio = { version = "1", features = ["full", "test-util"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v7"] }
 tower = { version = "0.5", features = ["util"] }
 axum = { version = "0.7", features = ["json"] }
 http-body-util = "0.1"
+tempfile = "3"
+tonic = "0.12"
+chrono = { version = "0.4", features = ["serde"] }

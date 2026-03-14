@@ -28,11 +28,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the HTTP server
+    /// Start the HTTP server (and optionally a gRPC server)
     Serve {
-        /// Port to listen on
+        /// HTTP port to listen on
         #[arg(long, default_value = "8420")]
         port: u16,
+
+        /// gRPC port (disabled if not specified)
+        #[arg(long)]
+        grpc_port: Option<u16>,
     },
 
     /// Store a new memory record
@@ -128,6 +132,8 @@ fn build_config(data_dir: &str, background_decay_interval_secs: Option<u64>) -> 
     EngineConfig {
         episodic_path: Some(format!("{data_dir}/episodic.redb")),
         semantic_path: Some(format!("{data_dir}/semantic.redb")),
+        procedural_path: Some(format!("{data_dir}/procedural.redb")),
+        emotional_path: Some(format!("{data_dir}/emotional.redb")),
         index_path: Some(format!("{data_dir}/text_index")),
         vector_index_path: Some(format!("{data_dir}/vectors.redb")),
         background_decay_interval_secs,
@@ -150,16 +156,34 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Serve uses its own engine lifecycle with background decay
-    if let Commands::Serve { port } = &cli.command {
+    if let Commands::Serve { port, grpc_port } = &cli.command {
         std::fs::create_dir_all(&cli.data_dir).context("Failed to create data directory")?;
         let config = build_config(&cli.data_dir, Some(3600));
         let engine = Arc::new(CerememoryEngine::new(config)?);
         engine.rebuild_coordinator().await?;
         engine.start_background_decay();
 
-        let addr = format!("0.0.0.0:{port}");
         println!("Cerememory v{}", env!("CARGO_PKG_VERSION"));
-        println!("Listening on {addr}");
+
+        // Optionally start gRPC server on a separate port.
+        if let Some(grpc_port) = grpc_port {
+            let engine_grpc = Arc::clone(&engine);
+            let grpc_addr = format!("0.0.0.0:{grpc_port}");
+            // Verify the gRPC port is bindable before starting
+            let listener = tokio::net::TcpListener::bind(&grpc_addr)
+                .await
+                .with_context(|| format!("Failed to bind gRPC port {grpc_port}"))?;
+            drop(listener);
+            println!("gRPC listening on {grpc_addr}");
+            tokio::spawn(async move {
+                if let Err(e) = cerememory_transport_grpc::serve(engine_grpc, &grpc_addr).await {
+                    tracing::error!(error = %e, "gRPC server failed");
+                }
+            });
+        }
+
+        let addr = format!("0.0.0.0:{port}");
+        println!("HTTP  listening on {addr}");
         cerememory_transport_http::serve(engine, &addr)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -204,8 +228,8 @@ async fn main() -> Result<()> {
                 associations: None,
             };
 
-            if matches!(store_type, StoreType::Procedural | StoreType::Emotional | StoreType::Working) {
-                eprintln!("Warning: {} store is in-memory only and will not persist across restarts", store_type);
+            if store_type == StoreType::Working {
+                eprintln!("Warning: working store is in-memory only and will not persist across restarts");
             }
 
             let resp = engine.encode_store(req).await?;

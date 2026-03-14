@@ -17,6 +17,7 @@ cerememory-core = { workspace = true }
 cerememory-engine = { workspace = true }
 cerememory-archive = { workspace = true }
 cerememory-transport-http = { workspace = true, features = [] }
+cerememory-transport-grpc = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

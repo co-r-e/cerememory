@@ -394,11 +394,12 @@ pub struct ExportResponse {
 }
 
 /// Import conflict resolution strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictResolution {
     KeepExisting,
     KeepImported,
+    #[default]
     KeepNewer,
 }
 
@@ -422,6 +423,9 @@ pub struct ImportRequest {
     pub conflict_resolution: ConflictResolution,
     #[serde(default)]
     pub decryption_key: Option<String>,
+    /// Raw CMA archive bytes (optionally encrypted).
+    #[serde(default)]
+    pub archive_data: Option<Vec<u8>>,
 }
 
 fn default_import_strategy() -> ImportStrategy {
