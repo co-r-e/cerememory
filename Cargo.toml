@@ -64,6 +64,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Numeric
 ordered-float = "4"
 
+# ANN (Approximate Nearest Neighbor)
+hnsw_rs = "0.3"
+
 # Crypto
 sha2 = "0.10"
 chacha20poly1305 = "0.10"

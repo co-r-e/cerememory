@@ -1,9 +1,11 @@
-//! Brute-force cosine similarity vector search for Cerememory.
+//! Dual-mode vector search for Cerememory.
 //!
-//! Stores embedding vectors in redb and performs exhaustive nearest-neighbor
-//! search using a BinaryHeap for O(n log k) top-k selection.
-//! Sufficient for the expected scale (thousands to tens of thousands
-//! of records). ANN indexing deferred to Phase 3.
+//! Stores embedding vectors in redb (source of truth) and provides two
+//! search modes:
+//! - **Brute-force** (O(n log k)): Used when vector count is below the
+//!   HNSW activation threshold.
+//! - **HNSW** (O(log n)): Activated when vector count exceeds the threshold.
+//!   The HNSW graph lives in memory and is rebuilt from redb on startup.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -11,11 +13,17 @@ use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use tracing::info;
 use uuid::Uuid;
 
 use cerememory_core::error::CerememoryError;
 
+use crate::hnsw_index::HnswVectorIndex;
+
 const VECTORS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("embedding_vectors");
+
+/// Default threshold for switching from brute-force to HNSW search.
+pub const DEFAULT_HNSW_THRESHOLD: usize = 1000;
 
 /// A hit from the vector similarity search.
 #[derive(Debug, Clone)]
@@ -24,9 +32,10 @@ pub struct VectorSearchHit {
     pub similarity: f32,
 }
 
-/// Brute-force vector index backed by redb.
+/// Dual-mode vector index: redb-backed storage with optional HNSW acceleration.
 pub struct VectorIndex {
     db: Arc<Database>,
+    hnsw: HnswVectorIndex,
 }
 
 impl VectorIndex {
@@ -44,24 +53,40 @@ impl VectorIndex {
         Ok(())
     }
 
-    /// Open or create a file-backed vector index.
+    /// Open or create a file-backed vector index with default HNSW threshold.
     pub fn open(path: &str) -> Result<Self, CerememoryError> {
+        Self::open_with_threshold(path, DEFAULT_HNSW_THRESHOLD)
+    }
+
+    /// Open or create a file-backed vector index with a custom HNSW threshold.
+    pub fn open_with_threshold(path: &str, hnsw_threshold: usize) -> Result<Self, CerememoryError> {
         let db = Database::create(path)
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex db open: {e}")))?;
         Self::ensure_table(&db)?;
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            hnsw: HnswVectorIndex::new(hnsw_threshold),
+        })
     }
 
-    /// Create an in-memory vector index (for testing).
+    /// Create an in-memory vector index (for testing) with default HNSW threshold.
     pub fn open_in_memory() -> Result<Self, CerememoryError> {
+        Self::open_in_memory_with_threshold(DEFAULT_HNSW_THRESHOLD)
+    }
+
+    /// Create an in-memory vector index with a custom HNSW threshold.
+    pub fn open_in_memory_with_threshold(hnsw_threshold: usize) -> Result<Self, CerememoryError> {
         let db = Database::builder()
             .create_with_backend(redb::backends::InMemoryBackend::new())
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex in-memory: {e}")))?;
         Self::ensure_table(&db)?;
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            hnsw: HnswVectorIndex::new(hnsw_threshold),
+        })
     }
 
-    /// Remove all vectors from the index.
+    /// Remove all vectors from the index (including HNSW).
     pub fn clear(&self) -> Result<(), CerememoryError> {
         let txn = self
             .db
@@ -85,6 +110,9 @@ impl VectorIndex {
         }
         txn.commit()
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex commit: {e}")))?;
+
+        self.hnsw.deactivate();
+
         Ok(())
     }
 
@@ -105,6 +133,7 @@ impl VectorIndex {
 
     /// Insert or update an embedding vector. The vector is L2-normalized before storage.
     /// Rejects empty vectors or vectors containing NaN/Inf.
+    /// Also updates the HNSW index if active.
     pub fn upsert(&self, id: Uuid, embedding: &[f32]) -> Result<(), CerememoryError> {
         Self::validate_embedding(embedding)?;
         let normalized = l2_normalize(embedding);
@@ -125,6 +154,21 @@ impl VectorIndex {
         }
         txn.commit()
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex commit: {e}")))?;
+
+        // Sync to HNSW if active (best-effort, log-and-continue)
+        if self.hnsw.is_active() {
+            let _ = self.hnsw.insert(id, &normalized);
+        }
+
+        // Check if we should activate HNSW
+        if !self.hnsw.is_active() {
+            if let Ok(count) = self.count() {
+                if count >= self.hnsw.threshold() {
+                    let _ = self.rebuild_hnsw();
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -182,14 +226,18 @@ impl VectorIndex {
         }
         txn.commit()
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex commit: {e}")))?;
+
+        // Sync to HNSW
+        self.hnsw.remove(&id);
+
         Ok(())
     }
 
     /// Search for the top-k most similar vectors to the query.
     ///
-    /// Uses a min-heap (BinaryHeap with Reverse) for O(n log k) top-k selection,
-    /// which is more efficient than the naive O(n log n) sort+truncate approach
-    /// when k << n.
+    /// When HNSW is active (vector count >= threshold), uses approximate
+    /// nearest neighbor search in O(log n). Otherwise, falls back to
+    /// brute-force O(n log k) search via redb scan.
     ///
     /// The query embedding is L2-normalized before comparison.
     pub fn search(
@@ -204,6 +252,28 @@ impl VectorIndex {
 
         let query_norm = l2_normalize(query_embedding);
 
+        // Use HNSW if active
+        if self.hnsw.is_active() {
+            let hits = self.hnsw.search(&query_norm, limit)?;
+            return Ok(hits
+                .into_iter()
+                .map(|h| VectorSearchHit {
+                    record_id: h.record_id,
+                    similarity: h.similarity,
+                })
+                .collect());
+        }
+
+        // Fallback: brute-force scan
+        self.search_brute_force(&query_norm, limit)
+    }
+
+    /// Brute-force search over all vectors in redb.
+    fn search_brute_force(
+        &self,
+        query_norm: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VectorSearchHit>, CerememoryError> {
         let txn = self
             .db
             .begin_read()
@@ -217,8 +287,6 @@ impl VectorIndex {
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex iter: {e}")))?;
 
         // Min-heap of size k: keeps the k largest similarity scores.
-        // Reverse turns BinaryHeap (max-heap) into a min-heap so we can
-        // efficiently evict the smallest of our top-k candidates.
         let mut heap: BinaryHeap<Reverse<(OrderedFloat<f32>, Uuid)>> = BinaryHeap::new();
 
         for entry in iter {
@@ -234,7 +302,7 @@ impl VectorIndex {
             let vec: Vec<f32> = rmp_serde::from_slice(value.value())
                 .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
 
-            let sim = cosine_similarity(&query_norm, &vec);
+            let sim = cosine_similarity(query_norm, &vec);
             let score = OrderedFloat(sim);
 
             if heap.len() < limit {
@@ -247,10 +315,6 @@ impl VectorIndex {
             }
         }
 
-        // Extract results sorted descending by similarity.
-        // into_sorted_vec() returns ascending order for BinaryHeap's Ord.
-        // Since we store Reverse, ascending Reverse order means descending
-        // by inner score — exactly the order we want (highest similarity first).
         let results: Vec<VectorSearchHit> = heap
             .into_sorted_vec()
             .into_iter()
@@ -260,6 +324,63 @@ impl VectorIndex {
             })
             .collect();
         Ok(results)
+    }
+
+    /// Rebuild the HNSW index from all vectors stored in redb.
+    /// Called during startup or when crossing the activation threshold.
+    pub fn rebuild_hnsw(&self) -> Result<(), CerememoryError> {
+        let entries = self.read_all_vectors()?;
+
+        info!(
+            vector_count = entries.len(),
+            threshold = self.hnsw.threshold(),
+            "Rebuilding HNSW index"
+        );
+
+        self.hnsw.rebuild(&entries)?;
+
+        if self.hnsw.is_active() {
+            info!("HNSW index activated ({} vectors)", entries.len());
+        }
+
+        Ok(())
+    }
+
+    /// Read all vectors from redb as (UUID, Vec<f32>) pairs.
+    fn read_all_vectors(&self) -> Result<Vec<(Uuid, Vec<f32>)>, CerememoryError> {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| CerememoryError::Storage(format!("VectorIndex read txn: {e}")))?;
+        let table = txn
+            .open_table(VECTORS)
+            .map_err(|e| CerememoryError::Storage(format!("VectorIndex table: {e}")))?;
+
+        let iter = table
+            .iter()
+            .map_err(|e| CerememoryError::Storage(format!("VectorIndex iter: {e}")))?;
+
+        let mut entries = Vec::new();
+        for entry in iter {
+            let (key, value) = entry
+                .map_err(|e| CerememoryError::Storage(format!("VectorIndex entry: {e}")))?;
+
+            let key_bytes = key.value();
+            if key_bytes.len() != 16 {
+                continue;
+            }
+            let id = Uuid::from_bytes(key_bytes.try_into().unwrap());
+            let vec: Vec<f32> = rmp_serde::from_slice(value.value())
+                .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+            entries.push((id, vec));
+        }
+
+        Ok(entries)
+    }
+
+    /// Whether the HNSW index is currently active.
+    pub fn is_hnsw_active(&self) -> bool {
+        self.hnsw.is_active()
     }
 
     /// Count stored vectors.

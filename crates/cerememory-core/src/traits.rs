@@ -140,6 +140,96 @@ pub struct ActivatedRecord {
     pub path: Vec<Uuid>,
 }
 
+/// Async trait for LLM providers with embed/summarize/extract capabilities.
+///
+/// This is the Phase 4 provider trait. Designed to be optional:
+/// `Option<Arc<dyn LLMProvider>>` in the engine. When absent, all operations
+/// fall back to existing behavior (manual embeddings, truncation summaries).
+///
+/// Uses boxed futures for dyn-compatibility (needed for `Arc<dyn LLMProvider>`).
+pub trait LLMProvider: Send + Sync {
+    /// Generate an embedding vector for the given text.
+    fn embed(
+        &self,
+        text: &str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<f32>, CerememoryError>> + Send + '_>>;
+
+    /// Summarize multiple texts into a single concise summary.
+    fn summarize(
+        &self,
+        texts: &[String],
+        max_tokens: usize,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, CerememoryError>> + Send + '_>>;
+
+    /// Extract semantic relations (subject-predicate-object triples) from text.
+    fn extract_relations(
+        &self,
+        text: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<Vec<crate::types::ExtractedRelation>, CerememoryError>>
+                + Send
+                + '_,
+        >,
+    >;
+}
+
+/// Truncate a string to at most `max_len` bytes, ensuring the cut
+/// falls on a valid UTF-8 character boundary.
+pub fn truncate_str(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        return s;
+    }
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// No-op LLM provider that returns empty/default results.
+///
+/// Used as a fallback when no real LLM provider is configured.
+pub struct NoOpProvider;
+
+impl LLMProvider for NoOpProvider {
+    fn embed(
+        &self,
+        _text: &str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<f32>, CerememoryError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn summarize(
+        &self,
+        texts: &[String],
+        _max_tokens: usize,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, CerememoryError>> + Send + '_>>
+    {
+        let joined: String = texts.join(" ");
+        let result = if joined.len() > 200 {
+            format!("{}...", truncate_str(&joined, 200))
+        } else {
+            joined
+        };
+        Box::pin(async move { Ok(result) })
+    }
+
+    fn extract_relations(
+        &self,
+        _text: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<Vec<crate::types::ExtractedRelation>, CerememoryError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
 /// Trait for LLM adapters (ADR-006).
 pub trait LLMAdapter: Send + Sync {
     /// Serialize memories into LLM-consumable format.

@@ -169,6 +169,15 @@ pub enum AssociationType {
     UserDefined,
 }
 
+/// A relation extracted by an LLM from text content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractedRelation {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub confidence: f64,
+}
+
 /// Recall mode for memory retrieval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

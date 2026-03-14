@@ -282,6 +282,47 @@ pub struct RecallGraphRequest {
     pub limit_nodes: u32,
 }
 
+/// recall.timeline response (CMP Spec §4.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecallTimelineResponse {
+    pub buckets: Vec<TimelineBucket>,
+}
+
+/// A single time bucket in a timeline query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineBucket {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub memories: Vec<RecalledMemory>,
+    pub count: u32,
+}
+
+/// recall.graph response (CMP Spec §4.4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecallGraphResponse {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub total_nodes: u32,
+}
+
+/// A node in the memory graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphNode {
+    pub id: Uuid,
+    pub store: StoreType,
+    pub summary: Option<String>,
+    pub fidelity: f64,
+}
+
+/// An edge in the memory graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub source: Uuid,
+    pub target: Uuid,
+    pub edge_type: AssociationType,
+    pub weight: f64,
+}
+
 // ─── Lifecycle Operations (CMP Spec §5) ──────────────────────────────
 
 /// Consolidation strategy.

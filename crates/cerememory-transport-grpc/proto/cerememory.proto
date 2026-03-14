@@ -16,6 +16,8 @@ service CerememoryService {
   // ── Recall operations ──
   rpc RecallQuery(RecallQueryRequest) returns (RecallQueryResponse);
   rpc RecallAssociate(RecallAssociateRequest) returns (RecallAssociateResponse);
+  rpc RecallTimeline(RecallTimelineRequest) returns (RecallTimelineResponse);
+  rpc RecallGraph(RecallGraphRequest) returns (RecallGraphResponse);
 
   // ── Lifecycle operations ──
   rpc Consolidate(ConsolidateRequest) returns (ConsolidateResponse);
@@ -28,6 +30,8 @@ service CerememoryService {
   // ── Introspect operations ──
   rpc Stats(Empty) returns (StatsResponse);
   rpc IntrospectRecord(IntrospectRecordRequest) returns (RecordResponse);
+  rpc DecayForecast(DecayForecastRequest) returns (DecayForecastResponse);
+  rpc Evolution(Empty) returns (EvolutionResponse);
 }
 
 // Shared empty message (avoids google.protobuf.Empty dependency).
@@ -70,6 +74,22 @@ message RecallAssociateRequest {
 }
 
 message RecallAssociateResponse {
+  bytes json_payload = 1;
+}
+
+message RecallTimelineRequest {
+  bytes json_payload = 1;
+}
+
+message RecallTimelineResponse {
+  bytes json_payload = 1;
+}
+
+message RecallGraphRequest {
+  bytes json_payload = 1;
+}
+
+message RecallGraphResponse {
   bytes json_payload = 1;
 }
 
@@ -139,5 +159,17 @@ message IntrospectRecordRequest {
 }
 
 message RecordResponse {
+  bytes json_payload = 1;
+}
+
+message DecayForecastRequest {
+  bytes json_payload = 1;
+}
+
+message DecayForecastResponse {
+  bytes json_payload = 1;
+}
+
+message EvolutionResponse {
   bytes json_payload = 1;
 }

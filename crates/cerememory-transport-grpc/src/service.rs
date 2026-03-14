@@ -129,6 +129,28 @@ impl CerememoryService for CerememoryGrpcService {
         }))
     }
 
+    async fn recall_timeline(
+        &self,
+        request: Request<proto::RecallTimelineRequest>,
+    ) -> Result<Response<proto::RecallTimelineResponse>, Status> {
+        let req = from_json(&request.into_inner().json_payload)?;
+        let resp = self.engine.recall_timeline(req).await.map_err(to_status)?;
+        Ok(Response::new(proto::RecallTimelineResponse {
+            json_payload: to_json(&resp)?,
+        }))
+    }
+
+    async fn recall_graph(
+        &self,
+        request: Request<proto::RecallGraphRequest>,
+    ) -> Result<Response<proto::RecallGraphResponse>, Status> {
+        let req = from_json(&request.into_inner().json_payload)?;
+        let resp = self.engine.recall_graph(req).await.map_err(to_status)?;
+        Ok(Response::new(proto::RecallGraphResponse {
+            json_payload: to_json(&resp)?,
+        }))
+    }
+
     // ── Lifecycle ──
 
     async fn consolidate(
@@ -300,6 +322,35 @@ impl CerememoryService for CerememoryGrpcService {
     ) -> Result<Response<proto::StatsResponse>, Status> {
         let resp = self.engine.introspect_stats().await.map_err(to_status)?;
         Ok(Response::new(proto::StatsResponse {
+            json_payload: to_json(&resp)?,
+        }))
+    }
+
+    async fn decay_forecast(
+        &self,
+        request: Request<proto::DecayForecastRequest>,
+    ) -> Result<Response<proto::DecayForecastResponse>, Status> {
+        let req = from_json(&request.into_inner().json_payload)?;
+        let resp = self
+            .engine
+            .introspect_decay_forecast(req)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(proto::DecayForecastResponse {
+            json_payload: to_json(&resp)?,
+        }))
+    }
+
+    async fn evolution(
+        &self,
+        _request: Request<proto::Empty>,
+    ) -> Result<Response<proto::EvolutionResponse>, Status> {
+        let resp = self
+            .engine
+            .introspect_evolution()
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(proto::EvolutionResponse {
             json_payload: to_json(&resp)?,
         }))
     }

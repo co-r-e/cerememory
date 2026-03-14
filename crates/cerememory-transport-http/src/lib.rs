@@ -47,6 +47,8 @@ pub fn router(engine: Arc<CerememoryEngine>) -> Router {
         // Recall
         .route("/v1/recall/query", post(recall_query))
         .route("/v1/recall/associate/:record_id", post(recall_associate))
+        .route("/v1/recall/timeline", post(recall_timeline))
+        .route("/v1/recall/graph", post(recall_graph))
         // Lifecycle
         .route("/v1/lifecycle/consolidate", post(lifecycle_consolidate))
         .route("/v1/lifecycle/decay-tick", post(lifecycle_decay_tick))
@@ -55,6 +57,8 @@ pub fn router(engine: Arc<CerememoryEngine>) -> Router {
         // Introspect
         .route("/v1/introspect/stats", get(introspect_stats))
         .route("/v1/introspect/record/:record_id", get(introspect_record))
+        .route("/v1/introspect/decay-forecast", post(introspect_decay_forecast))
+        .route("/v1/introspect/evolution", get(introspect_evolution))
         .with_state(engine)
 }
 
@@ -203,6 +207,22 @@ async fn recall_associate(
     Ok(Json(resp))
 }
 
+async fn recall_timeline(
+    State(engine): State<AppState>,
+    AppJson(req): AppJson<RecallTimelineRequest>,
+) -> Result<Json<RecallTimelineResponse>, AppError> {
+    let resp = engine.recall_timeline(req).await?;
+    Ok(Json(resp))
+}
+
+async fn recall_graph(
+    State(engine): State<AppState>,
+    AppJson(req): AppJson<RecallGraphRequest>,
+) -> Result<Json<RecallGraphResponse>, AppError> {
+    let resp = engine.recall_graph(req).await?;
+    Ok(Json(resp))
+}
+
 // ─── Lifecycle handlers ──────────────────────────────────────────────
 
 async fn lifecycle_consolidate(
@@ -244,6 +264,21 @@ async fn introspect_stats(
 ) -> Result<Json<StatsResponse>, AppError> {
     let stats = engine.introspect_stats().await?;
     Ok(Json(stats))
+}
+
+async fn introspect_decay_forecast(
+    State(engine): State<AppState>,
+    AppJson(req): AppJson<DecayForecastRequest>,
+) -> Result<Json<DecayForecastResponse>, AppError> {
+    let resp = engine.introspect_decay_forecast(req).await?;
+    Ok(Json(resp))
+}
+
+async fn introspect_evolution(
+    State(engine): State<AppState>,
+) -> Result<Json<EvolutionMetrics>, AppError> {
+    let resp = engine.introspect_evolution().await?;
+    Ok(Json(resp))
 }
 
 async fn introspect_record(
