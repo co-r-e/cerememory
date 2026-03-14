@@ -16,6 +16,10 @@ path = "phase2.rs"
 name = "phase3"
 path = "phase3.rs"
 
+[[test]]
+name = "phase4"
+path = "phase4.rs"
+
 [dependencies]
 
 [dev-dependencies]
