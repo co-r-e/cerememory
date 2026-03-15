@@ -339,7 +339,7 @@ async fn test_http_end_to_end() {
     use tower::ServiceExt;
 
     let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
-    let app = cerememory_transport_http::router(engine);
+    let app = cerememory_transport_http::router(engine, vec![]);
 
     // Encode a memory via HTTP
     let encode_body = serde_json::json!({

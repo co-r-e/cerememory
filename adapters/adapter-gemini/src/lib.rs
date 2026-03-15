@@ -2,6 +2,14 @@
 //!
 //! Implements the `LLMAdapter` trait for Gemini models.
 //! Uses Markdown structured text for memory serialization.
+//!
+//! Also provides [`GeminiProvider`], an [`LLMProvider`](cerememory_core::LLMProvider)
+//! implementation that calls the Gemini REST API for embedding,
+//! summarization, and relation extraction.
+
+pub mod provider;
+
+pub use provider::GeminiProvider;
 
 use cerememory_core::{estimate_tokens_from_bytes, LLMAdapter, MemoryContent, MemoryRecord, ModelInfo};
 

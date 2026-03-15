@@ -16,6 +16,27 @@ use std::sync::Arc;
 /// Default weight for automatically inferred sequential associations in batch encoding.
 const DEFAULT_BATCH_SEQUENTIAL_WEIGHT: f64 = 0.7;
 
+/// Scope guard that records a histogram metric on drop (success or error path).
+struct TimerGuard {
+    name: &'static str,
+    start: std::time::Instant,
+}
+
+impl TimerGuard {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for TimerGuard {
+    fn drop(&mut self) {
+        metrics::histogram!(self.name).record(self.start.elapsed().as_secs_f64());
+    }
+}
+
 /// Dispatch a method call to the appropriate store based on StoreType.
 macro_rules! dispatch_store {
     ($self:expr, $store_type:expr, $method:ident ( $($arg:expr),* )) => {
@@ -372,6 +393,7 @@ impl CerememoryEngine {
 
     /// encode.store — Store a new memory record (CMP Spec §3.1).
     pub async fn encode_store(&self, req: EncodeStoreRequest) -> Result<EncodeStoreResponse, CerememoryError> {
+        let _timer = TimerGuard::new("cerememory_encode_duration_seconds");
         let store_type = req.store.unwrap_or_else(|| self.route_store(&req.content));
 
         let mut record = MemoryRecord {
@@ -450,6 +472,8 @@ impl CerememoryEngine {
         }
 
         info!(record_id = %id, store = %store_type, "Encoded memory record");
+
+        metrics::counter!("cerememory_encode_total", "store" => store_type.to_string()).increment(1);
 
         Ok(EncodeStoreResponse {
             record_id: id,
@@ -556,6 +580,7 @@ impl CerememoryEngine {
     /// 5. Spreading activation
     /// 6. Reconsolidation + human noise rendering
     pub async fn recall_query(&self, req: RecallQueryRequest) -> Result<RecallQueryResponse, CerememoryError> {
+        let _timer = TimerGuard::new("cerememory_recall_duration_seconds");
         let mode = *self.recall_mode.read().await;
         let recall_mode = req.recall_mode;
         let effective_mode = if mode == RecallMode::Perfect { RecallMode::Perfect } else { recall_mode };
@@ -751,6 +776,8 @@ impl CerememoryEngine {
             let store = memories[0].record.store;
             self.evolution.observe_recall(store, hit_rate);
         }
+
+        metrics::counter!("cerememory_recall_total").increment(1);
 
         Ok(RecallQueryResponse {
             memories,

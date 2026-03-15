@@ -1,0 +1,23 @@
+services:
+  cerememory:
+    build: .
+    ports:
+      - "8420:8420"
+      - "8421:8421"
+    volumes:
+      - cerememory-data:/data
+    environment:
+      - CEREMEMORY_DATA_DIR=/data
+      - CEREMEMORY_HTTP__PORT=8420
+      - CEREMEMORY_GRPC__PORT=8421
+      - CEREMEMORY_LOG__LEVEL=info
+    healthcheck:
+      test: ["CMD", "cerememory", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  cerememory-data:

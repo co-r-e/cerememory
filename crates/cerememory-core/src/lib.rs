@@ -11,6 +11,7 @@
 //! - CMP protocol request/response types
 //! - Core traits ([`Store`], [`DecayEngine`], [`AssociationEngine`])
 
+pub mod auth;
 pub mod types;
 pub mod protocol;
 pub mod traits;

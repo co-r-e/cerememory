@@ -2,6 +2,13 @@
 //!
 //! Implements the `LLMAdapter` trait for OpenAI models.
 //! Uses JSON system message format for memory serialization.
+//!
+//! Also provides [`OpenAIProvider`], an [`LLMProvider`](cerememory_core::LLMProvider)
+//! implementation that calls the OpenAI embeddings and chat completions APIs
+//! with exponential-backoff retry on transient errors.
+
+pub mod provider;
+pub use provider::OpenAIProvider;
 
 use cerememory_core::{estimate_tokens_from_bytes, LLMAdapter, MemoryContent, MemoryRecord, ModelInfo};
 use serde::Serialize;

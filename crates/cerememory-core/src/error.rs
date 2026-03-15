@@ -49,4 +49,10 @@ pub enum CerememoryError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
+
+    #[error("Rate limited, retry after {retry_after_secs}s")]
+    RateLimited { retry_after_secs: u32 },
 }

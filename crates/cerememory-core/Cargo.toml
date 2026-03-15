@@ -15,6 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = { workspace = true }
 thiserror = { workspace = true }
+subtle = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

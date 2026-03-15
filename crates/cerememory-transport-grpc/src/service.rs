@@ -51,6 +51,8 @@ fn to_status(err: CerememoryError) -> Status {
         | CerememoryError::Storage(_)
         | CerememoryError::Serialization(_)
         | CerememoryError::Internal(_) => Status::internal(err.to_string()),
+        CerememoryError::Unauthorized(_) => Status::unauthenticated(err.to_string()),
+        CerememoryError::RateLimited { .. } => Status::resource_exhausted(err.to_string()),
     }
 }
 

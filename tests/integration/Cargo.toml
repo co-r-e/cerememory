@@ -20,10 +20,15 @@ path = "phase3.rs"
 name = "phase4"
 path = "phase4.rs"
 
+[[test]]
+name = "phase5"
+path = "phase5.rs"
+
 [dependencies]
 
 [dev-dependencies]
 cerememory-core = { path = "../../crates/cerememory-core" }
+cerememory-config = { path = "../../crates/cerememory-config" }
 cerememory-engine = { path = "../../crates/cerememory-engine" }
 cerememory-archive = { path = "../../crates/cerememory-archive" }
 cerememory-transport-http = { path = "../../crates/cerememory-transport-http" }
@@ -39,3 +44,9 @@ http-body-util = "0.1"
 tempfile = "3"
 tonic = "0.12"
 chrono = { version = "0.4", features = ["serde"] }
+secrecy = { version = "0.10", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio-util = { version = "0.7", features = ["rt"] }
+metrics-exporter-prometheus = "0.16"
+rcgen = "0.13"
+rustls = { version = "0.23", features = ["ring"] }

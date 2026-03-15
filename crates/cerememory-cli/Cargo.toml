@@ -12,13 +12,26 @@ rust-version.workspace = true
 name = "cerememory"
 path = "src/main.rs"
 
+[features]
+default = ["llm-openai", "llm-claude", "llm-gemini"]
+llm-openai = ["dep:cerememory-adapter-openai"]
+llm-claude = ["dep:cerememory-adapter-claude"]
+llm-gemini = ["dep:cerememory-adapter-gemini"]
+
 [dependencies]
 cerememory-core = { workspace = true }
+cerememory-config = { workspace = true }
 cerememory-engine = { workspace = true }
 cerememory-archive = { workspace = true }
 cerememory-transport-http = { workspace = true, features = [] }
 cerememory-transport-grpc = { workspace = true }
+cerememory-adapter-openai = { path = "../../adapters/adapter-openai", optional = true }
+cerememory-adapter-claude = { path = "../../adapters/adapter-claude", optional = true }
+cerememory-adapter-gemini = { path = "../../adapters/adapter-gemini", optional = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }

@@ -32,14 +32,108 @@ use axum::{
 use cerememory_core::error::CerememoryError;
 use cerememory_core::protocol::*;
 use cerememory_engine::CerememoryEngine;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::trace::TraceLayer;
 use uuid::Uuid;
+
+pub mod auth;
+pub mod metrics;
+pub mod rate_limit;
+
+pub use auth::ApiKeyAuthLayer;
+pub use metrics::{install_prometheus_recorder, MetricsLayer};
+use metrics_exporter_prometheus::PrometheusHandle;
+pub use rate_limit::RateLimitLayer;
+
+/// Options for configuring HTTP middleware.
+pub struct HttpMiddlewareConfig {
+    /// API keys for Bearer token authentication.
+    pub api_keys: Vec<String>,
+    /// Allowed CORS origins (empty = allow all).
+    pub cors_origins: Vec<String>,
+    /// Rate limit: requests per second.
+    pub rate_limit_rps: u64,
+    /// Rate limit: burst size.
+    pub rate_limit_burst: u32,
+    /// Prometheus handle for /metrics endpoint (None = no metrics endpoint).
+    pub prometheus_handle: Option<PrometheusHandle>,
+}
+
+impl Default for HttpMiddlewareConfig {
+    fn default() -> Self {
+        Self {
+            api_keys: Vec::new(),
+            cors_origins: Vec::new(),
+            rate_limit_rps: 100,
+            rate_limit_burst: 50,
+            prometheus_handle: None,
+        }
+    }
+}
 
 /// Shared application state.
 type AppState = Arc<CerememoryEngine>;
 
 /// Create the Axum router with all CMP endpoints.
-pub fn router(engine: Arc<CerememoryEngine>) -> Router {
-    Router::new()
+///
+/// `api_keys`: if non-empty, enables Bearer token authentication on all API routes.
+/// Health endpoints (`/health`, `/readiness`) are always unauthenticated.
+pub fn router(engine: Arc<CerememoryEngine>, api_keys: Vec<String>) -> Router {
+    router_with_config(
+        engine,
+        HttpMiddlewareConfig {
+            api_keys,
+            ..Default::default()
+        },
+    )
+}
+
+/// Create the Axum router with full middleware configuration.
+pub fn router_with_config(
+    engine: Arc<CerememoryEngine>,
+    config: HttpMiddlewareConfig,
+) -> Router {
+    let auth_layer = ApiKeyAuthLayer::new(config.api_keys);
+
+    // Build CORS layer
+    let cors = if config.cors_origins.is_empty() {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        let origins: Vec<_> = config
+            .cors_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
+
+    let rate_limit = RateLimitLayer::new(config.rate_limit_rps, config.rate_limit_burst);
+
+    // Public routes — no auth, no rate limit (health + metrics)
+    let mut public_routes = Router::new()
+        .route("/health", get(health))
+        .route("/readiness", get(readiness))
+        .with_state(Arc::clone(&engine));
+
+    if let Some(handle) = config.prometheus_handle {
+        public_routes = public_routes.route(
+            "/metrics",
+            get(move || {
+                let h = handle.clone();
+                async move { h.render() }
+            }),
+        );
+    }
+
+    // API routes — behind auth + middleware stack
+    let api_routes = Router::new()
         // Encode
         .route("/v1/encode", post(encode_store))
         .route("/v1/encode/batch", post(encode_batch))
@@ -60,18 +154,36 @@ pub fn router(engine: Arc<CerememoryEngine>) -> Router {
         .route("/v1/introspect/decay-forecast", post(introspect_decay_forecast))
         .route("/v1/introspect/evolution", get(introspect_evolution))
         .with_state(engine)
+        .layer(auth_layer)
+        .layer(rate_limit);
+
+    // Merge and apply global middleware (metrics, tracing, request-id, CORS)
+    public_routes
+        .merge(api_routes)
+        .layer(cors)
+        .layer(MetricsLayer)
+        .layer(TraceLayer::new_for_http())
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
 }
 
-/// Start the HTTP server.
-pub async fn serve(
-    engine: Arc<CerememoryEngine>,
-    addr: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let app = router(engine);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("Cerememory HTTP server listening on {addr}");
-    axum::serve(listener, app).await?;
-    Ok(())
+// ─── Health handlers ────────────────────────────────────────────────
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+async fn readiness(State(engine): State<AppState>) -> Response {
+    // Attempt to read stats as a readiness indicator.
+    // Returns 503 SERVICE_UNAVAILABLE on any engine error.
+    match engine.introspect_stats().await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ready"}))).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "not_ready"})),
+        )
+            .into_response(),
+    }
 }
 
 // ─── Error mapping ───────────────────────────────────────────────────
@@ -97,6 +209,8 @@ impl IntoResponse for AppError {
             CerememoryError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
             CerememoryError::Serialization(_) => StatusCode::INTERNAL_SERVER_ERROR,
             CerememoryError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            CerememoryError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            CerememoryError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         };
 
         let cmp_error = CMPError::from(&self.0);
@@ -306,7 +420,7 @@ mod tests {
 
     fn test_app() -> Router {
         let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
-        router(engine)
+        router(engine, vec![])
     }
 
     async fn body_json(resp: Response) -> serde_json::Value {
@@ -501,6 +615,321 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["code"], "VALIDATION_ERROR");
     }
+
+    // ─── Health endpoint tests ───
+
+    #[tokio::test]
+    async fn health_returns_200() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn readiness_returns_200() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "ready");
+    }
+
+    #[tokio::test]
+    async fn health_bypasses_auth() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let app = router(engine, vec!["secret-key".to_string()]);
+
+        // /health should be accessible without auth
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // /v1/introspect/stats should require auth
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_with_valid_key_passes() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let app = router(engine, vec!["test-api-key".to_string()]);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .header("Authorization", "Bearer test-api-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ─── Metrics tests ───
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_200() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .build_recorder()
+            .handle();
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                prometheus_handle: Some(handle),
+                ..Default::default()
+            },
+        );
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_bypasses_auth() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .build_recorder()
+            .handle();
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                api_keys: vec!["secret".to_string()],
+                prometheus_handle: Some(handle),
+                ..Default::default()
+            },
+        );
+
+        // /metrics should not require auth
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn metrics_not_available_when_handle_absent() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                prometheus_handle: None,
+                ..Default::default()
+            },
+        );
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Without handle, /metrics route doesn't exist → 404
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ─── Rate limiting tests ───
+
+    #[tokio::test]
+    async fn rate_limit_allows_within_burst() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                rate_limit_rps: 10,
+                rate_limit_burst: 10,
+                ..Default::default()
+            },
+        );
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_returns_429_when_exceeded() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        // 1 req/sec, burst of 1 → second request should be 429
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                rate_limit_rps: 1,
+                rate_limit_burst: 1,
+                ..Default::default()
+            },
+        );
+
+        // First request — should pass
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Second request — should be rate limited
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_includes_retry_after_header() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                rate_limit_rps: 1,
+                rate_limit_burst: 1,
+                ..Default::default()
+            },
+        );
+
+        // Exhaust the burst
+        let _ = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Second request should have Retry-After
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            resp.headers().contains_key("retry-after"),
+            "429 response must include Retry-After header"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["code"], "RATE_LIMITED");
+        assert!(json["retry_after"].is_number());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_does_not_apply_to_health() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        // Very strict rate limit
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                rate_limit_rps: 1,
+                rate_limit_burst: 1,
+                ..Default::default()
+            },
+        );
+
+        // Exhaust the burst on an API route
+        let _ = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // /health should still work (outside rate limit layer)
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ─── Existing tests ───
 
     #[tokio::test]
     async fn decay_tick_endpoint() {

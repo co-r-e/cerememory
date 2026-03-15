@@ -7,9 +7,10 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+use cerememory_config::ServerConfig;
 use cerememory_core::protocol::*;
 use cerememory_core::types::*;
-use cerememory_engine::{CerememoryEngine, EngineConfig};
+use cerememory_engine::CerememoryEngine;
 
 #[derive(Parser)]
 #[command(
@@ -19,8 +20,12 @@ use cerememory_engine::{CerememoryEngine, EngineConfig};
 )]
 struct Cli {
     /// Data directory for persistent storage
-    #[arg(long, default_value = "./data", global = true)]
-    data_dir: String,
+    #[arg(long, global = true)]
+    data_dir: Option<String>,
+
+    /// Path to configuration TOML file
+    #[arg(long, global = true)]
+    config: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -31,8 +36,8 @@ enum Commands {
     /// Start the HTTP server (and optionally a gRPC server)
     Serve {
         /// HTTP port to listen on
-        #[arg(long, default_value = "8420")]
-        port: u16,
+        #[arg(long)]
+        port: Option<u16>,
 
         /// gRPC port (disabled if not specified)
         #[arg(long)]
@@ -104,6 +109,13 @@ enum Commands {
         output: String,
     },
 
+    /// Health check (for Docker HEALTHCHECK / K8s liveness probe)
+    Healthcheck {
+        /// HTTP port to check (default: 8420)
+        #[arg(long, default_value = "8420")]
+        port: u16,
+    },
+
     /// Import records from a CMA archive file
     Import {
         /// Path to the CMA archive file
@@ -128,69 +140,228 @@ fn parse_embedding(s: &str) -> Result<Vec<f32>> {
         .collect()
 }
 
-fn build_config(data_dir: &str, background_decay_interval_secs: Option<u64>) -> EngineConfig {
-    EngineConfig {
-        episodic_path: Some(format!("{data_dir}/episodic.redb")),
-        semantic_path: Some(format!("{data_dir}/semantic.redb")),
-        procedural_path: Some(format!("{data_dir}/procedural.redb")),
-        emotional_path: Some(format!("{data_dir}/emotional.redb")),
-        index_path: Some(format!("{data_dir}/text_index")),
-        vector_index_path: Some(format!("{data_dir}/vectors.redb")),
-        background_decay_interval_secs,
-        ..EngineConfig::default()
+fn load_config(cli: &Cli) -> Result<ServerConfig> {
+    let mut config =
+        ServerConfig::load(cli.config.as_deref()).context("Failed to load configuration")?;
+
+    // CLI flags override config file
+    if let Some(data_dir) = &cli.data_dir {
+        config.data_dir = data_dir.clone();
+    }
+
+    if let Commands::Serve { port, grpc_port } = &cli.command {
+        if let Some(port) = port {
+            config.http.port = *port;
+        }
+        if let Some(grpc_port) = grpc_port {
+            config.grpc.port = Some(*grpc_port);
+        }
+    }
+
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("Invalid configuration: {e}"))?;
+
+    Ok(config)
+}
+
+fn build_llm_provider(
+    config: &ServerConfig,
+) -> Option<Arc<dyn cerememory_core::LLMProvider>> {
+    let provider_name = config.llm.provider.as_str();
+    let api_key = config.llm.api_key_exposed()?.to_string();
+    let model = config.llm.model.clone();
+    let base_url = config.llm.base_url.clone();
+
+    match provider_name {
+        #[cfg(feature = "llm-openai")]
+        "openai" => Some(Arc::new(cerememory_adapter_openai::OpenAIProvider::new(
+            api_key, model, base_url,
+        ))),
+        #[cfg(feature = "llm-claude")]
+        "claude" | "anthropic" => Some(Arc::new(
+            cerememory_adapter_claude::ClaudeProvider::new(api_key, model, base_url),
+        )),
+        #[cfg(feature = "llm-gemini")]
+        "gemini" | "google" => Some(Arc::new(
+            cerememory_adapter_gemini::GeminiProvider::new(api_key, model, base_url),
+        )),
+        "none" | "" => None,
+        other => {
+            tracing::warn!(provider = other, "Unknown LLM provider, running without LLM");
+            None
+        }
     }
 }
 
-fn create_engine(data_dir: &str) -> Result<CerememoryEngine> {
-    std::fs::create_dir_all(data_dir).context("Failed to create data directory")?;
-    let config = build_config(data_dir, None);
-    Ok(CerememoryEngine::new(config)?)
+fn create_engine_from_config(config: &ServerConfig) -> Result<CerememoryEngine> {
+    std::fs::create_dir_all(&config.data_dir).context("Failed to create data directory")?;
+    let mut engine_config = config.to_engine_config();
+    engine_config.llm_provider = build_llm_provider(config);
+    Ok(CerememoryEngine::new(engine_config)?)
+}
+
+/// Initialize tracing subscriber from config.
+///
+/// `RUST_LOG` env var overrides config if set.
+fn init_logging(config: &ServerConfig) {
+    // RUST_LOG env var takes priority over config
+    let filter = if std::env::var("RUST_LOG").is_ok() {
+        EnvFilter::from_default_env()
+    } else {
+        EnvFilter::try_new(&config.log.level).unwrap_or_else(|_| EnvFilter::new("info"))
+    };
+
+    match config.log.format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .init();
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
-
     let cli = Cli::parse();
+    let config = load_config(&cli)?;
+    init_logging(&config);
 
-    // Serve uses its own engine lifecycle with background decay
-    if let Commands::Serve { port, grpc_port } = &cli.command {
-        std::fs::create_dir_all(&cli.data_dir).context("Failed to create data directory")?;
-        let config = build_config(&cli.data_dir, Some(3600));
-        let engine = Arc::new(CerememoryEngine::new(config)?);
+    // Serve uses its own engine lifecycle with background decay + graceful shutdown
+    if let Commands::Serve { .. } = &cli.command {
+        let engine = Arc::new(create_engine_from_config(&config)?);
         engine.rebuild_coordinator().await?;
         engine.start_background_decay();
+
+        // Shutdown coordination: CancellationToken propagates to all components
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        // Register signal handlers
+        let cancel_signal = cancel.clone();
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            {
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("Failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = ctrl_c => {},
+                    _ = sigterm.recv() => {},
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = ctrl_c.await;
+            }
+            tracing::info!("Shutdown signal received, draining connections...");
+            cancel_signal.cancel();
+        });
 
         println!("Cerememory v{}", env!("CARGO_PKG_VERSION"));
 
         // Optionally start gRPC server on a separate port.
-        if let Some(grpc_port) = grpc_port {
+        if let Some(grpc_port) = config.grpc.port {
             let engine_grpc = Arc::clone(&engine);
             let grpc_addr = format!("0.0.0.0:{grpc_port}");
+            let grpc_keys = config.auth.api_key_strings();
+            let grpc_cancel = cancel.clone();
+
+            // Load TLS config if paths are provided
+            let tls = match (&config.grpc.tls_cert_path, &config.grpc.tls_key_path) {
+                (Some(cert_path), Some(key_path)) => {
+                    let cert_pem =
+                        std::fs::read(cert_path).context("Failed to read TLS cert file")?;
+                    let key_pem =
+                        std::fs::read(key_path).context("Failed to read TLS key file")?;
+                    Some(cerememory_transport_grpc::TlsConfig { cert_pem, key_pem })
+                }
+                _ => None,
+            };
+
             // Verify the gRPC port is bindable before starting
             let listener = tokio::net::TcpListener::bind(&grpc_addr)
                 .await
                 .with_context(|| format!("Failed to bind gRPC port {grpc_port}"))?;
             drop(listener);
-            println!("gRPC listening on {grpc_addr}");
+            let tls_label = if tls.is_some() { " (TLS)" } else { "" };
+            println!("gRPC listening on {grpc_addr}{tls_label}");
             tokio::spawn(async move {
-                if let Err(e) = cerememory_transport_grpc::serve(engine_grpc, &grpc_addr).await {
+                if let Err(e) = cerememory_transport_grpc::serve_with_tls(
+                    engine_grpc,
+                    &grpc_addr,
+                    grpc_keys,
+                    tls,
+                    grpc_cancel.cancelled_owned(),
+                )
+                .await
+                {
                     tracing::error!(error = %e, "gRPC server failed");
                 }
             });
         }
 
-        let addr = format!("0.0.0.0:{port}");
+        let api_keys = config.auth.api_key_strings();
+        if config.auth.enabled {
+            println!("Auth  enabled ({} key(s))", api_keys.len());
+        }
+
+        // Initialize Prometheus metrics and build router with full middleware config
+        let prom_handle = cerememory_transport_http::install_prometheus_recorder();
+        let http_config = cerememory_transport_http::HttpMiddlewareConfig {
+            api_keys,
+            cors_origins: config.http.cors_origins.clone(),
+            rate_limit_rps: config.rate_limit.requests_per_second,
+            rate_limit_burst: config.rate_limit.burst,
+            prometheus_handle: Some(prom_handle),
+        };
+        let app = cerememory_transport_http::router_with_config(Arc::clone(&engine), http_config);
+
+        let addr = format!("0.0.0.0:{}", config.http.port);
         println!("HTTP  listening on {addr}");
-        cerememory_transport_http::serve(engine, &addr)
+        let http_cancel = cancel.clone();
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .with_context(|| format!("Failed to bind HTTP port {}", config.http.port))?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(http_cancel.cancelled_owned())
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        // After HTTP server stops, clean up background tasks
+        engine.stop_background_decay().await;
+        tracing::info!("Shutdown complete");
         return Ok(());
     }
 
-    let engine = create_engine(&cli.data_dir)?;
+    // Healthcheck: lightweight HTTP probe, no engine needed
+    if let Commands::Healthcheck { port } = &cli.command {
+        let url = format!("http://127.0.0.1:{port}/health");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .context("Failed to build HTTP client")?;
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                println!("ok");
+                return Ok(());
+            }
+            Ok(resp) => {
+                anyhow::bail!("Health check failed: HTTP {}", resp.status());
+            }
+            Err(e) => {
+                anyhow::bail!("Health check failed: {e}");
+            }
+        }
+    }
+
+    let engine = create_engine_from_config(&config)?;
 
     // Only rebuild coordinator/indexes for commands that need up-to-date index state
     let needs_rebuild = matches!(
@@ -324,6 +495,8 @@ async fn main() -> Result<()> {
             let imported = engine.import_records(&bytes).await?;
             println!("Imported {imported} records from {path}");
         }
+
+        Commands::Healthcheck { .. } => unreachable!("Handled above"),
     }
 
     Ok(())

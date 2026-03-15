@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cerememory-core",
+    "crates/cerememory-config",
     "crates/cerememory-store-episodic",
     "crates/cerememory-store-semantic",
     "crates/cerememory-store-procedural",
@@ -53,13 +54,13 @@ tantivy = "0.22"
 
 # Networking
 axum = "0.7"
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 tonic-build = "0.12"
 
 # Observability
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Numeric
 ordered-float = "4"
@@ -75,9 +76,31 @@ rand = "0.8"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Config
+figment = { version = "0.10", features = ["toml", "env"] }
+secrecy = { version = "0.10", features = ["serde"] }
+
+# HTTP middleware
+tower-http = { version = "0.6", features = ["auth", "cors", "trace", "request-id", "util"] }
+subtle = "2"
+governor = "0.7"
+
+# LLM HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+backoff = { version = "0.4", features = ["tokio"] }
+
+# Health & shutdown
+tonic-health = "0.12"
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
 # Testing
 tempfile = "3"
 criterion = "0.5"
+wiremock = "=0.6.2"
 
 # Internal crates
 cerememory-core = { path = "crates/cerememory-core" }
@@ -92,5 +115,6 @@ cerememory-evolution = { path = "crates/cerememory-evolution" }
 cerememory-index = { path = "crates/cerememory-index" }
 cerememory-engine = { path = "crates/cerememory-engine" }
 cerememory-archive = { path = "crates/cerememory-archive" }
+cerememory-config = { path = "crates/cerememory-config" }
 cerememory-transport-http = { path = "crates/cerememory-transport-http" }
 cerememory-transport-grpc = { path = "crates/cerememory-transport-grpc" }

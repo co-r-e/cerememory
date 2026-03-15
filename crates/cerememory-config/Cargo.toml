@@ -1,24 +1,21 @@
 [package]
-name = "cerememory-adapter-openai"
+name = "cerememory-config"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cerememory LLM adapter for openai"
+description = "Configuration management for Cerememory (TOML + env)"
 rust-version.workspace = true
 
 [dependencies]
 cerememory-core = { workspace = true }
+cerememory-engine = { workspace = true }
+figment = { workspace = true }
+secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-reqwest = { workspace = true }
-backoff = { workspace = true }
-secrecy = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full", "test-util"] }
-wiremock = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,36 @@
+# Cerememory Configuration Example
+# Copy this file to cerememory.toml and adjust as needed.
+# Environment variables with CEREMEMORY_ prefix override these values.
+# Example: CEREMEMORY_HTTP__PORT=9000
+
+data_dir = "./data"
+
+[http]
+port = 8420
+cors_origins = []  # Empty = allow all origins
+
+[grpc]
+# port = 8421       # Uncomment to enable gRPC
+# tls_cert_path = "/path/to/cert.pem"
+# tls_key_path = "/path/to/key.pem"
+
+[auth]
+enabled = false
+api_keys = []  # ["sk-key1", "sk-key2"]
+
+[llm]
+provider = "none"  # "openai", "claude", "gemini", or "none"
+# api_key = "sk-..."
+# model = "gpt-4o"
+# base_url = "https://api.openai.com"
+
+[decay]
+background_interval_secs = 3600
+
+[rate_limit]
+requests_per_second = 100
+burst = 50
+
+[log]
+level = "info"    # trace, debug, info, warn, error
+format = "pretty" # pretty, json

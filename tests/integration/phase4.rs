@@ -658,7 +658,7 @@ async fn http_timeline_endpoint() {
         .await
         .unwrap();
 
-    let app = cerememory_transport_http::router(engine);
+    let app = cerememory_transport_http::router(engine, vec![]);
     let now = Utc::now();
     let body = serde_json::json!({
         "range": {
@@ -698,7 +698,7 @@ async fn http_decay_forecast_endpoint() {
         .await
         .unwrap();
 
-    let app = cerememory_transport_http::router(engine);
+    let app = cerememory_transport_http::router(engine, vec![]);
     let body = serde_json::json!({
         "record_ids": [r.record_id],
         "forecast_at": (Utc::now() + chrono::Duration::days(7)).to_rfc3339()
@@ -730,7 +730,7 @@ async fn http_evolution_endpoint() {
     use tower::ServiceExt;
 
     let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
-    let app = cerememory_transport_http::router(engine);
+    let app = cerememory_transport_http::router(engine, vec![]);
 
     let resp = app
         .oneshot(

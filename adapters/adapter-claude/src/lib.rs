@@ -3,6 +3,12 @@
 //! Implements the `LLMAdapter` trait for Anthropic Claude models.
 //! Uses XML tag format for memory serialization, which aligns with
 //! Claude's strong XML parsing capabilities.
+//!
+//! Also provides [`ClaudeProvider`], an `LLMProvider` implementation that
+//! uses the Anthropic Messages API for summarization and relation extraction.
+
+pub mod provider;
+pub use provider::ClaudeProvider;
 
 use cerememory_core::{estimate_tokens_from_bytes, LLMAdapter, MemoryContent, MemoryRecord, ModelInfo};
 

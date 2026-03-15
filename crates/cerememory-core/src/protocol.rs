@@ -575,6 +575,8 @@ pub enum CMPErrorCode {
     ImportConflict,
     ForgetUnconfirmed,
     VersionMismatch,
+    Unauthorized,
+    RateLimited,
     InternalError,
 }
 
@@ -650,6 +652,14 @@ impl From<&crate::error::CerememoryError> for CMPError {
             }
             CerememoryError::Internal(msg) => {
                 CMPError::new(CMPErrorCode::InternalError, msg.clone())
+            }
+            CerememoryError::Unauthorized(msg) => {
+                CMPError::new(CMPErrorCode::Unauthorized, msg.clone())
+            }
+            CerememoryError::RateLimited { retry_after_secs } => {
+                let mut e = CMPError::new(CMPErrorCode::RateLimited, "Rate limit exceeded");
+                e.retry_after = Some(*retry_after_secs);
+                e
             }
         }
     }
