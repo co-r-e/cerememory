@@ -313,7 +313,11 @@ async fn graph_traversal_with_associations() {
         .await
         .unwrap();
 
-    assert_eq!(resp.nodes.len(), 3, "All 3 nodes should be reachable at depth 2");
+    assert_eq!(
+        resp.nodes.len(),
+        3,
+        "All 3 nodes should be reachable at depth 2"
+    );
     assert!(resp.edges.len() >= 2, "Should have at least 2 edges");
 
     // depth=1 from A should reach only B (direct neighbor)
@@ -329,7 +333,7 @@ async fn graph_traversal_with_associations() {
         .unwrap();
 
     assert_eq!(resp1.nodes.len(), 2);
-    assert!(resp1.edges.len() >= 1);
+    assert!(!resp1.edges.is_empty());
 }
 
 #[tokio::test]
@@ -448,7 +452,10 @@ async fn evolution_metrics_after_observations() {
     // Populate and run decay to feed evolution engine
     for i in 0..10 {
         engine
-            .encode_store(text_req(&format!("Evolution record {i}"), StoreType::Episodic))
+            .encode_store(text_req(
+                &format!("Evolution record {i}"),
+                StoreType::Episodic,
+            ))
             .await
             .unwrap();
     }
@@ -506,7 +513,10 @@ async fn llm_auto_embed_enables_vector_recall() {
         .await
         .unwrap();
 
-    assert!(!resp.memories.is_empty(), "Auto-embedded record should be findable via vector search");
+    assert!(
+        !resp.memories.is_empty(),
+        "Auto-embedded record should be findable via vector search"
+    );
 }
 
 // ─── Smart Consolidation E2E ─────────────────────────────────────────
@@ -531,7 +541,10 @@ async fn smart_consolidation_with_llm_summarization_and_relations() {
     }
 
     let stats_before = engine.introspect_stats().await.unwrap();
-    let sem_before = *stats_before.records_by_store.get(&StoreType::Semantic).unwrap_or(&0);
+    let sem_before = *stats_before
+        .records_by_store
+        .get(&StoreType::Semantic)
+        .unwrap_or(&0);
     assert_eq!(sem_before, 0);
 
     // Consolidate
@@ -552,8 +565,14 @@ async fn smart_consolidation_with_llm_summarization_and_relations() {
 
     // Semantic store should have new records
     let stats_after = engine.introspect_stats().await.unwrap();
-    let sem_after = *stats_after.records_by_store.get(&StoreType::Semantic).unwrap_or(&0);
-    assert!(sem_after > 0, "At least one semantic record should be created");
+    let sem_after = *stats_after
+        .records_by_store
+        .get(&StoreType::Semantic)
+        .unwrap_or(&0);
+    assert!(
+        sem_after > 0,
+        "At least one semantic record should be created"
+    );
 
     // Verify summaries exist by inspecting via introspect_record
     // Use recall to find semantic records
@@ -614,8 +633,14 @@ async fn smart_consolidation_does_not_cross_store_delete() {
         .unwrap();
 
     let stats_before = engine.introspect_stats().await.unwrap();
-    let ep_before = *stats_before.records_by_store.get(&StoreType::Episodic).unwrap_or(&0);
-    let sem_before = *stats_before.records_by_store.get(&StoreType::Semantic).unwrap_or(&0);
+    let ep_before = *stats_before
+        .records_by_store
+        .get(&StoreType::Episodic)
+        .unwrap_or(&0);
+    let sem_before = *stats_before
+        .records_by_store
+        .get(&StoreType::Semantic)
+        .unwrap_or(&0);
 
     // Consolidate — should NOT delete the semantic record as a "duplicate"
     engine
@@ -630,8 +655,14 @@ async fn smart_consolidation_does_not_cross_store_delete() {
         .unwrap();
 
     let stats_after = engine.introspect_stats().await.unwrap();
-    let sem_after = *stats_after.records_by_store.get(&StoreType::Semantic).unwrap_or(&0);
-    let ep_after = *stats_after.records_by_store.get(&StoreType::Episodic).unwrap_or(&0);
+    let sem_after = *stats_after
+        .records_by_store
+        .get(&StoreType::Semantic)
+        .unwrap_or(&0);
+    let ep_after = *stats_after
+        .records_by_store
+        .get(&StoreType::Episodic)
+        .unwrap_or(&0);
 
     // Semantic record should still exist (plus any new ones from consolidation)
     assert!(

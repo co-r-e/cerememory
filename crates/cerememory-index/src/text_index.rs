@@ -125,9 +125,9 @@ impl TextIndex {
     ) -> Result<(), CerememoryError> {
         let doc = self.build_document(id, store_type, body, summary);
         let mut writer = self.lock_writer()?;
-        writer.add_document(doc).map_err(|e| {
-            CerememoryError::Storage(format!("Tantivy add doc: {e}"))
-        })?;
+        writer
+            .add_document(doc)
+            .map_err(|e| CerememoryError::Storage(format!("Tantivy add doc: {e}")))?;
         writer
             .commit()
             .map_err(|e| CerememoryError::Storage(format!("Tantivy commit: {e}")))?;
@@ -158,9 +158,9 @@ impl TextIndex {
 
         let mut writer = self.lock_writer()?;
         writer.delete_term(term);
-        writer.add_document(doc).map_err(|e| {
-            CerememoryError::Storage(format!("Tantivy add doc: {e}"))
-        })?;
+        writer
+            .add_document(doc)
+            .map_err(|e| CerememoryError::Storage(format!("Tantivy add doc: {e}")))?;
         writer
             .commit()
             .map_err(|e| CerememoryError::Storage(format!("Tantivy commit: {e}")))?;
@@ -174,20 +174,24 @@ impl TextIndex {
         stores: Option<&[StoreType]>,
         limit: usize,
     ) -> Result<Vec<TextSearchHit>, CerememoryError> {
-        self.reader.reload().map_err(|e| {
-            CerememoryError::Storage(format!("Tantivy reader reload: {e}"))
-        })?;
+        self.reader
+            .reload()
+            .map_err(|e| CerememoryError::Storage(format!("Tantivy reader reload: {e}")))?;
 
         let searcher = self.reader.searcher();
         let query_parser =
             QueryParser::for_index(&self.index, vec![self.fields.body, self.fields.summary]);
 
-        let parsed = query_parser.parse_query(query).map_err(|e| {
-            CerememoryError::Validation(format!("Invalid search query: {e}"))
-        })?;
+        let parsed = query_parser
+            .parse_query(query)
+            .map_err(|e| CerememoryError::Validation(format!("Invalid search query: {e}")))?;
 
         // Use larger multiplier when filtering by store to reduce missed results
-        let search_limit = if stores.is_some() { limit * 5 } else { limit * 2 };
+        let search_limit = if stores.is_some() {
+            limit * 5
+        } else {
+            limit * 2
+        };
         let top_docs = searcher
             .search(&parsed, &TopDocs::with_limit(search_limit))
             .map_err(|e| CerememoryError::Storage(format!("Tantivy search: {e}")))?;
@@ -197,9 +201,9 @@ impl TextIndex {
 
         let mut hits = Vec::new();
         for (score, doc_address) in top_docs {
-            let doc: TantivyDocument = searcher.doc(doc_address).map_err(|e| {
-                CerememoryError::Storage(format!("Tantivy doc fetch: {e}"))
-            })?;
+            let doc: TantivyDocument = searcher
+                .doc(doc_address)
+                .map_err(|e| CerememoryError::Storage(format!("Tantivy doc fetch: {e}")))?;
 
             // Filter by store type if requested
             if let Some(ref allowed) = store_filter {
@@ -255,9 +259,9 @@ impl TextIndex {
                 CerememoryError::Storage(format!("Failed to add document to text index: {e}"))
             })?;
         }
-        writer.commit().map_err(|e| {
-            CerememoryError::Storage(format!("Failed to commit text index: {e}"))
-        })?;
+        writer
+            .commit()
+            .map_err(|e| CerememoryError::Storage(format!("Failed to commit text index: {e}")))?;
         Ok(())
     }
 
@@ -289,9 +293,9 @@ impl TextIndex {
 
         for (id, store_type, body, summary) in records {
             let doc = self.build_document(*id, *store_type, body, summary.as_deref());
-            writer.add_document(doc).map_err(|e| {
-                CerememoryError::Storage(format!("Tantivy add doc: {e}"))
-            })?;
+            writer
+                .add_document(doc)
+                .map_err(|e| CerememoryError::Storage(format!("Tantivy add doc: {e}")))?;
         }
 
         writer
@@ -309,8 +313,13 @@ mod tests {
     fn add_and_search() {
         let idx = TextIndex::open_in_memory().unwrap();
         let id = Uuid::now_v7();
-        idx.add(id, StoreType::Episodic, "The quick brown fox jumps over the lazy dog", None)
-            .unwrap();
+        idx.add(
+            id,
+            StoreType::Episodic,
+            "The quick brown fox jumps over the lazy dog",
+            None,
+        )
+        .unwrap();
 
         let hits = idx.search("quick", None, 10).unwrap();
         assert_eq!(hits.len(), 1);
@@ -461,7 +470,12 @@ mod tests {
 
         idx.add_batch(&[
             (id1, StoreType::Episodic, "First batch record", None),
-            (id2, StoreType::Semantic, "Second batch record", Some("summary")),
+            (
+                id2,
+                StoreType::Semantic,
+                "Second batch record",
+                Some("summary"),
+            ),
         ])
         .unwrap();
 
@@ -497,7 +511,11 @@ mod tests {
 
         // Filter by store type
         let hits = idx
-            .search("delicious OR potassium OR trees", Some(&[StoreType::Episodic]), 10)
+            .search(
+                "delicious OR potassium OR trees",
+                Some(&[StoreType::Episodic]),
+                10,
+            )
             .unwrap();
         assert_eq!(hits.len(), 2);
     }

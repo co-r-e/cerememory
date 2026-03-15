@@ -100,9 +100,7 @@ where
                 Box::pin(async move { inner.call(req).await })
             }
             Some(_) => Box::pin(async { Ok(unauthorized_response("Invalid API key")) }),
-            None => {
-                Box::pin(async { Ok(unauthorized_response("Missing Authorization header")) })
-            }
+            None => Box::pin(async { Ok(unauthorized_response("Missing Authorization header")) }),
         }
     }
 }
@@ -134,12 +132,7 @@ mod tests {
     async fn no_auth_header_returns_401() {
         let app = test_app(vec!["secret-key".to_string()]);
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -201,12 +194,7 @@ mod tests {
     async fn empty_keys_disables_auth() {
         let app = test_app(vec![]);
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

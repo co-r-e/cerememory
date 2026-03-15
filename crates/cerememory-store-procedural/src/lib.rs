@@ -66,9 +66,8 @@ pub struct ProceduralStore {
 impl ProceduralStore {
     /// Open (or create) a persistent store at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CerememoryError> {
-        let db = Database::create(path.as_ref()).map_err(|e| {
-            CerememoryError::Storage(format!("Failed to open redb database: {e}"))
-        })?;
+        let db = Database::create(path.as_ref())
+            .map_err(|e| CerememoryError::Storage(format!("Failed to open redb database: {e}")))?;
 
         let store = Self { db: Arc::new(db) };
         store.ensure_tables()?;
@@ -79,9 +78,8 @@ impl ProceduralStore {
     ///
     /// Useful for testing. The file is automatically cleaned up on drop via `tempfile`.
     pub fn open_in_memory() -> Result<Self, CerememoryError> {
-        let tmp = tempfile::NamedTempFile::new().map_err(|e| {
-            CerememoryError::Storage(format!("Failed to create temp file: {e}"))
-        })?;
+        let tmp = tempfile::NamedTempFile::new()
+            .map_err(|e| CerememoryError::Storage(format!("Failed to create temp file: {e}")))?;
         // We intentionally persist the path — redb manages the file.
         let path = tmp.into_temp_path();
         // Remove the file so redb can create it fresh.
@@ -105,7 +103,9 @@ impl ProceduralStore {
         let txn = self.db.begin_write().map_err(storage_err)?;
         {
             let _ = txn.open_table(PROCEDURAL_RECORDS).map_err(storage_err)?;
-            let _ = txn.open_table(PROCEDURAL_FIDELITY_INDEX).map_err(storage_err)?;
+            let _ = txn
+                .open_table(PROCEDURAL_FIDELITY_INDEX)
+                .map_err(storage_err)?;
         }
         txn.commit().map_err(storage_err)?;
         Ok(())
@@ -123,7 +123,9 @@ impl ProceduralStore {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
-            let fidelity_table = txn.open_table(PROCEDURAL_FIDELITY_INDEX).map_err(storage_err)?;
+            let fidelity_table = txn
+                .open_table(PROCEDURAL_FIDELITY_INDEX)
+                .map_err(storage_err)?;
             let records_table = txn.open_table(PROCEDURAL_RECORDS).map_err(storage_err)?;
 
             // Scan buckets [0, threshold_bucket).
@@ -197,8 +199,9 @@ impl Store for ProceduralStore {
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
 
-                let mut fidelity_idx =
-                    txn.open_table(PROCEDURAL_FIDELITY_INDEX).map_err(storage_err)?;
+                let mut fidelity_idx = txn
+                    .open_table(PROCEDURAL_FIDELITY_INDEX)
+                    .map_err(storage_err)?;
                 let fk = fidelity_key(record.fidelity.score, &id);
                 fidelity_idx
                     .insert(fk.as_slice(), ())
@@ -251,8 +254,9 @@ impl Store for ProceduralStore {
                         .remove(id.as_bytes().as_slice())
                         .map_err(storage_err)?;
 
-                    let mut fidelity_idx =
-                        txn.open_table(PROCEDURAL_FIDELITY_INDEX).map_err(storage_err)?;
+                    let mut fidelity_idx = txn
+                        .open_table(PROCEDURAL_FIDELITY_INDEX)
+                        .map_err(storage_err)?;
                     let fk = fidelity_key(record.fidelity.score, &id);
                     fidelity_idx.remove(fk.as_slice()).map_err(storage_err)?;
 
@@ -286,9 +290,7 @@ impl Store for ProceduralStore {
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
                 let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack decode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
                 drop(guard);
 
                 let old_fidelity_score = record.fidelity.score;
@@ -296,18 +298,19 @@ impl Store for ProceduralStore {
                 record.updated_at = Utc::now();
 
                 let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack encode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
 
                 // Update fidelity index: remove old, insert new.
-                let mut fidelity_idx =
-                    txn.open_table(PROCEDURAL_FIDELITY_INDEX).map_err(storage_err)?;
+                let mut fidelity_idx = txn
+                    .open_table(PROCEDURAL_FIDELITY_INDEX)
+                    .map_err(storage_err)?;
                 let old_fk = fidelity_key(old_fidelity_score, &id);
-                fidelity_idx.remove(old_fk.as_slice()).map_err(storage_err)?;
+                fidelity_idx
+                    .remove(old_fk.as_slice())
+                    .map_err(storage_err)?;
                 let new_fk = fidelity_key(record.fidelity.score, &id);
                 fidelity_idx
                     .insert(new_fk.as_slice(), ())
@@ -409,9 +412,7 @@ impl Store for ProceduralStore {
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
                 let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack decode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
                 drop(guard);
 
                 if let Some(c) = content {
@@ -427,9 +428,7 @@ impl Store for ProceduralStore {
                 record.version += 1;
 
                 let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack encode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -459,9 +458,7 @@ impl Store for ProceduralStore {
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
                 let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack decode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
                 drop(guard);
 
                 record.access_count = access_count;
@@ -469,9 +466,7 @@ impl Store for ProceduralStore {
                 record.updated_at = Utc::now();
 
                 let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack encode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -762,10 +757,7 @@ mod tests {
 
         let retrieved = store.get(&id).await.unwrap().unwrap();
         assert_eq!(retrieved.text_content(), Some("Updated content"));
-        assert_eq!(
-            retrieved.content.summary.as_deref(),
-            Some("A summary")
-        );
+        assert_eq!(retrieved.content.summary.as_deref(), Some("A summary"));
         assert_eq!(retrieved.version, 2);
     }
 

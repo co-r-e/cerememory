@@ -10,7 +10,9 @@
 pub mod provider;
 pub use provider::ClaudeProvider;
 
-use cerememory_core::{estimate_tokens_from_bytes, LLMAdapter, MemoryContent, MemoryRecord, ModelInfo};
+use cerememory_core::{
+    estimate_tokens_from_bytes, LLMAdapter, MemoryContent, MemoryRecord, ModelInfo,
+};
 
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -63,11 +65,7 @@ impl LLMAdapter for ClaudeAdapter {
 
     fn estimate_tokens(&self, content: &MemoryContent) -> usize {
         let total_bytes: usize = content.blocks.iter().map(|b| b.data.len()).sum();
-        let summary_bytes = content
-            .summary
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or(0);
+        let summary_bytes = content.summary.as_ref().map(|s| s.len()).unwrap_or(0);
         estimate_tokens_from_bytes(total_bytes + summary_bytes)
     }
 
@@ -109,7 +107,12 @@ mod tests {
         let adapter = make_adapter();
         // Create many records with substantial text
         let records: Vec<MemoryRecord> = (0..100)
-            .map(|i| make_record(&format!("This is memory number {} with some longer content to consume tokens", i)))
+            .map(|i| {
+                make_record(&format!(
+                    "This is memory number {} with some longer content to consume tokens",
+                    i
+                ))
+            })
             .collect();
 
         // Very small budget: should truncate significantly

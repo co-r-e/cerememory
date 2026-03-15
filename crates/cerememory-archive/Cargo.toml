@@ -22,3 +22,8 @@ rand = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "archive_bench"
+harness = false

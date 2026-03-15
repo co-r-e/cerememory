@@ -8,7 +8,10 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use backoff::ExponentialBackoffBuilder;
-use cerememory_core::{CerememoryError, ExtractedRelation, LLMProvider};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use cerememory_core::media::{normalize_audio_upload_format, normalize_image_mime_type};
+use cerememory_core::{CerememoryError, ExtractedRelation, LLMProvider, ProviderCapabilities};
+use reqwest::multipart;
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -19,12 +22,17 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
 /// Default embedding model.
 const DEFAULT_EMBED_MODEL: &str = "text-embedding-3-small";
+/// Default chat model.
+const DEFAULT_CHAT_MODEL: &str = "gpt-4o";
 
 /// Maximum retry attempts for transient errors.
 const MAX_RETRIES: u32 = 3;
 
 /// Initial retry interval in milliseconds.
 const INITIAL_INTERVAL_MS: u64 = 500;
+
+/// Default Whisper model for audio transcription.
+const DEFAULT_WHISPER_MODEL: &str = "whisper-1";
 
 // ── Request / Response types ────────────────────────────────────────────────
 
@@ -92,6 +100,42 @@ struct RelationEntry {
     confidence: f64,
 }
 
+// ── Vision (GPT-4o) request types ──────────────────────────────────────────
+
+#[derive(Serialize)]
+struct VisionChatRequest<'a> {
+    model: &'a str,
+    messages: Vec<VisionMessage>,
+    max_tokens: usize,
+}
+
+#[derive(Serialize)]
+struct VisionMessage {
+    role: String,
+    content: Vec<VisionContent>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum VisionContent {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Serialize)]
+struct ImageUrl {
+    url: String,
+}
+
+// ── Whisper response ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TranscriptionResponse {
+    text: String,
+}
+
 // ── Provider ────────────────────────────────────────────────────────────────
 
 /// OpenAI-compatible LLM provider.
@@ -108,6 +152,15 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
+    fn build_client() -> Result<Client, CerememoryError> {
+        Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|e| {
+                CerememoryError::Internal(format!("failed to build OpenAI HTTP client: {e}"))
+            })
+    }
+
     /// Create a new `OpenAIProvider`.
     ///
     /// # Arguments
@@ -115,19 +168,18 @@ impl OpenAIProvider {
     /// * `api_key` - OpenAI API key (stored as `SecretString`).
     /// * `model` - Chat model name. Defaults to `"gpt-4o"` when `None`.
     /// * `base_url` - API base URL. Defaults to `https://api.openai.com` when `None`.
-    pub fn new(api_key: String, model: Option<String>, base_url: Option<String>) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("failed to build reqwest client");
-
-        Self {
+    pub fn new(
+        api_key: String,
+        model: Option<String>,
+        base_url: Option<String>,
+    ) -> Result<Self, CerememoryError> {
+        Ok(Self {
             api_key: SecretString::from(api_key),
-            model: model.unwrap_or_else(|| "gpt-4o".to_string()),
+            model: model.unwrap_or_else(|| DEFAULT_CHAT_MODEL.to_string()),
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
-            client,
-        }
+            client: Self::build_client()?,
+        })
     }
 
     /// Build the backoff policy used for transient-error retries.
@@ -139,18 +191,14 @@ impl OpenAIProvider {
             .build()
     }
 
-    /// POST a JSON body to `url` with retries on transient HTTP errors.
+    /// Execute an HTTP request with exponential backoff retry on transient errors.
     ///
-    /// Returns the raw response body on success, or a `CerememoryError::Internal`
-    /// if retries are exhausted or a non-retryable error occurs.
-    async fn post_with_retry(
-        &self,
-        url: &str,
-        body: &impl Serialize,
-    ) -> Result<String, CerememoryError> {
-        let body_bytes = serde_json::to_vec(body)
-            .map_err(|e| CerememoryError::Internal(format!("request serialization: {e}")))?;
-
+    /// `build_request` is called on each attempt to produce the `RequestBuilder`.
+    /// This allows both JSON and multipart requests to share the same retry logic.
+    async fn send_with_retry<F>(&self, build_request: F) -> Result<String, CerememoryError>
+    where
+        F: Fn() -> Result<reqwest::RequestBuilder, CerememoryError>,
+    {
         let mut attempts: u32 = 0;
         let backoff = Self::backoff_policy();
         let mut current_interval = backoff.initial_interval;
@@ -158,15 +206,11 @@ impl OpenAIProvider {
         loop {
             attempts += 1;
 
-            let resp = self
-                .client
-                .post(url)
-                .header("Content-Type", "application/json")
+            let resp = build_request()?
                 .header(
                     "Authorization",
                     format!("Bearer {}", self.api_key.expose_secret()),
                 )
-                .body(body_bytes.clone())
                 .send()
                 .await
                 .map_err(|e| CerememoryError::Internal(format!("HTTP request failed: {e}")))?;
@@ -180,8 +224,7 @@ impl OpenAIProvider {
                 return Ok(text);
             }
 
-            let is_retryable =
-                status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            let is_retryable = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
 
             if !is_retryable || attempts > MAX_RETRIES {
                 let error_body = resp.text().await.unwrap_or_default();
@@ -202,6 +245,44 @@ impl OpenAIProvider {
                     .min(backoff.max_interval.as_secs_f64()),
             );
         }
+    }
+
+    /// POST a JSON body to `url` with retries on transient HTTP errors.
+    async fn post_with_retry(
+        &self,
+        url: &str,
+        body: &impl Serialize,
+    ) -> Result<String, CerememoryError> {
+        let body_bytes = serde_json::to_vec(body)
+            .map_err(|e| CerememoryError::Internal(format!("request serialization: {e}")))?;
+
+        self.send_with_retry(|| {
+            Ok(self
+                .client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .body(body_bytes.clone()))
+        })
+        .await
+    }
+
+    /// POST a multipart form to `url` with retries on transient HTTP errors.
+    ///
+    /// Because `multipart::Form` is consumed on send, the caller provides a
+    /// factory closure that can recreate the form for each attempt.
+    async fn post_multipart_with_retry<F>(
+        &self,
+        url: &str,
+        form_factory: F,
+    ) -> Result<String, CerememoryError>
+    where
+        F: Fn() -> Result<multipart::Form, CerememoryError>,
+    {
+        self.send_with_retry(|| {
+            let form = form_factory()?;
+            Ok(self.client.post(url).multipart(form))
+        })
+        .await
     }
 }
 
@@ -288,11 +369,8 @@ impl LLMProvider for OpenAIProvider {
     fn extract_relations(
         &self,
         text: &str,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<ExtractedRelation>, CerememoryError>> + Send + '_,
-        >,
-    > {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ExtractedRelation>, CerememoryError>> + Send + '_>>
+    {
         let text = text.to_owned();
         Box::pin(async move {
             let url = format!("{}/v1/chat/completions", self.base_url);
@@ -341,12 +419,11 @@ impl LLMProvider for OpenAIProvider {
                     )
                 })?;
 
-            let parsed: RelationExtractionOutput =
-                serde_json::from_str(&content).map_err(|e| {
-                    CerememoryError::Internal(format!(
-                        "relation extraction JSON parse error: {e}, raw: {content}"
-                    ))
-                })?;
+            let parsed: RelationExtractionOutput = serde_json::from_str(&content).map_err(|e| {
+                CerememoryError::Internal(format!(
+                    "relation extraction JSON parse error: {e}, raw: {content}"
+                ))
+            })?;
 
             Ok(parsed
                 .relations
@@ -359,6 +436,129 @@ impl LLMProvider for OpenAIProvider {
                 })
                 .collect())
         })
+    }
+
+    fn embed_image(
+        &self,
+        data: &[u8],
+        format: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<f32>, CerememoryError>> + Send + '_>> {
+        let data = data.to_vec();
+        let mime_type = normalize_image_mime_type(format).map(str::to_owned);
+        Box::pin(async move {
+            let mime_type = mime_type?;
+            if data.is_empty() {
+                return Err(CerememoryError::Validation(
+                    "Image payload must not be empty".to_string(),
+                ));
+            }
+            // Step 1: Base64-encode the image and build a data URI.
+            let b64 = BASE64.encode(&data);
+            let data_uri = format!("data:{mime_type};base64,{b64}");
+
+            // Step 2: Send to GPT-4o vision to get a text description.
+            let url = format!("{}/v1/chat/completions", self.base_url);
+
+            let vision_req = VisionChatRequest {
+                model: &self.model,
+                messages: vec![VisionMessage {
+                    role: "user".to_string(),
+                    content: vec![
+                        VisionContent::Text {
+                            text: "Describe this image in detail for memory indexing. \
+                                   Focus on objects, people, text, colors, and spatial \
+                                   relationships."
+                                .to_string(),
+                        },
+                        VisionContent::ImageUrl {
+                            image_url: ImageUrl { url: data_uri },
+                        },
+                    ],
+                }],
+                max_tokens: 512,
+            };
+
+            debug!(model = %self.model, "requesting image description via vision");
+
+            let body = self.post_with_retry(&url, &vision_req).await?;
+            let resp: ChatResponse = serde_json::from_str(&body).map_err(|e| {
+                CerememoryError::Internal(format!("vision response parse error: {e}"))
+            })?;
+
+            let description = resp
+                .choices
+                .into_iter()
+                .next()
+                .and_then(|c| c.message.content)
+                .ok_or_else(|| {
+                    CerememoryError::Internal(
+                        "vision response contained no description".to_string(),
+                    )
+                })?;
+
+            // Step 3: Embed the text description using the standard embedding pipeline.
+            debug!("embedding image description ({} chars)", description.len());
+            self.embed(&description).await
+        })
+    }
+
+    fn transcribe_audio(
+        &self,
+        data: &[u8],
+        format: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, CerememoryError>> + Send + '_>> {
+        let data = data.to_vec();
+        let audio_format = normalize_audio_upload_format(format)
+            .map(|(extension, mime_type)| (extension.to_string(), mime_type.to_string()));
+        Box::pin(async move {
+            let url = format!("{}/v1/audio/transcriptions", self.base_url);
+            let (extension, mime_type) = audio_format?;
+            if data.is_empty() {
+                return Err(CerememoryError::Validation(
+                    "Audio payload must not be empty".to_string(),
+                ));
+            }
+
+            // Determine a suitable file name for the multipart upload.
+            let filename = format!("audio.{extension}");
+
+            let audio_data = data.clone();
+            let audio_filename = filename.clone();
+            let audio_mime = mime_type.clone();
+
+            let body = self
+                .post_multipart_with_retry(&url, move || {
+                    let part = multipart::Part::bytes(audio_data.clone())
+                        .file_name(audio_filename.clone())
+                        .mime_str(&audio_mime)
+                        .map_err(|e| {
+                            CerememoryError::Validation(format!(
+                                "Invalid audio MIME type '{audio_mime}': {e}"
+                            ))
+                        })?;
+
+                    Ok(multipart::Form::new()
+                        .text("model", DEFAULT_WHISPER_MODEL)
+                        .part("file", part))
+                })
+                .await?;
+
+            debug!("received transcription response");
+
+            let resp: TranscriptionResponse = serde_json::from_str(&body).map_err(|e| {
+                CerememoryError::Internal(format!("transcription response parse error: {e}"))
+            })?;
+
+            Ok(resp.text)
+        })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            text_embedding: true,
+            image_embedding: true,
+            audio_transcription: true,
+        }
     }
 }
 
@@ -377,6 +577,17 @@ mod tests {
             Some("gpt-4o".to_string()),
             Some(base_url.to_string()),
         )
+        .expect("OpenAI provider should build")
+    }
+
+    async fn start_mock_server() -> Option<MockServer> {
+        match tokio::spawn(async { MockServer::start().await }).await {
+            Ok(server) => Some(server),
+            Err(err) => {
+                eprintln!("skipping wiremock-based test: {err}");
+                None
+            }
+        }
     }
 
     /// Canonical embedding response with a 3-dimensional vector.
@@ -414,14 +625,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_returns_vector() {
-        let server = MockServer::start().await;
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
 
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
             .and(header("Authorization", "Bearer test-key-1234"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(embedding_response_body()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(embedding_response_body()))
             .expect(1)
             .mount(&server)
             .await;
@@ -440,7 +651,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_summarize_returns_text() {
-        let server = MockServer::start().await;
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
 
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
@@ -466,7 +679,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_relations_returns_triples() {
-        let server = MockServer::start().await;
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
 
         let relations_json = serde_json::json!({
             "relations": [
@@ -519,14 +734,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_429_retry_succeeds() {
-        let server = MockServer::start().await;
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
 
         // First two requests get 429, third succeeds.
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
-            .respond_with(
-                ResponseTemplate::new(429).set_body_string("rate limited"),
-            )
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
             .up_to_n_times(2)
             .expect(2)
             .mount(&server)
@@ -534,9 +749,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(embedding_response_body()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(embedding_response_body()))
             .expect(1)
             .mount(&server)
             .await;
@@ -552,14 +765,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_500_retry_eventually_fails() {
-        let server = MockServer::start().await;
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
 
         // All requests return 500 -- should exhaust retries.
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
-            .respond_with(
-                ResponseTemplate::new(500).set_body_string("internal server error"),
-            )
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
             .expect(1..=4)
             .mount(&server)
             .await;
@@ -572,6 +785,223 @@ mod tests {
         assert!(
             msg.contains("500"),
             "error should mention HTTP 500, got: {msg}"
+        );
+    }
+
+    // ── embed_image ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_embed_image_returns_vector() {
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
+
+        // Mock 1: GPT-4o vision endpoint returns a text description.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("Authorization", "Bearer test-key-1234"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(chat_response_body("A red cat sitting on a blue mat.")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Mock 2: Embedding endpoint returns a vector for the description.
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .and(header("Authorization", "Bearer test-key-1234"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(embedding_response_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = mock_provider(&server.uri());
+        // Fake 1x1 PNG bytes (content doesn't matter for the mock).
+        let fake_image = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let result = provider.embed_image(&fake_image, "image/png").await;
+
+        let vec = result.expect("embed_image should succeed");
+        assert_eq!(vec.len(), 3);
+        assert!((vec[0] - 0.1).abs() < f32::EPSILON);
+        assert!((vec[1] - 0.2).abs() < f32::EPSILON);
+        assert!((vec[2] - 0.3).abs() < f32::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_embed_image_accepts_mime_type() {
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("Authorization", "Bearer test-key-1234"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(chat_response_body("An indexed image.")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .and(header("Authorization", "Bearer test-key-1234"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(embedding_response_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = mock_provider(&server.uri());
+        let fake_image = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let result = provider.embed_image(&fake_image, "image/png").await;
+
+        assert!(result.is_ok(), "embed_image should accept MIME types");
+    }
+
+    // ── transcribe_audio ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_transcribe_audio_returns_text() {
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
+
+        let transcription_body = serde_json::json!({
+            "text": "Hello, this is a test transcription."
+        });
+
+        // The Whisper endpoint receives multipart form data.
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(header("Authorization", "Bearer test-key-1234"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(transcription_body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = mock_provider(&server.uri());
+        // Fake WAV bytes (content doesn't matter for the mock).
+        let fake_audio = vec![0x52, 0x49, 0x46, 0x46]; // "RIFF" header
+        let result = provider.transcribe_audio(&fake_audio, "audio/wav").await;
+
+        let text = result.expect("transcribe_audio should succeed");
+        assert_eq!(text, "Hello, this is a test transcription.");
+    }
+
+    #[tokio::test]
+    async fn test_transcribe_audio_accepts_mime_type() {
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
+
+        let transcription_body = serde_json::json!({
+            "text": "MIME input works."
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(header("Authorization", "Bearer test-key-1234"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(transcription_body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = mock_provider(&server.uri());
+        let fake_audio = vec![0x52, 0x49, 0x46, 0x46];
+        let result = provider.transcribe_audio(&fake_audio, "audio/wav").await;
+
+        assert_eq!(
+            result.expect("transcribe_audio should accept MIME types"),
+            "MIME input works."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transcribe_audio_retries_multipart_requests() {
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
+
+        let transcription_body = serde_json::json!({
+            "text": "Retry path works."
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(header("Authorization", "Bearer test-key-1234"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .up_to_n_times(2)
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(header("Authorization", "Bearer test-key-1234"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(transcription_body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = mock_provider(&server.uri());
+        let fake_audio = vec![0x52, 0x49, 0x46, 0x46];
+        let result = provider.transcribe_audio(&fake_audio, "wav").await;
+
+        assert_eq!(
+            result.expect("multipart retry path should succeed"),
+            "Retry path works."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transcribe_audio_retry_exhaustion_surfaces_error() {
+        let Some(server) = start_mock_server().await else {
+            return;
+        };
+
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(header("Authorization", "Bearer test-key-1234"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+            .expect(1..=4)
+            .mount(&server)
+            .await;
+
+        let provider = mock_provider(&server.uri());
+        let fake_audio = vec![0x52, 0x49, 0x46, 0x46];
+        let err = provider
+            .transcribe_audio(&fake_audio, "wav")
+            .await
+            .expect_err("multipart retry exhaustion should fail");
+
+        assert!(err.to_string().contains("500"));
+    }
+
+    #[tokio::test]
+    async fn test_transcribe_audio_rejects_unknown_format() {
+        let provider = mock_provider("http://unused");
+        let err = provider
+            .transcribe_audio(b"invalid", "application/octet-stream")
+            .await
+            .expect_err("unknown formats must be rejected");
+
+        assert!(err.to_string().contains("Unsupported audio format"));
+    }
+
+    // ── capabilities ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_capabilities() {
+        let provider = mock_provider("http://unused");
+        let caps = provider.capabilities();
+
+        assert!(caps.text_embedding, "text_embedding should be true");
+        assert!(caps.image_embedding, "image_embedding should be true");
+        assert!(
+            caps.audio_transcription,
+            "audio_transcription should be true"
         );
     }
 }

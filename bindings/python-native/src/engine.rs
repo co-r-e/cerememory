@@ -1,0 +1,365 @@
+//! Python wrapper around `CerememoryEngine`.
+//!
+//! Owns a `tokio::runtime::Runtime` to bridge async Rust engine methods
+//! to synchronous Python calls via `runtime.block_on()`.
+
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+
+use cerememory_core::protocol::{
+    EncodeStoreRequest, EncodeStoreResponse, ForgetRequest, RecallCue, RecallQueryRequest,
+    RecordIntrospectRequest,
+};
+use cerememory_core::types::{ContentBlock, MemoryContent, Modality, StoreType};
+use cerememory_engine::{CerememoryEngine, EngineConfig};
+use uuid::Uuid;
+
+use crate::types::{
+    to_py_err, PyEncodeStoreResponse, PyMemoryRecord, PyRecallQueryResponse, PyStatsResponse,
+};
+
+/// The main Cerememory engine with native Python bindings.
+///
+/// Creates an in-memory engine by default. All operations are synchronous
+/// from Python's perspective (the async Rust runtime is managed internally).
+///
+/// Example::
+///
+///     from cerememory_native import Engine
+///
+///     engine = Engine()
+///     record_id = engine.store("The capital of France is Paris.")
+///     results = engine.recall("What is the capital of France?")
+///     print(results.memories)
+///
+#[pyclass(name = "Engine")]
+pub struct PyCerememoryEngine {
+    runtime: std::sync::Mutex<tokio::runtime::Runtime>,
+    engine: CerememoryEngine,
+}
+
+impl PyCerememoryEngine {
+    fn runtime(&self) -> PyResult<std::sync::MutexGuard<'_, tokio::runtime::Runtime>> {
+        self.runtime.lock().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Tokio runtime lock poisoned: {e}"))
+        })
+    }
+
+    /// Shared helper for `store` and `store_full` — builds the request and executes it.
+    fn execute_store(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        store: Option<&str>,
+    ) -> PyResult<EncodeStoreResponse> {
+        let store_type = match store {
+            Some(s) => Some(parse_store_type(s)?),
+            None => None,
+        };
+
+        let req = EncodeStoreRequest {
+            header: None,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: text.as_bytes().to_vec(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            store: store_type,
+            emotion: None,
+            context: None,
+            associations: None,
+        };
+
+        py.allow_threads(|| {
+            let runtime = self.runtime()?;
+            runtime
+                .block_on(self.engine.encode_store(req))
+                .map_err(to_py_err)
+        })
+    }
+}
+
+#[pymethods]
+impl PyCerememoryEngine {
+    /// Create a new CerememoryEngine.
+    ///
+    /// Args:
+    ///     config: Optional configuration dict with keys:
+    ///         - working_capacity (int): Working memory slot count (default: 7)
+    ///         - recall_mode (str): "human" or "perfect" (default: "human")
+    ///
+    /// When no config is provided, an in-memory engine with default settings
+    /// is created (suitable for development, testing, and embedded use).
+    #[new]
+    #[pyo3(signature = (config=None))]
+    fn new(config: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to create tokio runtime: {e}"
+                ))
+            })?;
+
+        let mut engine_config = EngineConfig::default();
+
+        if let Some(cfg) = config {
+            if let Some(capacity) = cfg.get_item("working_capacity")? {
+                engine_config.working_capacity = capacity.extract::<usize>()?;
+            }
+            if let Some(mode) = cfg.get_item("recall_mode")? {
+                let mode_str: String = mode.extract()?;
+                engine_config.recall_mode = match mode_str.as_str() {
+                    "perfect" => cerememory_core::types::RecallMode::Perfect,
+                    "human" => cerememory_core::types::RecallMode::Human,
+                    other => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "Invalid recall_mode: '{other}'. Use 'human' or 'perfect'"
+                        )));
+                    }
+                };
+            }
+        }
+
+        let engine = CerememoryEngine::new(engine_config).map_err(to_py_err)?;
+
+        Ok(Self {
+            runtime: std::sync::Mutex::new(runtime),
+            engine,
+        })
+    }
+
+    /// Store a text memory and return its record UUID as a string.
+    ///
+    /// Args:
+    ///     text: The text content to store.
+    ///     store: Optional store name ("episodic", "semantic", "procedural",
+    ///            "emotional", "working"). If omitted, the engine auto-routes.
+    ///
+    /// Returns:
+    ///     The UUID of the newly created record.
+    ///
+    /// Raises:
+    ///     ValueError: If the store name is invalid or content is too large.
+    #[pyo3(signature = (text, store=None))]
+    fn store(&self, py: Python<'_>, text: &str, store: Option<&str>) -> PyResult<String> {
+        let resp = self.execute_store(py, text, store)?;
+        Ok(resp.record_id.to_string())
+    }
+
+    /// Store a text memory and return a full EncodeStoreResponse.
+    ///
+    /// Like `store()` but returns the complete response object with
+    /// record_id, store, initial_fidelity, and associations_created.
+    ///
+    /// Args:
+    ///     text: The text content to store.
+    ///     store: Optional store name.
+    ///
+    /// Returns:
+    ///     EncodeStoreResponse with full details.
+    #[pyo3(signature = (text, store=None))]
+    fn store_full(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        store: Option<&str>,
+    ) -> PyResult<PyEncodeStoreResponse> {
+        let resp = self.execute_store(py, text, store)?;
+        Ok(PyEncodeStoreResponse {
+            record_id: resp.record_id.to_string(),
+            store: resp.store.to_string(),
+            initial_fidelity: resp.initial_fidelity,
+            associations_created: resp.associations_created,
+        })
+    }
+
+    /// Recall memories matching a text query.
+    ///
+    /// Args:
+    ///     query: The text query to search for.
+    ///     limit: Maximum number of results (default: 10).
+    ///     stores: Optional list of store names to search.
+    ///     min_fidelity: Optional minimum fidelity threshold.
+    ///     recall_mode: "human" (default) or "perfect".
+    ///
+    /// Returns:
+    ///     RecallQueryResponse containing matched memories.
+    #[pyo3(signature = (query, limit=10, stores=None, min_fidelity=None, recall_mode=None))]
+    fn recall(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        limit: u32,
+        stores: Option<Vec<String>>,
+        min_fidelity: Option<f64>,
+        recall_mode: Option<&str>,
+    ) -> PyResult<PyRecallQueryResponse> {
+        let store_types = match stores {
+            Some(names) => {
+                let mut types = Vec::with_capacity(names.len());
+                for name in &names {
+                    types.push(parse_store_type(name)?);
+                }
+                Some(types)
+            }
+            None => None,
+        };
+
+        let mode = match recall_mode {
+            Some("perfect") => cerememory_core::types::RecallMode::Perfect,
+            Some("human") | None => cerememory_core::types::RecallMode::Human,
+            Some(other) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid recall_mode: '{other}'. Use 'human' or 'perfect'"
+                )));
+            }
+        };
+
+        let req = RecallQueryRequest {
+            header: None,
+            cue: RecallCue {
+                text: Some(query.to_string()),
+                ..Default::default()
+            },
+            stores: store_types,
+            limit,
+            min_fidelity,
+            include_decayed: false,
+            reconsolidate: true,
+            activation_depth: 2,
+            recall_mode: mode,
+        };
+
+        let resp = py.allow_threads(|| {
+            let runtime = self.runtime()?;
+            runtime
+                .block_on(self.engine.recall_query(req))
+                .map_err(to_py_err)
+        })?;
+
+        let val = serde_json::to_value(&resp).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to serialize recall response: {e}"
+            ))
+        })?;
+
+        Ok(PyRecallQueryResponse::from_value(val))
+    }
+
+    /// Get a single record by UUID.
+    ///
+    /// Args:
+    ///     id: The record UUID string.
+    ///
+    /// Returns:
+    ///     MemoryRecord for the given ID.
+    ///
+    /// Raises:
+    ///     KeyError: If the record does not exist.
+    fn get_record(&self, py: Python<'_>, id: &str) -> PyResult<PyMemoryRecord> {
+        let uuid = parse_uuid(id)?;
+
+        let req = RecordIntrospectRequest {
+            header: None,
+            record_id: uuid,
+            include_history: false,
+            include_associations: true,
+            include_versions: false,
+        };
+
+        let record = py.allow_threads(|| {
+            let runtime = self.runtime()?;
+            runtime
+                .block_on(self.engine.introspect_record(req))
+                .map_err(to_py_err)
+        })?;
+
+        let val = serde_json::to_value(&record).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to serialize record: {e}"))
+        })?;
+
+        Ok(PyMemoryRecord::from_value(val))
+    }
+
+    /// Permanently delete records by UUID.
+    ///
+    /// Args:
+    ///     ids: List of record UUID strings to delete.
+    ///     confirm: Must be True to proceed (safety guard).
+    ///
+    /// Returns:
+    ///     Number of records deleted.
+    ///
+    /// Raises:
+    ///     ValueError: If confirm is False.
+    ///     KeyError: If a record ID is not found (partial deletes may occur).
+    #[pyo3(signature = (ids, confirm=false))]
+    fn forget(&self, py: Python<'_>, ids: Vec<String>, confirm: bool) -> PyResult<u32> {
+        let mut uuids = Vec::with_capacity(ids.len());
+        for id_str in &ids {
+            uuids.push(parse_uuid(id_str)?);
+        }
+
+        let req = ForgetRequest {
+            header: None,
+            record_ids: Some(uuids),
+            store: None,
+            temporal_range: None,
+            cascade: false,
+            confirm,
+        };
+
+        let deleted = py.allow_threads(|| {
+            let runtime = self.runtime()?;
+            runtime
+                .block_on(self.engine.lifecycle_forget(req))
+                .map_err(to_py_err)
+        })?;
+
+        Ok(deleted)
+    }
+
+    /// Get engine statistics.
+    ///
+    /// Returns:
+    ///     StatsResponse with total records, per-store counts, fidelity, etc.
+    fn stats(&self, py: Python<'_>) -> PyResult<PyStatsResponse> {
+        let resp = py.allow_threads(|| {
+            let runtime = self.runtime()?;
+            runtime
+                .block_on(self.engine.introspect_stats())
+                .map_err(to_py_err)
+        })?;
+
+        let val = serde_json::to_value(&resp).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to serialize stats: {e}"))
+        })?;
+
+        Ok(PyStatsResponse::from_value(val))
+    }
+
+    fn __repr__(&self) -> String {
+        "Engine(in_memory=True)".to_string()
+    }
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────
+
+/// Parse a store type string into a `StoreType` enum.
+fn parse_store_type(s: &str) -> PyResult<StoreType> {
+    s.to_lowercase()
+        .parse::<StoreType>()
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))
+}
+
+/// Parse a UUID string.
+fn parse_uuid(s: &str) -> PyResult<Uuid> {
+    s.parse::<Uuid>()
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid UUID '{s}': {e}")))
+}

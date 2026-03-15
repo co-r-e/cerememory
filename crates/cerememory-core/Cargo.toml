@@ -17,6 +17,14 @@ rmp-serde = { workspace = true }
 thiserror = { workspace = true }
 subtle = { workspace = true }
 tokio = { workspace = true }
+chacha20poly1305 = { workspace = true }
+rand = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "serialization_bench"
+harness = false

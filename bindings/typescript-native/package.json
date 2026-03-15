@@ -1,0 +1,19 @@
+{
+  "name": "@cerememory/native",
+  "version": "0.1.0",
+  "description": "Native Node.js bindings for Cerememory memory engine",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "cerememory-native",
+    "triples": {}
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.0.0"
+  },
+  "scripts": {
+    "build": "napi build --release",
+    "build:debug": "napi build"
+  },
+  "license": "Apache-2.0"
+}

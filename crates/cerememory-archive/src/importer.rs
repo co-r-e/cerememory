@@ -71,9 +71,9 @@ pub fn import(data: &[u8]) -> Result<Vec<MemoryRecord>, CerememoryError> {
             .map_err(|e| CerememoryError::ImportConflict(format!("Invalid record: {e}")))?;
 
         // Validate each imported record
-        record
-            .validate()
-            .map_err(|e| CerememoryError::ImportConflict(format!("Record validation failed: {e}")))?;
+        record.validate().map_err(|e| {
+            CerememoryError::ImportConflict(format!("Record validation failed: {e}"))
+        })?;
 
         records.push(record);
     }

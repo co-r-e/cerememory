@@ -15,9 +15,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use cerememory_core::{
-    ActivatedRecord, AssociationEngine, AssociationGraph, CerememoryError,
-};
+use cerememory_core::{ActivatedRecord, AssociationEngine, AssociationGraph, CerememoryError};
 use uuid::Uuid;
 
 /// Tunable parameters for the spreading activation algorithm.
@@ -122,8 +120,7 @@ impl<G: AssociationGraph> AssociationEngine for SpreadingActivationEngine<G> {
                     continue;
                 }
 
-                let new_activation =
-                    entry.activation * assoc.weight * self.params.decay_factor;
+                let new_activation = entry.activation * assoc.weight * self.params.decay_factor;
 
                 // Prune below threshold.
                 if new_activation < self.params.threshold {
@@ -144,10 +141,7 @@ impl<G: AssociationGraph> AssociationEngine for SpreadingActivationEngine<G> {
                     let mut new_path = entry.path.clone();
                     new_path.push(assoc.target_id);
 
-                    best.insert(
-                        assoc.target_id,
-                        (new_activation, new_path.clone()),
-                    );
+                    best.insert(assoc.target_id, (new_activation, new_path.clone()));
 
                     queue.push_back(QueueEntry {
                         record_id: assoc.target_id,

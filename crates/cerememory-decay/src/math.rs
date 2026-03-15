@@ -154,7 +154,10 @@ mod tests {
 
         // Very large time should not go negative.
         let f_large_t = compute_fidelity(1.0, 1e12, 1.0, 0.3, 1.0);
-        assert!(f_large_t >= 0.0, "Fidelity must not go negative, got {f_large_t}");
+        assert!(
+            f_large_t >= 0.0,
+            "Fidelity must not go negative, got {f_large_t}"
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! - [`vector_index::VectorIndex`] — Brute-force cosine similarity search
 
 pub mod hnsw_index;
+pub mod structured_index;
 pub mod text_index;
 pub mod vector_index;
 
@@ -149,7 +150,13 @@ impl HippocampalCoordinator {
         let mut reg = self.registry.write().await;
         reg.clear();
         for (id, store_type, associations) in records {
-            reg.insert(id, RegistryEntry { store_type, associations });
+            reg.insert(
+                id,
+                RegistryEntry {
+                    store_type,
+                    associations,
+                },
+            );
         }
     }
 }
@@ -225,9 +232,7 @@ mod tests {
         let id_a = Uuid::now_v7();
         let id_b = Uuid::now_v7();
         let assoc = make_association(id_b);
-        coord
-            .register(id_a, StoreType::Episodic, vec![assoc])
-            .await;
+        coord.register(id_a, StoreType::Episodic, vec![assoc]).await;
 
         let associations = coord.get_associations(&id_a).await.unwrap();
         assert_eq!(associations.len(), 1);

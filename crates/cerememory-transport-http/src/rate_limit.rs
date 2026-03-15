@@ -32,10 +32,9 @@ impl RateLimitLayer {
     /// Spawns a background task that shrinks the internal DashMap every 60 seconds
     /// to evict stale entries and prevent unbounded memory growth.
     pub fn new(per_second: u64, burst: u32) -> Self {
-        let quota = Quota::per_second(
-            NonZeroU32::new(per_second as u32).unwrap_or(NonZeroU32::MIN),
-        )
-        .allow_burst(NonZeroU32::new(burst).unwrap_or(NonZeroU32::MIN));
+        let quota =
+            Quota::per_second(NonZeroU32::new(per_second as u32).unwrap_or(NonZeroU32::MIN))
+                .allow_burst(NonZeroU32::new(burst).unwrap_or(NonZeroU32::MIN));
         let limiter = Arc::new(RateLimiter::keyed(quota));
 
         // Periodic cleanup of stale IP entries
@@ -125,15 +124,13 @@ where
             }
             Err(not_until) => {
                 let clock = governor::clock::DefaultClock::default();
-                let retry_after =
-                    not_until.wait_time_from(governor::clock::Clock::now(&clock));
+                let retry_after = not_until.wait_time_from(governor::clock::Clock::now(&clock));
                 let secs = retry_after.as_secs() + 1; // round up
                 Box::pin(async move {
                     let mut cmp_error =
                         CMPError::new(CMPErrorCode::RateLimited, "Rate limit exceeded");
                     cmp_error.retry_after = Some(secs as u32);
-                    let mut resp =
-                        (StatusCode::TOO_MANY_REQUESTS, Json(cmp_error)).into_response();
+                    let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(cmp_error)).into_response();
                     resp.headers_mut().insert(
                         "retry-after",
                         axum::http::HeaderValue::from_str(&secs.to_string()).unwrap(),

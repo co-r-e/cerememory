@@ -90,10 +90,7 @@ pub fn router(engine: Arc<CerememoryEngine>, api_keys: Vec<String>) -> Router {
 }
 
 /// Create the Axum router with full middleware configuration.
-pub fn router_with_config(
-    engine: Arc<CerememoryEngine>,
-    config: HttpMiddlewareConfig,
-) -> Router {
+pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareConfig) -> Router {
     let auth_layer = ApiKeyAuthLayer::new(config.api_keys);
 
     // Build CORS layer
@@ -151,7 +148,10 @@ pub fn router_with_config(
         // Introspect
         .route("/v1/introspect/stats", get(introspect_stats))
         .route("/v1/introspect/record/:record_id", get(introspect_record))
-        .route("/v1/introspect/decay-forecast", post(introspect_decay_forecast))
+        .route(
+            "/v1/introspect/decay-forecast",
+            post(introspect_decay_forecast),
+        )
         .route("/v1/introspect/evolution", get(introspect_evolution))
         .with_state(engine)
         .layer(auth_layer)
@@ -241,9 +241,7 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(AppJson(value)),
-            Err(rejection) => Err(AppError(CerememoryError::Validation(
-                rejection.body_text(),
-            ))),
+            Err(rejection) => Err(AppError(CerememoryError::Validation(rejection.body_text()))),
         }
     }
 }
@@ -266,9 +264,7 @@ where
     ) -> Result<Self, Self::Rejection> {
         match axum::extract::Path::<T>::from_request_parts(parts, state).await {
             Ok(Path(value)) => Ok(AppPath(value)),
-            Err(rejection) => Err(AppError(CerememoryError::Validation(
-                rejection.body_text(),
-            ))),
+            Err(rejection) => Err(AppError(CerememoryError::Validation(rejection.body_text()))),
         }
     }
 }
@@ -373,9 +369,7 @@ async fn lifecycle_forget(
 
 // ─── Introspect handlers ─────────────────────────────────────────────
 
-async fn introspect_stats(
-    State(engine): State<AppState>,
-) -> Result<Json<StatsResponse>, AppError> {
+async fn introspect_stats(State(engine): State<AppState>) -> Result<Json<StatsResponse>, AppError> {
     let stats = engine.introspect_stats().await?;
     Ok(Json(stats))
 }

@@ -224,22 +224,28 @@ impl MemoryRecord {
         data: Vec<u8>,
         embedding: Option<Vec<f32>>,
     ) -> Self {
-        Self::new_single_block(store, ContentBlock {
-            modality,
-            format: format.into(),
-            data,
-            embedding,
-        })
+        Self::new_single_block(
+            store,
+            ContentBlock {
+                modality,
+                format: format.into(),
+                data,
+                embedding,
+            },
+        )
     }
 
     /// Create a new text-only memory record with sensible defaults.
     pub fn new_text(store: StoreType, text: impl Into<String>) -> Self {
-        Self::new_single_block(store, ContentBlock {
-            modality: Modality::Text,
-            format: "text/plain".to_string(),
-            data: text.into().into_bytes(),
-            embedding: None,
-        })
+        Self::new_single_block(
+            store,
+            ContentBlock {
+                modality: Modality::Text,
+                format: "text/plain".to_string(),
+                data: text.into().into_bytes(),
+                embedding: None,
+            },
+        )
     }
 
     /// Validate record invariants including modality-specific size limits.
@@ -250,20 +256,23 @@ impl MemoryRecord {
             ));
         }
         if self.fidelity.score < 0.0 || self.fidelity.score > 1.0 {
-            return Err(crate::error::CerememoryError::Validation(
-                format!("Fidelity score {} out of range [0.0, 1.0]", self.fidelity.score),
-            ));
+            return Err(crate::error::CerememoryError::Validation(format!(
+                "Fidelity score {} out of range [0.0, 1.0]",
+                self.fidelity.score
+            )));
         }
         if self.fidelity.noise_level < 0.0 || self.fidelity.noise_level > 1.0 {
-            return Err(crate::error::CerememoryError::Validation(
-                format!("Noise level {} out of range [0.0, 1.0]", self.fidelity.noise_level),
-            ));
+            return Err(crate::error::CerememoryError::Validation(format!(
+                "Noise level {} out of range [0.0, 1.0]",
+                self.fidelity.noise_level
+            )));
         }
         for assoc in &self.associations {
             if assoc.weight < 0.0 || assoc.weight > 1.0 {
-                return Err(crate::error::CerememoryError::Validation(
-                    format!("Association weight {} out of range [0.0, 1.0]", assoc.weight),
-                ));
+                return Err(crate::error::CerememoryError::Validation(format!(
+                    "Association weight {} out of range [0.0, 1.0]",
+                    assoc.weight
+                )));
             }
         }
         // Modality-specific size limits and embedding validation
@@ -272,13 +281,28 @@ impl MemoryRecord {
                 Modality::Text => MAX_TEXT_SIZE,
                 Modality::Image => MAX_IMAGE_SIZE,
                 Modality::Audio | Modality::Video => MAX_AUDIO_SIZE,
-                Modality::Structured | Modality::Spatial | Modality::Temporal | Modality::Interoceptive => MAX_TEXT_SIZE,
+                Modality::Structured
+                | Modality::Spatial
+                | Modality::Temporal
+                | Modality::Interoceptive => MAX_TEXT_SIZE,
             };
             if block.data.len() > limit {
                 return Err(crate::error::CerememoryError::ContentTooLarge {
                     size: block.data.len(),
                     limit,
                 });
+            }
+            if block.modality == Modality::Text && std::str::from_utf8(&block.data).is_err() {
+                return Err(crate::error::CerememoryError::Validation(
+                    "Text content must be valid UTF-8".to_string(),
+                ));
+            }
+            if block.modality == Modality::Structured {
+                serde_json::from_slice::<serde_json::Value>(&block.data).map_err(|e| {
+                    crate::error::CerememoryError::Validation(format!(
+                        "Structured content must be valid JSON: {e}"
+                    ))
+                })?;
             }
             // Validate embedding: reject empty, NaN, Inf
             if let Some(ref emb) = block.embedding {
@@ -338,6 +362,23 @@ pub fn estimate_tokens_from_bytes(bytes: usize) -> usize {
     bytes.div_ceil(4)
 }
 
+impl std::str::FromStr for StoreType {
+    type Err = crate::error::CerememoryError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "episodic" => Ok(StoreType::Episodic),
+            "semantic" => Ok(StoreType::Semantic),
+            "procedural" => Ok(StoreType::Procedural),
+            "emotional" => Ok(StoreType::Emotional),
+            "working" => Ok(StoreType::Working),
+            other => Err(crate::error::CerememoryError::StoreInvalid(
+                other.to_string(),
+            )),
+        }
+    }
+}
+
 impl std::fmt::Display for StoreType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -387,6 +428,41 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_invalid_utf8_text_blocks() {
+        let mut record = MemoryRecord::new_binary(
+            StoreType::Episodic,
+            Modality::Text,
+            "text/plain",
+            vec![0xFF, 0xFE, 0xFD],
+            None,
+        );
+        record.content.summary = Some("invalid text".to_string());
+
+        let err = record.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CerememoryError::Validation(msg) if msg.contains("UTF-8")
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_structured_json() {
+        let record = MemoryRecord::new_binary(
+            StoreType::Semantic,
+            Modality::Structured,
+            "application/json",
+            b"{not valid json}".to_vec(),
+            None,
+        );
+
+        let err = record.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CerememoryError::Validation(msg) if msg.contains("valid JSON")
+        ));
+    }
+
+    #[test]
     fn memory_record_json_roundtrip() {
         let record = MemoryRecord::new_text(StoreType::Semantic, "Knowledge fact");
         let json = serde_json::to_string(&record).unwrap();
@@ -426,5 +502,26 @@ mod tests {
     fn store_type_display() {
         assert_eq!(StoreType::Episodic.to_string(), "episodic");
         assert_eq!(StoreType::Working.to_string(), "working");
+    }
+
+    #[test]
+    fn store_type_from_str_valid() {
+        assert_eq!("episodic".parse::<StoreType>().unwrap(), StoreType::Episodic);
+        assert_eq!("semantic".parse::<StoreType>().unwrap(), StoreType::Semantic);
+        assert_eq!(
+            "procedural".parse::<StoreType>().unwrap(),
+            StoreType::Procedural
+        );
+        assert_eq!(
+            "emotional".parse::<StoreType>().unwrap(),
+            StoreType::Emotional
+        );
+        assert_eq!("working".parse::<StoreType>().unwrap(), StoreType::Working);
+    }
+
+    #[test]
+    fn store_type_from_str_invalid() {
+        let err = "unknown".parse::<StoreType>().unwrap_err();
+        assert!(matches!(err, crate::error::CerememoryError::StoreInvalid(_)));
     }
 }

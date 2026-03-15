@@ -103,8 +103,7 @@ impl PowerLawDecayEngine {
         let emotion_mod = math::compute_emotion_mod(input.emotion.intensity);
 
         let new_score = math::compute_fidelity(f0, t_secs, stability, decay_exponent, emotion_mod);
-        let new_noise =
-            math::compute_noise(n0, t_secs, new_score, self.params.interference_rate);
+        let new_noise = math::compute_noise(n0, t_secs, new_score, self.params.interference_rate);
 
         let should_prune = new_score < self.params.prune_threshold;
 
@@ -278,10 +277,7 @@ mod tests {
 
         let result = engine.compute_tick(&[input], 3600.0);
         let n = result.updates[0].new_fidelity.noise_level;
-        assert!(
-            n > 0.0,
-            "Noise should increase after 1 hour, got {n}"
-        );
+        assert!(n > 0.0, "Noise should increase after 1 hour, got {n}");
     }
 
     #[test]
@@ -372,7 +368,10 @@ mod tests {
         let input = make_input(default_fidelity(), default_emotion(), now);
         let result = engine.compute_tick(&[input], 0.0);
 
-        assert!(!result.updates[0].should_prune, "Fresh record should not be pruned");
+        assert!(
+            !result.updates[0].should_prune,
+            "Fresh record should not be pruned"
+        );
         assert_eq!(result.records_pruned, 0);
     }
 

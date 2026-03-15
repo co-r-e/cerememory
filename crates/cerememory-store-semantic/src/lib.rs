@@ -33,8 +33,7 @@ use cerememory_core::{
 
 const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("semantic_nodes");
 const EDGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("semantic_edges");
-const REVERSE_EDGES: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("semantic_reverse_edges");
+const REVERSE_EDGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("semantic_reverse_edges");
 const CONCEPTS: TableDefinition<&str, &[u8]> = TableDefinition::new("semantic_concepts");
 
 // ---------------------------------------------------------------------------
@@ -115,8 +114,8 @@ pub struct SemanticStore {
 impl SemanticStore {
     /// Open an in-memory semantic store (for testing).
     pub fn open_in_memory() -> Result<Self, CerememoryError> {
-        let tmp = tempfile::NamedTempFile::new()
-            .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+        let tmp =
+            tempfile::NamedTempFile::new().map_err(|e| CerememoryError::Storage(e.to_string()))?;
         Self::open(tmp.path())
     }
 
@@ -139,9 +138,7 @@ impl SemanticStore {
         txn.commit()
             .map_err(|e| CerememoryError::Storage(e.to_string()))?;
 
-        Ok(Self {
-            db: Arc::new(db),
-        })
+        Ok(Self { db: Arc::new(db) })
     }
 
     // -----------------------------------------------------------------------
@@ -169,12 +166,18 @@ impl SemanticStore {
                 let nodes = txn
                     .open_table(NODES)
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                if nodes.get(source.as_bytes().as_slice())
-                    .map_err(|e| CerememoryError::Storage(e.to_string()))?.is_none() {
+                if nodes
+                    .get(source.as_bytes().as_slice())
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?
+                    .is_none()
+                {
                     return Err(CerememoryError::RecordNotFound(source.to_string()));
                 }
-                if nodes.get(target.as_bytes().as_slice())
-                    .map_err(|e| CerememoryError::Storage(e.to_string()))?.is_none() {
+                if nodes
+                    .get(target.as_bytes().as_slice())
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?
+                    .is_none()
+                {
                     return Err(CerememoryError::RecordNotFound(target.to_string()));
                 }
                 drop(nodes);
@@ -252,10 +255,7 @@ impl SemanticStore {
     }
 
     /// Get all outgoing neighbors (forward edges) of a node.
-    pub async fn get_neighbors(
-        &self,
-        id: Uuid,
-    ) -> Result<Vec<Association>, CerememoryError> {
+    pub async fn get_neighbors(&self, id: Uuid) -> Result<Vec<Association>, CerememoryError> {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
@@ -268,7 +268,10 @@ impl SemanticStore {
             let prefix = id.as_bytes().to_vec();
             let mut result = Vec::new();
 
-            for entry in edges.iter().map_err(|e| CerememoryError::Storage(e.to_string()))? {
+            for entry in edges
+                .iter()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?
+            {
                 let (k, v) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
                 let key_bytes = k.value();
                 if key_bytes.len() == 33 && key_bytes.starts_with(&prefix) {
@@ -309,7 +312,10 @@ impl SemanticStore {
             let prefix = id.as_bytes().to_vec();
             let mut result = Vec::new();
 
-            for entry in rev.iter().map_err(|e| CerememoryError::Storage(e.to_string()))? {
+            for entry in rev
+                .iter()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?
+            {
                 let (k, _v) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
                 let key_bytes = k.value();
                 if key_bytes.len() == 33 && key_bytes.starts_with(&prefix) {
@@ -683,7 +689,10 @@ impl Store for SemanticStore {
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
 
             let mut results = Vec::new();
-            for entry in nodes.iter().map_err(|e| CerememoryError::Storage(e.to_string()))? {
+            for entry in nodes
+                .iter()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?
+            {
                 let (_k, v) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
                 let rec: MemoryRecord = rmp_serde::from_slice(v.value())
                     .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
@@ -723,12 +732,14 @@ impl Store for SemanticStore {
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
 
             let mut ids = Vec::new();
-            for entry in nodes.iter().map_err(|e| CerememoryError::Storage(e.to_string()))? {
+            for entry in nodes
+                .iter()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?
+            {
                 let (k, _v) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                let bytes: [u8; 16] = k
-                    .value()
-                    .try_into()
-                    .map_err(|_| CerememoryError::Internal("Invalid UUID key length".to_string()))?;
+                let bytes: [u8; 16] = k.value().try_into().map_err(|_| {
+                    CerememoryError::Internal("Invalid UUID key length".to_string())
+                })?;
                 ids.push(Uuid::from_bytes(bytes));
             }
             Ok(ids)
@@ -1181,10 +1192,7 @@ mod tests {
             .store(make_record("The quick brown fox"))
             .await
             .unwrap();
-        store
-            .store(make_record("Lazy dog sleeping"))
-            .await
-            .unwrap();
+        store.store(make_record("Lazy dog sleeping")).await.unwrap();
         store
             .store(make_record("Fox and dog are friends"))
             .await
@@ -1198,7 +1206,10 @@ mod tests {
     async fn query_text_matches_summary() {
         let store = temp_store();
         store
-            .store(make_record_with_summary("body text", "Photosynthesis overview"))
+            .store(make_record_with_summary(
+                "body text",
+                "Photosynthesis overview",
+            ))
             .await
             .unwrap();
 

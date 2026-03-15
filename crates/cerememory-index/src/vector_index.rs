@@ -137,8 +137,8 @@ impl VectorIndex {
     pub fn upsert(&self, id: Uuid, embedding: &[f32]) -> Result<(), CerememoryError> {
         Self::validate_embedding(embedding)?;
         let normalized = l2_normalize(embedding);
-        let bytes =
-            rmp_serde::to_vec(&normalized).map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+        let bytes = rmp_serde::to_vec(&normalized)
+            .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
 
         let txn = self
             .db
@@ -290,8 +290,8 @@ impl VectorIndex {
         let mut heap: BinaryHeap<Reverse<(OrderedFloat<f32>, Uuid)>> = BinaryHeap::new();
 
         for entry in iter {
-            let (key, value) = entry
-                .map_err(|e| CerememoryError::Storage(format!("VectorIndex entry: {e}")))?;
+            let (key, value) =
+                entry.map_err(|e| CerememoryError::Storage(format!("VectorIndex entry: {e}")))?;
 
             let key_bytes = key.value();
             if key_bytes.len() != 16 {
@@ -362,8 +362,8 @@ impl VectorIndex {
 
         let mut entries = Vec::new();
         for entry in iter {
-            let (key, value) = entry
-                .map_err(|e| CerememoryError::Storage(format!("VectorIndex entry: {e}")))?;
+            let (key, value) =
+                entry.map_err(|e| CerememoryError::Storage(format!("VectorIndex entry: {e}")))?;
 
             let key_bytes = key.value();
             if key_bytes.len() != 16 {
@@ -633,11 +633,8 @@ mod tests {
         let id1 = Uuid::now_v7();
         let id2 = Uuid::now_v7();
 
-        idx.upsert_batch(&[
-            (id1, &[1.0, 0.0][..]),
-            (id2, &[0.0, 1.0][..]),
-        ])
-        .unwrap();
+        idx.upsert_batch(&[(id1, &[1.0, 0.0][..]), (id2, &[0.0, 1.0][..])])
+            .unwrap();
 
         let hits = idx.search(&[1.0, 0.1], 1).unwrap();
         assert_eq!(hits.len(), 1);
@@ -651,10 +648,7 @@ mod tests {
         let id2 = Uuid::now_v7();
 
         // Second entry has NaN — entire batch should fail
-        let result = idx.upsert_batch(&[
-            (id1, &[1.0, 0.0][..]),
-            (id2, &[f32::NAN, 0.0][..]),
-        ]);
+        let result = idx.upsert_batch(&[(id1, &[1.0, 0.0][..]), (id2, &[f32::NAN, 0.0][..])]);
         assert!(result.is_err());
 
         // Nothing should have been written

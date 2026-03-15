@@ -68,8 +68,7 @@ fn bench_vector_upsert_batch(c: &mut Criterion) {
         let entries: Vec<(Uuid, Vec<f32>)> = (0..batch_size)
             .map(|i| (Uuid::now_v7(), generate_random_embedding(dim, i as u64)))
             .collect();
-        let refs: Vec<(Uuid, &[f32])> =
-            entries.iter().map(|(id, v)| (*id, v.as_slice())).collect();
+        let refs: Vec<(Uuid, &[f32])> = entries.iter().map(|(id, v)| (*id, v.as_slice())).collect();
 
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
@@ -106,12 +105,7 @@ fn bench_text_search(c: &mut Criterion) {
         let text = texts[i % texts.len()];
         let id = Uuid::now_v7();
         index
-            .add(
-                id,
-                StoreType::Episodic,
-                &format!("{text} record {i}"),
-                None,
-            )
+            .add(id, StoreType::Episodic, &format!("{text} record {i}"), None)
             .unwrap();
     }
 

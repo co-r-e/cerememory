@@ -11,7 +11,9 @@ pub mod provider;
 
 pub use provider::GeminiProvider;
 
-use cerememory_core::{estimate_tokens_from_bytes, LLMAdapter, MemoryContent, MemoryRecord, ModelInfo};
+use cerememory_core::{
+    estimate_tokens_from_bytes, LLMAdapter, MemoryContent, MemoryRecord, ModelInfo,
+};
 
 /// LLM adapter for Google Gemini models.
 ///
@@ -57,11 +59,7 @@ impl LLMAdapter for GeminiAdapter {
 
     fn estimate_tokens(&self, content: &MemoryContent) -> usize {
         let total_bytes: usize = content.blocks.iter().map(|b| b.data.len()).sum();
-        let summary_bytes = content
-            .summary
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or(0);
+        let summary_bytes = content.summary.as_ref().map(|s| s.len()).unwrap_or(0);
         estimate_tokens_from_bytes(total_bytes + summary_bytes)
     }
 

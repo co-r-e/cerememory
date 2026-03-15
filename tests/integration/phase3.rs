@@ -188,7 +188,10 @@ async fn emotional_store_persistence() {
         assert_eq!(record.id, record_id);
         assert_eq!(record.store, StoreType::Emotional);
         assert!(record.emotion.joy > 0.5, "Joy should be preserved");
-        assert!(record.emotion.intensity > 0.5, "Intensity should be preserved");
+        assert!(
+            record.emotion.intensity > 0.5,
+            "Intensity should be preserved"
+        );
     }
 }
 
@@ -345,10 +348,7 @@ async fn vector_search_many_records() {
         "Should return multiple results for vector search, got {}",
         resp.memories.len()
     );
-    assert!(
-        resp.memories.len() <= 10,
-        "Should respect the limit of 10"
-    );
+    assert!(resp.memories.len() <= 10, "Should respect the limit of 10");
 
     // Verify results are ordered by relevance (descending)
     for i in 1..resp.memories.len() {
@@ -397,8 +397,7 @@ async fn grpc_encode_recall_cycle() {
         .unwrap()
         .into_inner();
 
-    let encode_resp: EncodeStoreResponse =
-        serde_json::from_slice(&resp.json_payload).unwrap();
+    let encode_resp: EncodeStoreResponse = serde_json::from_slice(&resp.json_payload).unwrap();
     assert_eq!(encode_resp.store, StoreType::Episodic);
 
     // Recall via gRPC
@@ -425,8 +424,7 @@ async fn grpc_encode_recall_cycle() {
         .unwrap()
         .into_inner();
 
-    let recall_resp: RecallQueryResponse =
-        serde_json::from_slice(&resp.json_payload).unwrap();
+    let recall_resp: RecallQueryResponse = serde_json::from_slice(&resp.json_payload).unwrap();
 
     assert!(
         !recall_resp.memories.is_empty(),

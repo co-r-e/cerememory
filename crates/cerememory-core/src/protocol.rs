@@ -124,7 +124,9 @@ pub struct EncodeUpdateRequest {
 #[serde(default)]
 pub struct RecallCue {
     pub text: Option<String>,
+    /// Raw image bytes. The engine auto-detects common formats (PNG, JPEG, GIF, WebP).
     pub image: Option<Vec<u8>>,
+    /// Raw audio bytes. The engine auto-detects common formats (WAV, MP3, FLAC, OGG, MP4/WebM).
     pub audio: Option<Vec<u8>>,
     pub emotion: Option<EmotionVector>,
     pub temporal: Option<TemporalRange>,
@@ -606,29 +608,34 @@ impl From<&crate::error::CerememoryError> for CMPError {
     fn from(err: &crate::error::CerememoryError) -> Self {
         use crate::error::CerememoryError;
         match err {
-            CerememoryError::RecordNotFound(id) => {
-                CMPError::new(CMPErrorCode::RecordNotFound, format!("Record not found: {id}"))
-            }
+            CerememoryError::RecordNotFound(id) => CMPError::new(
+                CMPErrorCode::RecordNotFound,
+                format!("Record not found: {id}"),
+            ),
             CerememoryError::StoreInvalid(s) => {
                 CMPError::new(CMPErrorCode::StoreInvalid, format!("Invalid store: {s}"))
             }
-            CerememoryError::ContentTooLarge { size, limit } => {
-                CMPError::new(CMPErrorCode::ContentTooLarge, format!("{size} bytes exceeds {limit}"))
-            }
-            CerememoryError::ModalityUnsupported(m) => {
-                CMPError::new(CMPErrorCode::ModalityUnsupported, format!("Unsupported: {m}"))
-            }
-            CerememoryError::WorkingMemoryFull => {
-                CMPError::new(CMPErrorCode::WorkingMemoryFull, "Working memory at capacity")
-            }
+            CerememoryError::ContentTooLarge { size, limit } => CMPError::new(
+                CMPErrorCode::ContentTooLarge,
+                format!("{size} bytes exceeds {limit}"),
+            ),
+            CerememoryError::ModalityUnsupported(m) => CMPError::new(
+                CMPErrorCode::ModalityUnsupported,
+                format!("Unsupported: {m}"),
+            ),
+            CerememoryError::WorkingMemoryFull => CMPError::new(
+                CMPErrorCode::WorkingMemoryFull,
+                "Working memory at capacity",
+            ),
             CerememoryError::DecayEngineBusy { retry_after_secs } => {
                 let mut e = CMPError::new(CMPErrorCode::DecayEngineBusy, "Decay engine busy");
                 e.retry_after = Some(*retry_after_secs);
                 e
             }
-            CerememoryError::ConsolidationInProgress => {
-                CMPError::new(CMPErrorCode::ConsolidationInProgress, "Consolidation in progress")
-            }
+            CerememoryError::ConsolidationInProgress => CMPError::new(
+                CMPErrorCode::ConsolidationInProgress,
+                "Consolidation in progress",
+            ),
             CerememoryError::ExportFailed(msg) => {
                 CMPError::new(CMPErrorCode::ExportFailed, msg.clone())
             }
@@ -638,9 +645,10 @@ impl From<&crate::error::CerememoryError> for CMPError {
             CerememoryError::ForgetUnconfirmed => {
                 CMPError::new(CMPErrorCode::ForgetUnconfirmed, "Confirm required")
             }
-            CerememoryError::VersionMismatch { expected, got } => {
-                CMPError::new(CMPErrorCode::VersionMismatch, format!("Expected {expected}, got {got}"))
-            }
+            CerememoryError::VersionMismatch { expected, got } => CMPError::new(
+                CMPErrorCode::VersionMismatch,
+                format!("Expected {expected}, got {got}"),
+            ),
             CerememoryError::Validation(msg) => {
                 CMPError::new(CMPErrorCode::ValidationError, msg.clone())
             }

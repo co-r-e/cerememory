@@ -217,8 +217,7 @@ mod tests {
     #[test]
     fn export_single_store_filter() {
         let records = make_mixed_records();
-        let (bytes, resp) =
-            export_filtered(&records, Some(&[StoreType::Episodic]), None).unwrap();
+        let (bytes, resp) = export_filtered(&records, Some(&[StoreType::Episodic]), None).unwrap();
         assert_eq!(resp.record_count, 2);
         let imported = import_records(&bytes).unwrap();
         assert_eq!(imported.len(), 2);

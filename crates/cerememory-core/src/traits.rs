@@ -140,13 +140,39 @@ pub struct ActivatedRecord {
     pub path: Vec<Uuid>,
 }
 
+/// Capabilities advertised by an LLM provider.
+///
+/// Used by the engine to decide which multimodal operations to attempt.
+#[derive(Debug, Clone)]
+pub struct ProviderCapabilities {
+    /// Can generate text embeddings.
+    pub text_embedding: bool,
+    /// Can generate image embeddings (via vision → text → embed pipeline).
+    pub image_embedding: bool,
+    /// Can transcribe audio to text.
+    pub audio_transcription: bool,
+}
+
+impl Default for ProviderCapabilities {
+    fn default() -> Self {
+        Self {
+            text_embedding: true,
+            image_embedding: false,
+            audio_transcription: false,
+        }
+    }
+}
+
 /// Async trait for LLM providers with embed/summarize/extract capabilities.
 ///
-/// This is the Phase 4 provider trait. Designed to be optional:
+/// This is the Phase 4+ provider trait. Designed to be optional:
 /// `Option<Arc<dyn LLMProvider>>` in the engine. When absent, all operations
 /// fall back to existing behavior (manual embeddings, truncation summaries).
 ///
 /// Uses boxed futures for dyn-compatibility (needed for `Arc<dyn LLMProvider>`).
+///
+/// Phase 8 additions: `embed_image`, `transcribe_audio`, `capabilities` with
+/// default implementations that return `ModalityUnsupported` / text-only caps.
 pub trait LLMProvider: Send + Sync {
     /// Generate an embedding vector for the given text.
     fn embed(
@@ -172,6 +198,44 @@ pub trait LLMProvider: Send + Sync {
                 + '_,
         >,
     >;
+
+    /// Generate an embedding for an image by describing it, then embedding the description.
+    ///
+    /// Default implementation returns `ModalityUnsupported`.
+    fn embed_image(
+        &self,
+        _data: &[u8],
+        _format: &str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<f32>, CerememoryError>> + Send + '_>>
+    {
+        Box::pin(async {
+            Err(CerememoryError::ModalityUnsupported(
+                "Image embedding not supported by this provider".to_string(),
+            ))
+        })
+    }
+
+    /// Transcribe audio data to text.
+    ///
+    /// Default implementation returns `ModalityUnsupported`.
+    fn transcribe_audio(
+        &self,
+        _data: &[u8],
+        _format: &str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, CerememoryError>> + Send + '_>> {
+        Box::pin(async {
+            Err(CerememoryError::ModalityUnsupported(
+                "Audio transcription not supported by this provider".to_string(),
+            ))
+        })
+    }
+
+    /// Advertise which multimodal capabilities this provider supports.
+    ///
+    /// Default: text embedding only.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
 }
 
 /// Truncate a string to at most `max_len` bytes, ensuring the cut
@@ -205,8 +269,7 @@ impl LLMProvider for NoOpProvider {
         &self,
         texts: &[String],
         _max_tokens: usize,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, CerememoryError>> + Send + '_>>
-    {
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, CerememoryError>> + Send + '_>> {
         let joined: String = texts.join(" ");
         let result = if joined.len() > 200 {
             format!("{}...", truncate_str(&joined, 200))
@@ -227,6 +290,14 @@ impl LLMProvider for NoOpProvider {
         >,
     > {
         Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            text_embedding: false,
+            image_embedding: false,
+            audio_transcription: false,
+        }
     }
 }
 

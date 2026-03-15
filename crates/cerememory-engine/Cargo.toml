@@ -21,6 +21,7 @@ cerememory-evolution = { workspace = true }
 cerememory-index = { workspace = true }
 cerememory-archive = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -32,3 +33,8 @@ metrics = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "engine_bench"
+harness = false

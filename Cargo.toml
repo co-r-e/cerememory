@@ -21,6 +21,8 @@ members = [
     "adapters/adapter-openai",
     "adapters/adapter-gemini",
     "tests/integration",
+    "bindings/typescript-native",
+    "bindings/python-native",
 ]
 
 [workspace.package]
@@ -47,6 +49,7 @@ anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 rayon = "1"
 async-trait = "0.1"
+futures = "0.3"
 
 # Storage
 redb = "2"
@@ -86,8 +89,9 @@ subtle = "2"
 governor = "0.7"
 
 # LLM HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], default-features = false }
 backoff = { version = "0.4", features = ["tokio"] }
+base64 = "0.22"
 
 # Health & shutdown
 tonic-health = "0.12"
@@ -96,6 +100,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # Metrics
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+
+# Node.js native bindings
+napi = { version = "2", features = ["async", "serde-json"] }
+napi-derive = "2"
+napi-build = "2"
 
 # Testing
 tempfile = "3"

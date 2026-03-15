@@ -153,7 +153,10 @@ async fn tantivy_search_after_update() {
         })
         .await
         .unwrap();
-    assert!(!recall.memories.is_empty(), "Should find 'dolphins' before update");
+    assert!(
+        !recall.memories.is_empty(),
+        "Should find 'dolphins' before update"
+    );
 
     // Update the text
     engine
@@ -233,7 +236,10 @@ async fn tantivy_search_after_delete() {
         })
         .await
         .unwrap();
-    assert!(!recall.memories.is_empty(), "Should find 'penguins' before delete");
+    assert!(
+        !recall.memories.is_empty(),
+        "Should find 'penguins' before delete"
+    );
 
     // Delete the record
     engine
@@ -291,7 +297,11 @@ async fn vector_search_cosine() {
         .await
         .unwrap();
     let r2 = engine
-        .encode_store(text_with_embedding("Vector medium", StoreType::Episodic, e2))
+        .encode_store(text_with_embedding(
+            "Vector medium",
+            StoreType::Episodic,
+            e2,
+        ))
         .await
         .unwrap();
     let _r3 = engine
@@ -331,10 +341,7 @@ async fn vector_search_cosine() {
     let pos_r2 = result_ids.iter().position(|id| *id == r2.record_id);
 
     if let (Some(p1), Some(p2)) = (pos_r1, pos_r2) {
-        assert!(
-            p1 < p2,
-            "r1 (cosine closer to query) should rank before r2"
-        );
+        assert!(p1 < p2, "r1 (cosine closer to query) should rank before r2");
     }
 }
 
@@ -389,8 +396,14 @@ async fn vector_search_multimodal() {
         .await
         .unwrap();
 
-    assert!(!recall.memories.is_empty(), "Should find the image record via vector search");
-    let found = recall.memories.iter().any(|m| m.record.id == resp.record_id);
+    assert!(
+        !recall.memories.is_empty(),
+        "Should find the image record via vector search"
+    );
+    let found = recall
+        .memories
+        .iter()
+        .any(|m| m.record.id == resp.record_id);
     assert!(found, "Should find the specific image record");
 }
 
@@ -444,7 +457,10 @@ async fn hybrid_text_vector_recall() {
         .await
         .unwrap();
 
-    assert!(!resp.memories.is_empty(), "Hybrid recall should find records");
+    assert!(
+        !resp.memories.is_empty(),
+        "Hybrid recall should find records"
+    );
 
     // r_a should be the top result since both text and vector point to it
     assert_eq!(
@@ -570,7 +586,10 @@ async fn image_record_store_recall() {
         .await
         .unwrap();
 
-    assert!(!recall.memories.is_empty(), "Should find the multimodal record");
+    assert!(
+        !recall.memories.is_empty(),
+        "Should find the multimodal record"
+    );
     let found = recall
         .memories
         .iter()
@@ -585,7 +604,10 @@ async fn image_record_store_recall() {
         .iter()
         .find(|b| b.modality == Modality::Image)
         .expect("Should have an image block");
-    assert_eq!(image_block.data, image_data, "Image data should be preserved");
+    assert_eq!(
+        image_block.data, image_data,
+        "Image data should be preserved"
+    );
     assert_eq!(image_block.format, "image/png");
 }
 
@@ -725,15 +747,24 @@ async fn export_import_roundtrip() {
 
     // Store several records in different stores
     engine
-        .encode_store(text_req("Episodic memory about travel", StoreType::Episodic))
+        .encode_store(text_req(
+            "Episodic memory about travel",
+            StoreType::Episodic,
+        ))
         .await
         .unwrap();
     engine
-        .encode_store(text_req("Semantic memory about geography", StoreType::Semantic))
+        .encode_store(text_req(
+            "Semantic memory about geography",
+            StoreType::Semantic,
+        ))
         .await
         .unwrap();
     engine
-        .encode_store(text_req("Procedural memory about driving", StoreType::Procedural))
+        .encode_store(text_req(
+            "Procedural memory about driving",
+            StoreType::Procedural,
+        ))
         .await
         .unwrap();
 
@@ -831,7 +862,10 @@ async fn export_store_filter() {
     let stats = engine2.introspect_stats().await.unwrap();
     assert_eq!(stats.records_by_store[&StoreType::Episodic], 2);
     assert_eq!(
-        *stats.records_by_store.get(&StoreType::Semantic).unwrap_or(&0),
+        *stats
+            .records_by_store
+            .get(&StoreType::Semantic)
+            .unwrap_or(&0),
         0
     );
 }
@@ -843,7 +877,10 @@ async fn export_encrypted_import() {
     let engine = make_engine();
 
     engine
-        .encode_store(text_req("Secret memory about classified info", StoreType::Episodic))
+        .encode_store(text_req(
+            "Secret memory about classified info",
+            StoreType::Episodic,
+        ))
         .await
         .unwrap();
     engine
@@ -969,7 +1006,10 @@ async fn cli_store_recall_flow() {
     let texts = [
         ("Learning Rust ownership", StoreType::Procedural),
         ("Meeting notes from Tuesday", StoreType::Episodic),
-        ("Photosynthesis converts light to energy", StoreType::Semantic),
+        (
+            "Photosynthesis converts light to energy",
+            StoreType::Semantic,
+        ),
     ];
 
     let mut ids = Vec::new();
@@ -997,7 +1037,10 @@ async fn cli_store_recall_flow() {
         .await
         .unwrap();
 
-    assert!(!recall.memories.is_empty(), "Should find Rust-related memory");
+    assert!(
+        !recall.memories.is_empty(),
+        "Should find Rust-related memory"
+    );
 
     // Introspect stats
     let stats = engine.introspect_stats().await.unwrap();

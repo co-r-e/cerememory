@@ -12,12 +12,14 @@
 //! - Core traits ([`Store`], [`DecayEngine`], [`AssociationEngine`])
 
 pub mod auth;
-pub mod types;
+pub mod encryption;
+pub mod error;
+pub mod media;
 pub mod protocol;
 pub mod traits;
-pub mod error;
+pub mod types;
 
-pub use types::*;
 pub use error::CerememoryError;
 pub use protocol::*;
 pub use traits::*;
+pub use types::*;

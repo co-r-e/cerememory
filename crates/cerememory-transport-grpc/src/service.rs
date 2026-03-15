@@ -202,11 +202,7 @@ impl CerememoryService for CerememoryGrpcService {
         request: Request<proto::ForgetRequest>,
     ) -> Result<Response<proto::ForgetResponse>, Status> {
         let req = from_json(&request.into_inner().json_payload)?;
-        let deleted = self
-            .engine
-            .lifecycle_forget(req)
-            .await
-            .map_err(to_status)?;
+        let deleted = self.engine.lifecycle_forget(req).await.map_err(to_status)?;
         Ok(Response::new(proto::ForgetResponse {
             records_deleted: deleted,
         }))
@@ -220,8 +216,7 @@ impl CerememoryService for CerememoryGrpcService {
         request: Request<proto::ExportRequest>,
     ) -> Result<Response<Self::ExportStream>, Status> {
         let req = from_json(&request.into_inner().json_payload)?;
-        let (bytes, export_resp) =
-            self.engine.lifecycle_export(req).await.map_err(to_status)?;
+        let (bytes, export_resp) = self.engine.lifecycle_export(req).await.map_err(to_status)?;
         let metadata = to_json(&export_resp)?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(16);
@@ -241,11 +236,7 @@ impl CerememoryService for CerememoryGrpcService {
             }
             for (i, chunk) in bytes.chunks(CHUNK_SIZE).enumerate() {
                 let is_last = i == total_chunks - 1;
-                let chunk_metadata = if i == 0 {
-                    metadata.clone()
-                } else {
-                    Vec::new()
-                };
+                let chunk_metadata = if i == 0 { metadata.clone() } else { Vec::new() };
                 if tx
                     .send(Ok(proto::ExportChunk {
                         data: chunk.to_vec(),

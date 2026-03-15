@@ -232,10 +232,7 @@ impl HnswVectorIndex {
             dimension,
         });
 
-        info!(
-            count = entries.len(),
-            dimension, "HNSW index rebuilt"
-        );
+        info!(count = entries.len(), dimension, "HNSW index rebuilt");
 
         Ok(())
     }

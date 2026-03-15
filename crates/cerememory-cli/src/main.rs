@@ -124,14 +124,9 @@ enum Commands {
 }
 
 fn parse_store_type(s: &str) -> Result<StoreType> {
-    match s.to_lowercase().as_str() {
-        "episodic" => Ok(StoreType::Episodic),
-        "semantic" => Ok(StoreType::Semantic),
-        "procedural" => Ok(StoreType::Procedural),
-        "emotional" => Ok(StoreType::Emotional),
-        "working" => Ok(StoreType::Working),
-        _ => anyhow::bail!("Invalid store type: {s}. Use: episodic, semantic, procedural, emotional, working"),
-    }
+    s.to_lowercase()
+        .parse::<StoreType>()
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn parse_embedding(s: &str) -> Result<Vec<f32>> {
@@ -167,29 +162,39 @@ fn load_config(cli: &Cli) -> Result<ServerConfig> {
 
 fn build_llm_provider(
     config: &ServerConfig,
-) -> Option<Arc<dyn cerememory_core::LLMProvider>> {
+) -> Result<Option<Arc<dyn cerememory_core::LLMProvider>>> {
     let provider_name = config.llm.provider.as_str();
-    let api_key = config.llm.api_key_exposed()?.to_string();
     let model = config.llm.model.clone();
     let base_url = config.llm.base_url.clone();
 
+    let require_api_key = || {
+        config
+            .llm
+            .api_key_exposed()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("LLM provider '{provider_name}' requires an API key"))
+    };
+
     match provider_name {
         #[cfg(feature = "llm-openai")]
-        "openai" => Some(Arc::new(cerememory_adapter_openai::OpenAIProvider::new(
-            api_key, model, base_url,
+        "openai" => Ok(Some(Arc::new(
+            cerememory_adapter_openai::OpenAIProvider::new(require_api_key()?, model, base_url)?,
         ))),
         #[cfg(feature = "llm-claude")]
-        "claude" | "anthropic" => Some(Arc::new(
-            cerememory_adapter_claude::ClaudeProvider::new(api_key, model, base_url),
-        )),
+        "claude" | "anthropic" => Ok(Some(Arc::new(
+            cerememory_adapter_claude::ClaudeProvider::new(require_api_key()?, model, base_url)?,
+        ))),
         #[cfg(feature = "llm-gemini")]
-        "gemini" | "google" => Some(Arc::new(
-            cerememory_adapter_gemini::GeminiProvider::new(api_key, model, base_url),
-        )),
-        "none" | "" => None,
+        "gemini" | "google" => Ok(Some(Arc::new(
+            cerememory_adapter_gemini::GeminiProvider::new(require_api_key()?, model, base_url)?,
+        ))),
+        "none" | "" => Ok(None),
         other => {
-            tracing::warn!(provider = other, "Unknown LLM provider, running without LLM");
-            None
+            tracing::warn!(
+                provider = other,
+                "Unknown LLM provider, running without LLM"
+            );
+            Ok(None)
         }
     }
 }
@@ -197,7 +202,7 @@ fn build_llm_provider(
 fn create_engine_from_config(config: &ServerConfig) -> Result<CerememoryEngine> {
     std::fs::create_dir_all(&config.data_dir).context("Failed to create data directory")?;
     let mut engine_config = config.to_engine_config();
-    engine_config.llm_provider = build_llm_provider(config);
+    engine_config.llm_provider = build_llm_provider(config)?;
     Ok(CerememoryEngine::new(engine_config)?)
 }
 
@@ -220,9 +225,7 @@ fn init_logging(config: &ServerConfig) {
                 .init();
         }
         _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
 }
@@ -278,8 +281,7 @@ async fn main() -> Result<()> {
                 (Some(cert_path), Some(key_path)) => {
                     let cert_pem =
                         std::fs::read(cert_path).context("Failed to read TLS cert file")?;
-                    let key_pem =
-                        std::fs::read(key_path).context("Failed to read TLS key file")?;
+                    let key_pem = std::fs::read(key_path).context("Failed to read TLS key file")?;
                     Some(cerememory_transport_grpc::TlsConfig { cert_pem, key_pem })
                 }
                 _ => None,
@@ -378,7 +380,11 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Serve { .. } => unreachable!(),
 
-        Commands::Store { text, store, embedding } => {
+        Commands::Store {
+            text,
+            store,
+            embedding,
+        } => {
             let store_type = parse_store_type(&store)?;
             let emb = embedding.map(|s| parse_embedding(&s)).transpose()?;
 
@@ -400,11 +406,16 @@ async fn main() -> Result<()> {
             };
 
             if store_type == StoreType::Working {
-                eprintln!("Warning: working store is in-memory only and will not persist across restarts");
+                eprintln!(
+                    "Warning: working store is in-memory only and will not persist across restarts"
+                );
             }
 
             let resp = engine.encode_store(req).await?;
-            println!("Stored: {} (store: {}, fidelity: {})", resp.record_id, resp.store, resp.initial_fidelity);
+            println!(
+                "Stored: {} (store: {}, fidelity: {})",
+                resp.record_id, resp.store, resp.initial_fidelity
+            );
         }
 
         Commands::Recall { query, limit, mode } => {
@@ -429,11 +440,21 @@ async fn main() -> Result<()> {
             };
 
             let resp = engine.recall_query(req).await?;
-            println!("Found {} memories (total candidates: {})\n", resp.memories.len(), resp.total_candidates);
+            println!(
+                "Found {} memories (total candidates: {})\n",
+                resp.memories.len(),
+                resp.total_candidates
+            );
 
             for (i, mem) in resp.memories.iter().enumerate() {
                 let text = mem.record.text_content().unwrap_or("[non-text]");
-                println!("{}. [{}] score={:.4} fidelity={:.4}", i + 1, mem.record.store, mem.relevance_score, mem.record.fidelity.score);
+                println!(
+                    "{}. [{}] score={:.4} fidelity={:.4}",
+                    i + 1,
+                    mem.record.store,
+                    mem.relevance_score,
+                    mem.record.fidelity.score
+                );
                 println!("   ID: {}", mem.record.id);
                 println!("   {}", text);
                 println!();
@@ -441,13 +462,15 @@ async fn main() -> Result<()> {
         }
 
         Commands::Inspect { record_id } => {
-            let record = engine.introspect_record(RecordIntrospectRequest {
-                header: None,
-                record_id,
-                include_history: true,
-                include_associations: true,
-                include_versions: true,
-            }).await?;
+            let record = engine
+                .introspect_record(RecordIntrospectRequest {
+                    header: None,
+                    record_id,
+                    include_history: true,
+                    include_associations: true,
+                    include_versions: true,
+                })
+                .await?;
 
             println!("{}", serde_json::to_string_pretty(&record)?);
         }
@@ -458,10 +481,12 @@ async fn main() -> Result<()> {
         }
 
         Commands::DecayTick { duration } => {
-            let resp = engine.lifecycle_decay_tick(DecayTickRequest {
-                header: None,
-                tick_duration_seconds: Some(duration),
-            }).await?;
+            let resp = engine
+                .lifecycle_decay_tick(DecayTickRequest {
+                    header: None,
+                    tick_duration_seconds: Some(duration),
+                })
+                .await?;
 
             println!("Decay tick completed:");
             println!("  Records updated: {}", resp.records_updated);
@@ -469,15 +494,21 @@ async fn main() -> Result<()> {
             println!("  Pruned: {}", resp.records_pruned);
         }
 
-        Commands::Forget { record_id, cascade, confirm } => {
-            let deleted = engine.lifecycle_forget(ForgetRequest {
-                header: None,
-                record_ids: Some(vec![record_id]),
-                store: None,
-                temporal_range: None,
-                cascade,
-                confirm,
-            }).await?;
+        Commands::Forget {
+            record_id,
+            cascade,
+            confirm,
+        } => {
+            let deleted = engine
+                .lifecycle_forget(ForgetRequest {
+                    header: None,
+                    record_ids: Some(vec![record_id]),
+                    store: None,
+                    temporal_range: None,
+                    cascade,
+                    confirm,
+                })
+                .await?;
 
             println!("Deleted {deleted} record(s)");
         }
@@ -487,7 +518,11 @@ async fn main() -> Result<()> {
             let bytes = cerememory_archive::export_to_bytes(&records)?;
 
             std::fs::write(&output, &bytes).context("Failed to write archive file")?;
-            println!("Exported {} records to {output} ({} bytes)", records.len(), bytes.len());
+            println!(
+                "Exported {} records to {output} ({} bytes)",
+                records.len(),
+                bytes.len()
+            );
         }
 
         Commands::Import { path } => {

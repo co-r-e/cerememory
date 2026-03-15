@@ -6,10 +6,10 @@
 
 use std::collections::HashMap;
 
-use chrono::Utc;
 use cerememory_core::error::CerememoryError;
 use cerememory_core::traits::Store;
 use cerememory_core::types::*;
+use chrono::Utc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -357,9 +357,15 @@ mod tests {
     #[tokio::test]
     async fn query_text_finds_matching_records() {
         let store = WorkingMemoryStore::new();
-        store.store(make_record("The quick brown fox")).await.unwrap();
+        store
+            .store(make_record("The quick brown fox"))
+            .await
+            .unwrap();
         store.store(make_record("Lazy dog sleeps")).await.unwrap();
-        store.store(make_record("QUICK uppercase match")).await.unwrap();
+        store
+            .store(make_record("QUICK uppercase match"))
+            .await
+            .unwrap();
 
         let results = store.query_text("quick", 10).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -369,7 +375,10 @@ mod tests {
     async fn query_text_respects_limit() {
         let store = WorkingMemoryStore::new();
         for i in 0..5 {
-            store.store(make_record(&format!("item {i}"))).await.unwrap();
+            store
+                .store(make_record(&format!("item {i}")))
+                .await
+                .unwrap();
         }
 
         let results = store.query_text("item", 3).await.unwrap();
@@ -546,9 +555,7 @@ mod tests {
     #[tokio::test]
     async fn update_record_nonexistent_errors() {
         let store = WorkingMemoryStore::new();
-        let result = store
-            .update_record(&Uuid::now_v7(), None, None, None)
-            .await;
+        let result = store.update_record(&Uuid::now_v7(), None, None, None).await;
         assert!(matches!(result, Err(CerememoryError::RecordNotFound(_))));
     }
 

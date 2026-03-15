@@ -297,21 +297,19 @@ impl CerememoryEngine {
                 if let Some(record) = dispatch_store!(self, store_type, get(&id))? {
                     entries.push((record.id, store_type, record.associations.clone()));
 
-                    // Collect text for full-text index rebuild
-                    if let Some(text) = record.text_content() {
+                    // Collect searchable text for full-text index rebuild.
+                    let text = Self::build_searchable_text(&record).unwrap_or_default();
+                    if Self::has_indexable_content(&text, &record) {
                         text_records.push((
                             record.id,
                             store_type,
-                            text.to_string(),
+                            text,
                             record.content.summary.clone(),
                         ));
                     }
 
-                    // Rebuild vector index from embeddings
-                    for block in &record.content.blocks {
-                        if let Some(ref emb) = block.embedding {
-                            let _ = self.vector_index.upsert(record.id, emb);
-                        }
+                    if let Some(embedding) = Self::primary_embedding(&record) {
+                        let _ = self.vector_index.upsert(record.id, embedding);
                     }
                 }
             }
@@ -331,27 +329,235 @@ impl CerememoryEngine {
 
     // ─── Index helpers ─────────────────────────────────────────────
 
-    /// Index a record's text content and embeddings.
+    /// Returns `true` if the record has non-empty searchable text or a non-empty summary,
+    /// meaning it should be indexed in the full-text index.
+    fn has_indexable_content(searchable_text: &str, record: &MemoryRecord) -> bool {
+        !searchable_text.is_empty()
+            || record
+                .content
+                .summary
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|summary| !summary.is_empty())
+    }
+
+    /// Build a single searchable text body from textual and structured blocks.
+    fn build_searchable_text(record: &MemoryRecord) -> Option<String> {
+        let mut chunks = Vec::new();
+
+        for block in &record.content.blocks {
+            match block.modality {
+                Modality::Text => match std::str::from_utf8(&block.data) {
+                    Ok(text) => {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            chunks.push(trimmed.to_string());
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            record_id = %record.id,
+                            "Skipping invalid UTF-8 text block during indexing"
+                        );
+                    }
+                },
+                Modality::Structured => {
+                    match cerememory_index::structured_index::flatten_json_to_text(&block.data) {
+                        Ok(flat) if !flat.is_empty() => chunks.push(flat),
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(
+                                error = %error,
+                                record_id = %record.id,
+                                "Skipping invalid structured block during indexing"
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if chunks.is_empty() {
+            None
+        } else {
+            Some(chunks.join("\n"))
+        }
+    }
+
+    fn primary_embedding(record: &MemoryRecord) -> Option<&[f32]> {
+        record
+            .content
+            .blocks
+            .iter()
+            .find_map(|block| block.embedding.as_deref())
+    }
+
+    fn detect_image_format(data: &[u8]) -> Option<&'static str> {
+        if data.len() >= 8 && data.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Some("png");
+        }
+        if data.len() >= 3 && data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            return Some("jpeg");
+        }
+        if data.len() >= 6 && (data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
+            return Some("gif");
+        }
+        if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+            return Some("webp");
+        }
+        None
+    }
+
+    fn detect_audio_format(data: &[u8]) -> Option<&'static str> {
+        if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WAVE" {
+            return Some("wav");
+        }
+        if data.len() >= 4 && data.starts_with(b"fLaC") {
+            return Some("flac");
+        }
+        if data.len() >= 4 && data.starts_with(b"OggS") {
+            return Some("ogg");
+        }
+        if data.len() >= 3 && data.starts_with(b"ID3") {
+            return Some("mp3");
+        }
+        if data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 {
+            return Some("mp3");
+        }
+        if data.len() >= 12 && &data[4..8] == b"ftyp" {
+            return Some("mp4");
+        }
+        if data.len() >= 4 && data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            return Some("webm");
+        }
+        None
+    }
+
+    async fn resolve_recall_cues(
+        &self,
+        cue: &RecallCue,
+    ) -> Result<(Option<String>, Option<Vec<f32>>), CerememoryError> {
+        let mut text = cue
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let mut embedding = cue.embedding.clone();
+
+        if let Some(image) = cue.image.as_ref() {
+            if image.is_empty() {
+                return Err(CerememoryError::Validation(
+                    "Recall image cue must not be empty".to_string(),
+                ));
+            }
+
+            if embedding.is_none() {
+                let provider = self.llm_provider.as_ref().ok_or_else(|| {
+                    CerememoryError::ModalityUnsupported(
+                        "Image recall requires an LLM provider with image embedding support"
+                            .to_string(),
+                    )
+                })?;
+                let caps = provider.capabilities();
+                if !caps.image_embedding {
+                    return Err(CerememoryError::ModalityUnsupported(
+                        "Configured LLM provider does not support image recall".to_string(),
+                    ));
+                }
+
+                let format = Self::detect_image_format(image).ok_or_else(|| {
+                    CerememoryError::Validation("Unsupported image recall cue format".to_string())
+                })?;
+                let generated = provider.embed_image(image, format).await?;
+                if generated.is_empty() {
+                    return Err(CerememoryError::Internal(
+                        "Image recall provider returned an empty embedding".to_string(),
+                    ));
+                }
+                embedding = Some(generated);
+            }
+        }
+
+        if let Some(audio) = cue.audio.as_ref() {
+            if audio.is_empty() {
+                return Err(CerememoryError::Validation(
+                    "Recall audio cue must not be empty".to_string(),
+                ));
+            }
+
+            let provider = self.llm_provider.as_ref().ok_or_else(|| {
+                CerememoryError::ModalityUnsupported(
+                    "Audio recall requires an LLM provider with transcription support".to_string(),
+                )
+            })?;
+            let caps = provider.capabilities();
+            if !caps.audio_transcription {
+                return Err(CerememoryError::ModalityUnsupported(
+                    "Configured LLM provider does not support audio recall".to_string(),
+                ));
+            }
+
+            let format = Self::detect_audio_format(audio).ok_or_else(|| {
+                CerememoryError::Validation("Unsupported audio recall cue format".to_string())
+            })?;
+            let transcript = provider.transcribe_audio(audio, format).await?;
+            let transcript = transcript.trim();
+            if transcript.is_empty() {
+                return Err(CerememoryError::Validation(
+                    "Audio recall cue produced an empty transcript".to_string(),
+                ));
+            }
+            match &mut text {
+                Some(existing) => {
+                    existing.push('\n');
+                    existing.push_str(transcript);
+                }
+                None => text = Some(transcript.to_string()),
+            }
+            if embedding.is_none() && caps.text_embedding {
+                let generated = provider.embed(transcript).await?;
+                if !generated.is_empty() {
+                    embedding = Some(generated);
+                }
+            }
+        }
+
+        if embedding.is_none() {
+            if let (Some(provider), Some(query_text)) =
+                (self.llm_provider.as_ref(), text.as_deref())
+            {
+                if provider.capabilities().text_embedding {
+                    match provider.embed(query_text).await {
+                        Ok(generated) if !generated.is_empty() => embedding = Some(generated),
+                        Ok(_) => warn!("Text recall cue embedding returned an empty vector"),
+                        Err(error) => warn!(error = %error, "Failed to embed text recall cue"),
+                    }
+                }
+            }
+        }
+
+        Ok((text, embedding))
+    }
+
+    /// Index a record's text content, structured data, and embeddings.
     /// Uses only the first embedding found (one vector per record_id).
     fn index_record(&self, record: &MemoryRecord) -> Result<(), CerememoryError> {
-        // Text index
-        if let Some(text) = record.text_content() {
+        let text = Self::build_searchable_text(record).unwrap_or_default();
+        if Self::has_indexable_content(&text, record) {
             self.text_index.add(
                 record.id,
                 record.store,
-                text,
+                &text,
                 record.content.summary.as_deref(),
             )?;
         }
 
         // Vector index — use first embedding found (one vector per record_id)
-        if let Some(emb) = record
-            .content
-            .blocks
-            .iter()
-            .find_map(|b| b.embedding.as_ref())
-        {
-            self.vector_index.upsert(record.id, emb)?;
+        if let Some(embedding) = Self::primary_embedding(record) {
+            self.vector_index.upsert(record.id, embedding)?;
         }
 
         Ok(())
@@ -373,7 +579,10 @@ impl CerememoryEngine {
         }
     }
 
-    async fn get_store_record(&self, id: &Uuid) -> Result<Option<(MemoryRecord, StoreType)>, CerememoryError> {
+    async fn get_store_record(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<(MemoryRecord, StoreType)>, CerememoryError> {
         // Check coordinator first for store type hint
         if let Some(st) = self.coordinator.get_record_store_type(id).await? {
             let record = dispatch_store!(self, st, get(id))?;
@@ -381,7 +590,13 @@ impl CerememoryEngine {
         }
 
         // Fallback: search all stores
-        for st in [StoreType::Working, StoreType::Episodic, StoreType::Semantic, StoreType::Procedural, StoreType::Emotional] {
+        for st in [
+            StoreType::Working,
+            StoreType::Episodic,
+            StoreType::Semantic,
+            StoreType::Procedural,
+            StoreType::Emotional,
+        ] {
             if let Some(r) = dispatch_store!(self, st, get(id))? {
                 return Ok(Some((r, st)));
             }
@@ -392,7 +607,10 @@ impl CerememoryEngine {
     // ─── CMP Encode Operations ───────────────────────────────────────
 
     /// encode.store — Store a new memory record (CMP Spec §3.1).
-    pub async fn encode_store(&self, req: EncodeStoreRequest) -> Result<EncodeStoreResponse, CerememoryError> {
+    pub async fn encode_store(
+        &self,
+        req: EncodeStoreRequest,
+    ) -> Result<EncodeStoreResponse, CerememoryError> {
         let _timer = TimerGuard::new("cerememory_encode_duration_seconds");
         let store_type = req.store.unwrap_or_else(|| self.route_store(&req.content));
 
@@ -426,23 +644,125 @@ impl CerememoryEngine {
             }
         }
 
-        // Auto-generate embedding if provider is available and no embedding exists
+        // Auto-generate embeddings and transcriptions if provider is available
         if let Some(ref provider) = self.llm_provider {
-            let has_embedding = record.content.blocks.iter().any(|b| b.embedding.is_some());
-            if !has_embedding {
+            let caps = provider.capabilities();
+
+            // Auto-embed text blocks that lack embeddings
+            let has_text_embedding = record
+                .content
+                .blocks
+                .iter()
+                .any(|b| b.modality == Modality::Text && b.embedding.is_some());
+            if !has_text_embedding && caps.text_embedding {
                 if let Some(text) = record.text_content().map(|s| s.to_string()) {
                     match provider.embed(&text).await {
                         Ok(embedding) if !embedding.is_empty() => {
-                            if let Some(block) = record.content.blocks.iter_mut().find(|b| b.modality == Modality::Text) {
+                            if let Some(block) = record
+                                .content
+                                .blocks
+                                .iter_mut()
+                                .find(|b| b.modality == Modality::Text)
+                            {
                                 block.embedding = Some(embedding);
                             }
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            warn!(error = %e, "LLM auto-embed failed, continuing without embedding");
+                            warn!(error = %e, "LLM text auto-embed failed, continuing without embedding");
                         }
                     }
                 }
+            }
+
+            // Collect image block data (cloned) for concurrent processing.
+            // We clone data+format out of the record so the borrow is released
+            // before we mutate the blocks with the results.
+            let image_tasks: Vec<(usize, Vec<u8>, String)> = if caps.image_embedding {
+                record
+                    .content
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.modality == Modality::Image && b.embedding.is_none())
+                    .map(|(i, b)| (i, b.data.clone(), b.format.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            let audio_tasks: Vec<(Vec<u8>, String)> = if caps.audio_transcription {
+                record
+                    .content
+                    .blocks
+                    .iter()
+                    .filter(|b| b.modality == Modality::Audio)
+                    .map(|b| (b.data.clone(), b.format.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Process image embeddings concurrently
+            if !image_tasks.is_empty() {
+                let image_results: Vec<(usize, Result<Vec<f32>, _>)> =
+                    futures::future::join_all(image_tasks.iter().map(|(idx, data, fmt)| {
+                        let idx = *idx;
+                        async move { (idx, provider.embed_image(data, fmt).await) }
+                    }))
+                    .await;
+
+                for (idx, result) in image_results {
+                    match result {
+                        Ok(embedding) if !embedding.is_empty() => {
+                            record.content.blocks[idx].embedding = Some(embedding);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(error = %e, "LLM image auto-embed failed, continuing without embedding");
+                        }
+                    }
+                }
+            }
+
+            // Process audio transcriptions concurrently
+            if !audio_tasks.is_empty() {
+                let audio_results: Vec<Result<String, _>> =
+                    futures::future::join_all(audio_tasks.iter().map(|(data, fmt)| {
+                        async move { provider.transcribe_audio(data, fmt).await }
+                    }))
+                    .await;
+
+                let mut new_text_blocks = Vec::new();
+                for result in audio_results {
+                    match result {
+                        Ok(transcript) if !transcript.is_empty() => {
+                            let mut text_block = ContentBlock {
+                                modality: Modality::Text,
+                                format: "text/plain".to_string(),
+                                data: transcript.as_bytes().to_vec(),
+                                embedding: None,
+                            };
+                            if caps.text_embedding {
+                                match provider.embed(&transcript).await {
+                                    Ok(emb) if !emb.is_empty() => {
+                                        text_block.embedding = Some(emb);
+                                    }
+                                    Err(error) => {
+                                        warn!(error = %error, "LLM transcript auto-embed failed, continuing without embedding");
+                                    }
+                                    Ok(_) => {}
+                                }
+                            }
+                            new_text_blocks.push(text_block);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(error = %e, "LLM audio transcription failed, continuing without transcript");
+                        }
+                    }
+                }
+                record.content.blocks.extend(new_text_blocks);
             }
         }
 
@@ -473,7 +793,8 @@ impl CerememoryEngine {
 
         info!(record_id = %id, store = %store_type, "Encoded memory record");
 
-        metrics::counter!("cerememory_encode_total", "store" => store_type.to_string()).increment(1);
+        metrics::counter!("cerememory_encode_total", "store" => store_type.to_string())
+            .increment(1);
 
         Ok(EncodeStoreResponse {
             record_id: id,
@@ -484,7 +805,10 @@ impl CerememoryEngine {
     }
 
     /// encode.batch — Store multiple records (CMP Spec §3.2).
-    pub async fn encode_batch(&self, req: EncodeBatchRequest) -> Result<EncodeBatchResponse, CerememoryError> {
+    pub async fn encode_batch(
+        &self,
+        req: EncodeBatchRequest,
+    ) -> Result<EncodeBatchResponse, CerememoryError> {
         let mut results = Vec::with_capacity(req.records.len());
         let mut total_inferred = 0u32;
         let mut prev_id: Option<Uuid> = None;
@@ -510,7 +834,10 @@ impl CerememoryEngine {
                         last_co_activation: Utc::now(),
                     };
                     let _ = self.coordinator.add_association(&prev, assoc_fwd).await;
-                    let _ = self.coordinator.add_association(&resp.record_id, assoc_bwd).await;
+                    let _ = self
+                        .coordinator
+                        .add_association(&resp.record_id, assoc_bwd)
+                        .await;
                     total_inferred += 2;
                 }
             }
@@ -533,33 +860,45 @@ impl CerememoryEngine {
             .ok_or_else(|| CerememoryError::RecordNotFound(req.record_id.to_string()))?;
 
         // Apply updates to a clone and validate before persisting
-        record.apply_updates(req.content.clone(), req.emotion.clone(), req.metadata.clone());
+        record.apply_updates(
+            req.content.clone(),
+            req.emotion.clone(),
+            req.metadata.clone(),
+        );
         record.validate()?;
 
         // Persist the update
-        dispatch_store!(self, store_type, update_record(&req.record_id, req.content.clone(), req.emotion, req.metadata))?;
+        dispatch_store!(
+            self,
+            store_type,
+            update_record(
+                &req.record_id,
+                req.content.clone(),
+                req.emotion,
+                req.metadata
+            )
+        )?;
 
         // Update indexes if content changed
-        if let Some(ref content) = req.content {
-            let text = content
-                .blocks
-                .iter()
-                .find(|b| b.modality == Modality::Text)
-                .and_then(|b| std::str::from_utf8(&b.data).ok())
-                .unwrap_or("");
-            if let Err(e) = self.text_index.update(
-                req.record_id,
-                store_type,
-                text,
-                content.summary.as_deref(),
-            ) {
-                warn!(error = %e, record_id = %req.record_id, "Failed to update text index");
+        if req.content.is_some() {
+            let text = Self::build_searchable_text(&record).unwrap_or_default();
+            if Self::has_indexable_content(&text, &record) {
+                if let Err(e) = self.text_index.update(
+                    req.record_id,
+                    store_type,
+                    &text,
+                    record.content.summary.as_deref(),
+                ) {
+                    warn!(error = %e, record_id = %req.record_id, "Failed to update text index");
+                }
+            } else if let Err(e) = self.text_index.remove(req.record_id) {
+                warn!(error = %e, record_id = %req.record_id, "Failed to clear text index");
             }
 
             // Remove old vector, then insert first new embedding
             let _ = self.vector_index.remove(req.record_id);
-            if let Some(emb) = content.blocks.iter().find_map(|b| b.embedding.as_ref()) {
-                if let Err(e) = self.vector_index.upsert(req.record_id, emb) {
+            if let Some(embedding) = Self::primary_embedding(&record) {
+                if let Err(e) = self.vector_index.upsert(req.record_id, embedding) {
                     warn!(error = %e, record_id = %req.record_id, "Failed to update vector index");
                 }
             }
@@ -579,11 +918,19 @@ impl CerememoryEngine {
     /// 4. Temporal range filter
     /// 5. Spreading activation
     /// 6. Reconsolidation + human noise rendering
-    pub async fn recall_query(&self, req: RecallQueryRequest) -> Result<RecallQueryResponse, CerememoryError> {
+    pub async fn recall_query(
+        &self,
+        req: RecallQueryRequest,
+    ) -> Result<RecallQueryResponse, CerememoryError> {
         let _timer = TimerGuard::new("cerememory_recall_duration_seconds");
         let mode = *self.recall_mode.read().await;
         let recall_mode = req.recall_mode;
-        let effective_mode = if mode == RecallMode::Perfect { RecallMode::Perfect } else { recall_mode };
+        let effective_mode = if mode == RecallMode::Perfect {
+            RecallMode::Perfect
+        } else {
+            recall_mode
+        };
+        let (cue_text, cue_embedding) = self.resolve_recall_cues(&req.cue).await?;
 
         let stores = req.stores.clone().unwrap_or_else(|| {
             vec![
@@ -603,7 +950,7 @@ impl CerememoryEngine {
         let mut vec_scores: HashMap<Uuid, f64> = HashMap::new();
 
         // 1. Tantivy full-text search
-        if let Some(ref text) = req.cue.text {
+        if let Some(ref text) = cue_text {
             let search_limit = req.limit as usize * 3;
             match self.text_index.search(text, Some(&stores), search_limit) {
                 Ok(hits) => {
@@ -615,7 +962,11 @@ impl CerememoryEngine {
                     // Fallback to store-level text search if Tantivy fails
                     warn!(error = %e, "Text index search failed, falling back to store query");
                     for store_type in &stores {
-                        let results = dispatch_store!(self, *store_type, query_text(text, req.limit as usize * 2))?;
+                        let results = dispatch_store!(
+                            self,
+                            *store_type,
+                            query_text(text, req.limit as usize * 2)
+                        )?;
                         for record in results {
                             text_scores.insert(record.id, record.fidelity.score);
                         }
@@ -625,7 +976,7 @@ impl CerememoryEngine {
         }
 
         // 2. Vector similarity search
-        if let Some(ref embedding) = req.cue.embedding {
+        if let Some(ref embedding) = cue_embedding {
             if let Ok(hits) = self.vector_index.search(embedding, req.limit as usize * 3) {
                 for hit in hits {
                     if hit.similarity > 0.0 {
@@ -673,7 +1024,7 @@ impl CerememoryEngine {
 
         // If no index search was performed (no text or embedding cue),
         // fall back to store-level text search for backward compatibility
-        if req.cue.text.is_none() && req.cue.embedding.is_none() {
+        if cue_text.is_none() && cue_embedding.is_none() {
             // No search cue — candidates will come from temporal or activation only
         }
 
@@ -714,7 +1065,9 @@ impl CerememoryEngine {
                     for act in &activated {
                         activated_ids.insert(act.record_id, act.activation_level);
                         if seen_ids.insert(act.record_id) {
-                            if let Some((record, _store)) = self.get_store_record(&act.record_id).await? {
+                            if let Some((record, _store)) =
+                                self.get_store_record(&act.record_id).await?
+                            {
                                 candidates.push((record, act.activation_level * 0.5));
                             }
                         }
@@ -748,9 +1101,18 @@ impl CerememoryEngine {
                 record.fidelity.stability = new_stability;
                 record.fidelity.reinforcement_count += 1;
 
-                if let Some(store_type) = self.coordinator.get_record_store_type(&record.id).await? {
-                    let _ = dispatch_store!(self, store_type, update_fidelity(&record.id, record.fidelity.clone()));
-                    let _ = dispatch_store!(self, store_type, update_access(&record.id, record.access_count, record.last_accessed_at));
+                if let Some(store_type) = self.coordinator.get_record_store_type(&record.id).await?
+                {
+                    let _ = dispatch_store!(
+                        self,
+                        store_type,
+                        update_fidelity(&record.id, record.fidelity.clone())
+                    );
+                    let _ = dispatch_store!(
+                        self,
+                        store_type,
+                        update_access(&record.id, record.access_count, record.last_accessed_at)
+                    );
                 }
             }
 
@@ -787,7 +1149,10 @@ impl CerememoryEngine {
     }
 
     /// recall.associate — Get associated memories (CMP Spec §4.2).
-    pub async fn recall_associate(&self, req: RecallAssociateRequest) -> Result<RecallAssociateResponse, CerememoryError> {
+    pub async fn recall_associate(
+        &self,
+        req: RecallAssociateRequest,
+    ) -> Result<RecallAssociateResponse, CerememoryError> {
         // Verify record exists
         self.get_store_record(&req.record_id)
             .await?
@@ -980,8 +1345,14 @@ impl CerememoryEngine {
         };
 
         if let Some(secs) = epoch_secs(granularity) {
-            let start = Utc.timestamp_opt(key * secs, 0).single().unwrap_or_default();
-            let end = Utc.timestamp_opt((key + 1) * secs, 0).single().unwrap_or_default();
+            let start = Utc
+                .timestamp_opt(key * secs, 0)
+                .single()
+                .unwrap_or_default();
+            let end = Utc
+                .timestamp_opt((key + 1) * secs, 0)
+                .single()
+                .unwrap_or_default();
             return (start, end);
         }
 
@@ -1113,7 +1484,10 @@ impl CerememoryEngine {
     /// - **LLM summarization**: When a provider is configured, related episodic records
     ///   are summarized into a single semantic node (otherwise, truncation fallback).
     /// - **Relation extraction**: LLM extracts semantic relations, stored as associations.
-    pub async fn lifecycle_consolidate(&self, req: ConsolidateRequest) -> Result<ConsolidateResponse, CerememoryError> {
+    pub async fn lifecycle_consolidate(
+        &self,
+        req: ConsolidateRequest,
+    ) -> Result<ConsolidateResponse, CerememoryError> {
         let ids = self.episodic.list_ids().await?;
         let mut processed = 0u32;
         let mut migrated = 0u32;
@@ -1130,18 +1504,20 @@ impl CerememoryEngine {
                 }
                 // Use vector index to find similar records
                 if let Some(record) = self.episodic.get(&id).await? {
-                    if let Some(emb) = record.content.blocks.iter().find_map(|b| b.embedding.as_ref()) {
+                    if let Some(emb) = Self::primary_embedding(&record) {
                         if let Ok(hits) = self.vector_index.search(emb, 5) {
                             for hit in hits {
                                 if hit.record_id != id
                                     && hit.similarity > 0.92
                                     && !checked.contains(&hit.record_id)
                                 {
-                                    // Only consider episodic records as duplicates
-                                    if let Some(hit_store) = self.coordinator.get_record_store_type(&hit.record_id).await? {
-                                        if hit_store != StoreType::Episodic {
-                                            continue;
-                                        }
+                                    let Some((_, hit_store)) =
+                                        self.get_store_record(&hit.record_id).await?
+                                    else {
+                                        continue;
+                                    };
+                                    if hit_store != StoreType::Episodic {
+                                        continue;
                                     }
                                     duplicate_groups.push((id, hit.record_id));
                                     checked.insert(hit.record_id);
@@ -1169,13 +1545,9 @@ impl CerememoryEngine {
                         };
 
                     // Merge associations from removed to kept
-                    let removed_assocs =
-                        self.coordinator.get_associations(&actual_remove).await?;
+                    let removed_assocs = self.coordinator.get_associations(&actual_remove).await?;
                     for assoc in removed_assocs {
-                        let _ = self
-                            .coordinator
-                            .add_association(&actual_keep, assoc)
-                            .await;
+                        let _ = self.coordinator.add_association(&actual_keep, assoc).await;
                     }
 
                     // Delete the duplicate
@@ -1237,14 +1609,13 @@ impl CerememoryEngine {
                             }
                         }
                     } else {
-                        semantic_record.content.summary =
-                            semantic_record.text_content().map(|t| {
-                                if t.len() > 100 {
-                                    format!("{}...", truncate_str(t, 100))
-                                } else {
-                                    t.to_string()
-                                }
-                            });
+                        semantic_record.content.summary = semantic_record.text_content().map(|t| {
+                            if t.len() > 100 {
+                                format!("{}...", truncate_str(t, 100))
+                            } else {
+                                t.to_string()
+                            }
+                        });
                     }
                 }
 
@@ -1309,10 +1680,7 @@ impl CerememoryEngine {
 
         info!(
             processed,
-            migrated,
-            compressed,
-            pruned,
-            "Smart consolidation completed"
+            migrated, compressed, pruned, "Smart consolidation completed"
         );
 
         Ok(ConsolidateResponse {
@@ -1325,7 +1693,10 @@ impl CerememoryEngine {
     }
 
     /// lifecycle.decay_tick — Advance decay (CMP Spec §5.2).
-    pub async fn lifecycle_decay_tick(&self, req: DecayTickRequest) -> Result<DecayTickResponse, CerememoryError> {
+    pub async fn lifecycle_decay_tick(
+        &self,
+        req: DecayTickRequest,
+    ) -> Result<DecayTickResponse, CerememoryError> {
         let tick_secs = req.tick_duration_seconds.unwrap_or(3600) as f64;
 
         let mut all_inputs = Vec::new();
@@ -1353,11 +1724,10 @@ impl CerememoryEngine {
         }
 
         let decay = self.decay.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            decay.compute_tick(&all_inputs, tick_secs)
-        })
-        .await
-        .map_err(|e| CerememoryError::Internal(format!("Decay task failed: {e}")))?;
+        let result =
+            tokio::task::spawn_blocking(move || decay.compute_tick(&all_inputs, tick_secs))
+                .await
+                .map_err(|e| CerememoryError::Internal(format!("Decay task failed: {e}")))?;
 
         for output in &result.updates {
             if let Some(&store_type) = record_stores.get(&output.id) {
@@ -1366,7 +1736,11 @@ impl CerememoryEngine {
                     self.coordinator.unregister(&output.id).await;
                     self.unindex_record(output.id);
                 } else {
-                    dispatch_store!(self, store_type, update_fidelity(&output.id, output.new_fidelity.clone()))?;
+                    dispatch_store!(
+                        self,
+                        store_type,
+                        update_fidelity(&output.id, output.new_fidelity.clone())
+                    )?;
                 }
             }
         }
@@ -1430,7 +1804,11 @@ impl CerememoryEngine {
                     }
 
                     for assoc in cascade_targets {
-                        if let Some(st) = self.coordinator.get_record_store_type(&assoc.target_id).await? {
+                        if let Some(st) = self
+                            .coordinator
+                            .get_record_store_type(&assoc.target_id)
+                            .await?
+                        {
                             if dispatch_store!(self, st, delete(&assoc.target_id))? {
                                 self.coordinator.unregister(&assoc.target_id).await;
                                 self.unindex_record(assoc.target_id);
@@ -1500,8 +1878,7 @@ impl CerememoryEngine {
             .decryption_key
             .as_deref()
             .map(cerememory_archive::crypto::derive_key);
-        let records =
-            cerememory_archive::import_records_with_key(&data, decryption_key.as_ref())?;
+        let records = cerememory_archive::import_records_with_key(&data, decryption_key.as_ref())?;
 
         let conflict_resolution = req.conflict_resolution;
         let mut imported = 0u32;
@@ -1650,7 +2027,10 @@ impl CerememoryEngine {
     }
 
     /// introspect.record (CMP Spec §6.2).
-    pub async fn introspect_record(&self, req: RecordIntrospectRequest) -> Result<MemoryRecord, CerememoryError> {
+    pub async fn introspect_record(
+        &self,
+        req: RecordIntrospectRequest,
+    ) -> Result<MemoryRecord, CerememoryError> {
         let (record, _) = self
             .get_store_record(&req.record_id)
             .await?
@@ -1724,9 +2104,7 @@ impl CerememoryEngine {
         emotion_mod: f64,
     ) -> Option<chrono::DateTime<Utc>> {
         // Match real decay engine: baseline = max(last_accessed_at, last_decay_tick)
-        let base_time = record
-            .last_accessed_at
-            .max(record.fidelity.last_decay_tick);
+        let base_time = record.last_accessed_at.max(record.fidelity.last_decay_tick);
         let f0 = record.fidelity.score;
         let stability = record.fidelity.stability;
 
@@ -1848,12 +2226,34 @@ mod tests {
         }
     }
 
+    fn structured_store_req(json: &str, store: Option<StoreType>) -> EncodeStoreRequest {
+        EncodeStoreRequest {
+            header: None,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Structured,
+                    format: "application/json".to_string(),
+                    data: json.as_bytes().to_vec(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            store,
+            emotion: None,
+            context: None,
+            associations: None,
+        }
+    }
+
     #[tokio::test]
     async fn encode_recall_roundtrip() {
         let engine = make_engine().await;
 
         let resp = engine
-            .encode_store(text_store_req("The quick brown fox", Some(StoreType::Episodic)))
+            .encode_store(text_store_req(
+                "The quick brown fox",
+                Some(StoreType::Episodic),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.store, StoreType::Episodic);
@@ -1887,7 +2287,10 @@ mod tests {
         let engine = make_engine().await;
 
         engine
-            .encode_store(text_store_req("The quick brown fox jumps over the lazy dog", Some(StoreType::Episodic)))
+            .encode_store(text_store_req(
+                "The quick brown fox jumps over the lazy dog",
+                Some(StoreType::Episodic),
+            ))
             .await
             .unwrap();
 
@@ -2208,13 +2611,16 @@ mod tests {
             .await
             .unwrap();
 
-        let record = engine.introspect_record(RecordIntrospectRequest {
-            header: None,
-            record_id: resp.record_id,
-            include_history: false,
-            include_associations: false,
-            include_versions: false,
-        }).await.unwrap();
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
 
         assert_eq!(record.text_content(), Some("Updated content"));
 
@@ -2223,6 +2629,105 @@ mod tests {
         assert_eq!(hits.len(), 1);
         let hits = engine.text_index.search("Original", None, 10).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn encode_update_refreshes_structured_index() {
+        let engine = make_engine().await;
+
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Structured,
+                        format: "application/json".to_string(),
+                        data: br#"{"user":{"name":"Alice"}}"#.to_vec(),
+                        embedding: None,
+                    }],
+                    summary: None,
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            engine.text_index.search("Alice", None, 10).unwrap().len(),
+            1
+        );
+
+        engine
+            .encode_update(EncodeUpdateRequest {
+                header: None,
+                record_id: resp.record_id,
+                content: Some(MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Structured,
+                        format: "application/json".to_string(),
+                        data: br#"{"user":{"name":"Bob"}}"#.to_vec(),
+                        embedding: None,
+                    }],
+                    summary: None,
+                }),
+                emotion: None,
+                metadata: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(engine
+            .text_index
+            .search("Alice", None, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(engine.text_index.search("Bob", None, 10).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rebuild_coordinator_reindexes_structured_records() {
+        let engine = make_engine().await;
+
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Structured,
+                        format: "application/json".to_string(),
+                        data: br#"{"project":{"name":"Cerememory"}}"#.to_vec(),
+                        embedding: None,
+                    }],
+                    summary: None,
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        engine.text_index.remove(resp.record_id).unwrap();
+        assert!(engine
+            .text_index
+            .search("Cerememory", None, 10)
+            .unwrap()
+            .is_empty());
+
+        engine.rebuild_coordinator().await.unwrap();
+
+        assert_eq!(
+            engine
+                .text_index
+                .search("Cerememory", None, 10)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2281,13 +2786,16 @@ mod tests {
         let resp = engine.encode_store(req).await.unwrap();
 
         // Retrieve by ID
-        let record = engine.introspect_record(RecordIntrospectRequest {
-            header: None,
-            record_id: resp.record_id,
-            include_history: false,
-            include_associations: false,
-            include_versions: false,
-        }).await.unwrap();
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
 
         assert_eq!(record.content.blocks[0].modality, Modality::Image);
         assert_eq!(record.content.blocks[0].data, vec![0x89, 0x50, 0x4E, 0x47]);
@@ -2310,6 +2818,408 @@ mod tests {
 
         let recall_resp = engine.recall_query(query).await.unwrap();
         assert!(!recall_resp.memories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn summary_only_records_are_text_searchable() {
+        let engine = make_engine().await;
+
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Image,
+                        format: "image/png".to_string(),
+                        data: vec![0x89, 0x50, 0x4E, 0x47],
+                        embedding: None,
+                    }],
+                    summary: Some("sunset skyline".to_string()),
+                },
+                store: Some(StoreType::Semantic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let recalled = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("skyline".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Semantic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(recalled.memories.len(), 1);
+        assert_eq!(recalled.memories[0].record.id, resp.record_id);
+    }
+
+    #[tokio::test]
+    async fn multiple_text_blocks_are_all_indexed() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![
+                        ContentBlock {
+                            modality: Modality::Text,
+                            format: "text/plain".to_string(),
+                            data: b"primary block".to_vec(),
+                            embedding: None,
+                        },
+                        ContentBlock {
+                            modality: Modality::Text,
+                            format: "text/plain".to_string(),
+                            data: b"secondary block".to_vec(),
+                            embedding: None,
+                        },
+                    ],
+                    summary: None,
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let recalled = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("secondary".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Episodic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(recalled.memories.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn structured_recall_survives_rebuild() {
+        let engine = make_engine().await;
+        engine
+            .encode_store(structured_store_req(
+                r#"{"profile":{"city":"Tokyo","skills":["rust","python"]}}"#,
+                Some(StoreType::Semantic),
+            ))
+            .await
+            .unwrap();
+
+        let query = RecallQueryRequest {
+            header: None,
+            cue: RecallCue {
+                text: Some("Tokyo".to_string()),
+                ..Default::default()
+            },
+            stores: Some(vec![StoreType::Semantic]),
+            limit: 10,
+            min_fidelity: None,
+            include_decayed: false,
+            reconsolidate: false,
+            activation_depth: 0,
+            recall_mode: RecallMode::Perfect,
+        };
+
+        let before = engine.recall_query(query.clone()).await.unwrap();
+        assert_eq!(before.memories.len(), 1);
+
+        engine.rebuild_coordinator().await.unwrap();
+
+        let after = engine.recall_query(query).await.unwrap();
+        assert_eq!(after.memories.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn structured_update_rebuilds_text_index() {
+        let engine = make_engine().await;
+        let resp = engine
+            .encode_store(structured_store_req(
+                r#"{"profile":{"city":"Tokyo"}}"#,
+                Some(StoreType::Semantic),
+            ))
+            .await
+            .unwrap();
+
+        let tokyo_hits = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("Tokyo".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Semantic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+        assert_eq!(tokyo_hits.memories.len(), 1);
+
+        engine
+            .encode_update(EncodeUpdateRequest {
+                header: None,
+                record_id: resp.record_id,
+                content: Some(MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Structured,
+                        format: "application/json".to_string(),
+                        data: br#"{"profile":{"city":"Osaka"}}"#.to_vec(),
+                        embedding: None,
+                    }],
+                    summary: None,
+                }),
+                emotion: None,
+                metadata: None,
+            })
+            .await
+            .unwrap();
+
+        let tokyo_hits = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("Tokyo".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Semantic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+        assert!(tokyo_hits.memories.is_empty());
+
+        let osaka_hits = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("Osaka".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Semantic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+        assert_eq!(osaka_hits.memories.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn multimodal_image_recall_uses_provider_embedding() {
+        let provider = Arc::new(MockLLMProvider::new(4));
+        let engine = CerememoryEngine::new(EngineConfig {
+            llm_provider: Some(provider),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let image = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Image,
+                        format: "image/png".to_string(),
+                        data: image.clone(),
+                        embedding: None,
+                    }],
+                    summary: Some("indexed image".to_string()),
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    image: Some(image),
+                    ..Default::default()
+                },
+                stores: None,
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.memories.len(), 1);
+        assert_eq!(
+            resp.memories[0].record.content.blocks[0].modality,
+            Modality::Image
+        );
+    }
+
+    #[tokio::test]
+    async fn multimodal_audio_recall_uses_provider_transcript() {
+        let provider = Arc::new(MockLLMProvider::new(4));
+        let engine = CerememoryEngine::new(EngineConfig {
+            llm_provider: Some(provider),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let wav_bytes = b"RIFFabcdWAVE".to_vec();
+        engine
+            .encode_store(text_store_req("audio-12", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        let resp = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    audio: Some(wav_bytes),
+                    ..Default::default()
+                },
+                stores: None,
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert!(!resp.memories.is_empty());
+        assert_eq!(resp.memories[0].record.text_content(), Some("audio-12"));
+    }
+
+    #[tokio::test]
+    async fn encode_store_processes_all_multimodal_blocks() {
+        let provider = Arc::new(MockLLMProvider::new(4));
+        let engine = CerememoryEngine::new(EngineConfig {
+            llm_provider: Some(provider),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let image_one = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4];
+        let image_two = vec![0x89, b'P', b'N', b'G', 5, 6, 7, 8, 9];
+        let audio_one = b"RIFFabcdWAVEone".to_vec();
+        let audio_two = b"RIFFabcdWAVEtwoo".to_vec();
+
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![
+                        ContentBlock {
+                            modality: Modality::Image,
+                            format: "image/png".to_string(),
+                            data: image_one.clone(),
+                            embedding: None,
+                        },
+                        ContentBlock {
+                            modality: Modality::Audio,
+                            format: "audio/wav".to_string(),
+                            data: audio_one.clone(),
+                            embedding: None,
+                        },
+                        ContentBlock {
+                            modality: Modality::Image,
+                            format: "image/png".to_string(),
+                            data: image_two.clone(),
+                            embedding: None,
+                        },
+                        ContentBlock {
+                            modality: Modality::Audio,
+                            format: "audio/wav".to_string(),
+                            data: audio_two.clone(),
+                            embedding: None,
+                        },
+                    ],
+                    summary: Some("multimodal batch".to_string()),
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(record.content.blocks.len(), 6);
+        assert_eq!(record.content.blocks[0].modality, Modality::Image);
+        assert_eq!(record.content.blocks[2].modality, Modality::Image);
+        assert_eq!(record.content.blocks[4].modality, Modality::Text);
+        assert_eq!(record.content.blocks[5].modality, Modality::Text);
+
+        let image_one_embedding = record.content.blocks[0].embedding.as_ref().unwrap();
+        let image_two_embedding = record.content.blocks[2].embedding.as_ref().unwrap();
+        assert_eq!(image_one_embedding[0], image_one.len() as f32);
+        assert_eq!(image_two_embedding[0], image_two.len() as f32);
+
+        assert_eq!(
+            std::str::from_utf8(&record.content.blocks[4].data).unwrap(),
+            format!("audio-{}", audio_one.len())
+        );
+        assert_eq!(
+            std::str::from_utf8(&record.content.blocks[5].data).unwrap(),
+            format!("audio-{}", audio_two.len())
+        );
+        assert!(record.content.blocks[4].embedding.is_some());
+        assert!(record.content.blocks[5].embedding.is_some());
     }
 
     #[tokio::test]
@@ -2336,7 +3246,10 @@ mod tests {
         };
 
         let result = engine.encode_store(req).await;
-        assert!(matches!(result, Err(CerememoryError::ContentTooLarge { .. })));
+        assert!(matches!(
+            result,
+            Err(CerememoryError::ContentTooLarge { .. })
+        ));
     }
 
     // ─── Export/Import API tests ────────────────────────────────────
@@ -2495,13 +3408,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(imported, 0);
-        let record = engine.introspect_record(RecordIntrospectRequest {
-            header: None,
-            record_id: resp.record_id,
-            include_history: false,
-            include_associations: false,
-            include_versions: false,
-        }).await.unwrap();
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
         assert_eq!(record.text_content(), Some("Original"));
     }
 
@@ -2602,13 +3518,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(imported, 0);
-        let record = engine.introspect_record(RecordIntrospectRequest {
-            header: None,
-            record_id: resp.record_id,
-            include_history: false,
-            include_associations: false,
-            include_versions: false,
-        }).await.unwrap();
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
         assert_eq!(record.text_content(), Some("Updated version"));
     }
 
@@ -2617,7 +3536,10 @@ mod tests {
         let engine = make_engine().await;
 
         engine
-            .encode_store(text_store_req("Encrypted import", Some(StoreType::Episodic)))
+            .encode_store(text_store_req(
+                "Encrypted import",
+                Some(StoreType::Episodic),
+            ))
             .await
             .unwrap();
 
@@ -2699,7 +3621,10 @@ mod tests {
 
         // Store a record in Episodic
         let resp = engine
-            .encode_store(text_store_req("Original in episodic", Some(StoreType::Episodic)))
+            .encode_store(text_store_req(
+                "Original in episodic",
+                Some(StoreType::Episodic),
+            ))
             .await
             .unwrap();
         let record_id = resp.record_id;
@@ -2798,7 +3723,10 @@ mod tests {
         let engine = make_engine().await;
         for i in 0..3 {
             engine
-                .encode_store(text_store_req(&format!("Day event {i}"), Some(StoreType::Episodic)))
+                .encode_store(text_store_req(
+                    &format!("Day event {i}"),
+                    Some(StoreType::Episodic),
+                ))
                 .await
                 .unwrap();
         }
@@ -2852,7 +3780,10 @@ mod tests {
     async fn timeline_min_fidelity_filter() {
         let engine = make_engine().await;
         engine
-            .encode_store(text_store_req("High fidelity event", Some(StoreType::Episodic)))
+            .encode_store(text_store_req(
+                "High fidelity event",
+                Some(StoreType::Episodic),
+            ))
             .await
             .unwrap();
 
@@ -2956,7 +3887,10 @@ mod tests {
             .await
             .unwrap();
         engine
-            .encode_store(text_store_req("Procedural event", Some(StoreType::Procedural)))
+            .encode_store(text_store_req(
+                "Procedural event",
+                Some(StoreType::Procedural),
+            ))
             .await
             .unwrap();
 
@@ -3184,7 +4118,10 @@ mod tests {
         let engine = make_engine().await;
         for i in 0..5 {
             engine
-                .encode_store(text_store_req(&format!("Record {i}"), Some(StoreType::Episodic)))
+                .encode_store(text_store_req(
+                    &format!("Record {i}"),
+                    Some(StoreType::Episodic),
+                ))
                 .await
                 .unwrap();
         }
@@ -3254,9 +4191,8 @@ mod tests {
             text: &str,
         ) -> std::pin::Pin<
             Box<
-                dyn std::future::Future<
-                        Output = Result<Vec<ExtractedRelation>, CerememoryError>,
-                    > + Send
+                dyn std::future::Future<Output = Result<Vec<ExtractedRelation>, CerememoryError>>
+                    + Send
                     + '_,
             >,
         > {
@@ -3273,6 +4209,42 @@ mod tests {
                     Ok(Vec::new())
                 }
             })
+        }
+
+        fn embed_image(
+            &self,
+            data: &[u8],
+            _format: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<f32>, CerememoryError>> + Send + '_>,
+        > {
+            let dim = self.embed_dim;
+            let hash = data.len() as f32;
+            Box::pin(async move {
+                let mut v = vec![0.0f32; dim];
+                v[0] = hash;
+                v[1] = 2.0;
+                Ok(v)
+            })
+        }
+
+        fn transcribe_audio(
+            &self,
+            data: &[u8],
+            _format: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, CerememoryError>> + Send + '_>,
+        > {
+            let transcript = format!("audio-{}", data.len());
+            Box::pin(async move { Ok(transcript) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                text_embedding: true,
+                image_embedding: true,
+                audio_transcription: true,
+            }
         }
     }
 
@@ -3306,6 +4278,146 @@ mod tests {
         assert!(record.content.blocks[0].embedding.is_some());
         let emb = record.content.blocks[0].embedding.as_ref().unwrap();
         assert_eq!(emb.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn engine_auto_embeds_all_image_blocks() {
+        let provider = Arc::new(MockLLMProvider::new(4));
+        let engine = CerememoryEngine::new(EngineConfig {
+            llm_provider: Some(provider),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![
+                        ContentBlock {
+                            modality: Modality::Image,
+                            format: "image/png".to_string(),
+                            data: vec![1; 8],
+                            embedding: None,
+                        },
+                        ContentBlock {
+                            modality: Modality::Image,
+                            format: "image/png".to_string(),
+                            data: vec![2; 13],
+                            embedding: None,
+                        },
+                    ],
+                    summary: None,
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(record.content.blocks.len(), 2);
+        assert_eq!(record.content.blocks[0].modality, Modality::Image);
+        assert_eq!(record.content.blocks[1].modality, Modality::Image);
+        assert_eq!(
+            record.content.blocks[0].embedding.as_ref().unwrap()[0],
+            8.0
+        );
+        assert_eq!(
+            record.content.blocks[1].embedding.as_ref().unwrap()[0],
+            13.0
+        );
+        assert_eq!(
+            record.content.blocks[0].embedding.as_ref().unwrap()[1],
+            2.0
+        );
+        assert_eq!(
+            record.content.blocks[1].embedding.as_ref().unwrap()[1],
+            2.0
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_transcribes_all_audio_blocks_in_order() {
+        let provider = Arc::new(MockLLMProvider::new(4));
+        let engine = CerememoryEngine::new(EngineConfig {
+            llm_provider: Some(provider),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![
+                        ContentBlock {
+                            modality: Modality::Audio,
+                            format: "audio/wav".to_string(),
+                            data: vec![0; 12],
+                            embedding: None,
+                        },
+                        ContentBlock {
+                            modality: Modality::Audio,
+                            format: "audio/wav".to_string(),
+                            data: vec![1; 123],
+                            embedding: None,
+                        },
+                    ],
+                    summary: None,
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(record.content.blocks.len(), 4);
+        assert_eq!(record.content.blocks[0].modality, Modality::Audio);
+        assert_eq!(record.content.blocks[1].modality, Modality::Audio);
+        assert_eq!(record.content.blocks[2].modality, Modality::Text);
+        assert_eq!(record.content.blocks[3].modality, Modality::Text);
+        assert_eq!(
+            std::str::from_utf8(&record.content.blocks[2].data).unwrap(),
+            "audio-12"
+        );
+        assert_eq!(
+            std::str::from_utf8(&record.content.blocks[3].data).unwrap(),
+            "audio-123"
+        );
+        assert_eq!(
+            record.content.blocks[2].embedding.as_ref().unwrap()[0],
+            "audio-12".len() as f32
+        );
+        assert_eq!(
+            record.content.blocks[3].embedding.as_ref().unwrap()[0],
+            "audio-123".len() as f32
+        );
     }
 
     #[tokio::test]
@@ -3399,6 +4511,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn noop_provider_capabilities_are_disabled() {
+        let provider = NoOpProvider;
+        let caps = provider.capabilities();
+        assert!(!caps.text_embedding);
+        assert!(!caps.image_embedding);
+        assert!(!caps.audio_transcription);
+    }
+
+    #[tokio::test]
     async fn mock_provider_embed_roundtrip() {
         let provider = MockLLMProvider::new(8);
         let result = provider.embed("hello").await.unwrap();
@@ -3458,6 +4579,110 @@ mod tests {
         assert!(!resp.memories.is_empty());
     }
 
+    #[tokio::test]
+    async fn image_recall_cue_uses_provider_embedding() {
+        let provider = Arc::new(MockLLMProvider::new(4));
+        let engine = CerememoryEngine::new(EngineConfig {
+            llm_provider: Some(provider),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let image_bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Image,
+                        format: "image/png".to_string(),
+                        data: image_bytes.clone(),
+                        embedding: None,
+                    }],
+                    summary: None,
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let recalled = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    image: Some(image_bytes),
+                    ..Default::default()
+                },
+                stores: None,
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(recalled.memories.len(), 1);
+        assert_eq!(recalled.memories[0].record.id, resp.record_id);
+    }
+
+    #[tokio::test]
+    async fn audio_recall_cue_uses_transcription() {
+        let provider = Arc::new(MockLLMProvider::new(4));
+        let engine = CerememoryEngine::new(EngineConfig {
+            llm_provider: Some(provider),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let audio_bytes = b"RIFFabcdWAVErest".to_vec();
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Audio,
+                        format: "audio/wav".to_string(),
+                        data: audio_bytes.clone(),
+                        embedding: None,
+                    }],
+                    summary: None,
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let recalled = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    audio: Some(audio_bytes),
+                    ..Default::default()
+                },
+                stores: None,
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(recalled.memories.len(), 1);
+        assert_eq!(recalled.memories[0].record.id, resp.record_id);
+    }
+
     // ─── Smart Consolidation tests ───────────────────────────────────
 
     #[tokio::test]
@@ -3465,7 +4690,10 @@ mod tests {
         let engine = make_engine().await;
         for i in 0..3 {
             engine
-                .encode_store(text_store_req(&format!("Record {i}"), Some(StoreType::Episodic)))
+                .encode_store(text_store_req(
+                    &format!("Record {i}"),
+                    Some(StoreType::Episodic),
+                ))
                 .await
                 .unwrap();
         }
@@ -3557,7 +4785,10 @@ mod tests {
         .unwrap();
 
         engine
-            .encode_store(text_store_req("Cats are mammals", Some(StoreType::Episodic)))
+            .encode_store(text_store_req(
+                "Cats are mammals",
+                Some(StoreType::Episodic),
+            ))
             .await
             .unwrap();
 
@@ -3622,7 +4853,10 @@ mod tests {
         let engine = make_engine().await;
         for i in 0..5 {
             engine
-                .encode_store(text_store_req(&format!("Test {i}"), Some(StoreType::Episodic)))
+                .encode_store(text_store_req(
+                    &format!("Test {i}"),
+                    Some(StoreType::Episodic),
+                ))
                 .await
                 .unwrap();
         }

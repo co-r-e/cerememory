@@ -262,10 +262,8 @@ impl EvolutionEngine {
                 // Rule 3: If >50% of records are in the lowest fidelity bucket, pruning may be too aggressive
                 let lowest_frac = histogram.lowest_bucket_fraction();
                 if lowest_frac > 0.5 {
-                    let new_val = clamp_adjustment(
-                        adjusted.prune_threshold * 0.9,
-                        defaults.prune_threshold,
-                    );
+                    let new_val =
+                        clamp_adjustment(adjusted.prune_threshold * 0.9, defaults.prune_threshold);
                     if (new_val - adjusted.prune_threshold).abs() > 1e-10 {
                         state.adjustments.push(ParameterAdjustment {
                             store: store_type,
@@ -351,13 +349,17 @@ mod tests {
     #[test]
     fn low_fidelity_reduces_exponent() {
         let engine = EvolutionEngine::new();
-        let original = engine.get_decay_defaults(StoreType::Episodic).decay_exponent;
+        let original = engine
+            .get_decay_defaults(StoreType::Episodic)
+            .decay_exponent;
 
         // Feed many low-fidelity scores (all below 0.3)
         let low_scores: Vec<f64> = (0..100).map(|i| i as f64 * 0.002).collect(); // 0.0 to 0.198
         engine.observe_decay_tick(StoreType::Episodic, &low_scores);
 
-        let adjusted = engine.get_decay_defaults(StoreType::Episodic).decay_exponent;
+        let adjusted = engine
+            .get_decay_defaults(StoreType::Episodic)
+            .decay_exponent;
         assert!(
             adjusted < original,
             "Expected decay_exponent to decrease: original={original}, adjusted={adjusted}"
@@ -367,13 +369,17 @@ mod tests {
     #[test]
     fn high_fidelity_no_change() {
         let engine = EvolutionEngine::new();
-        let original = engine.get_decay_defaults(StoreType::Episodic).decay_exponent;
+        let original = engine
+            .get_decay_defaults(StoreType::Episodic)
+            .decay_exponent;
 
         // Feed high-fidelity scores (all above 0.7)
         let high_scores: Vec<f64> = (0..100).map(|i| 0.7 + i as f64 * 0.003).collect();
         engine.observe_decay_tick(StoreType::Episodic, &high_scores);
 
-        let adjusted = engine.get_decay_defaults(StoreType::Episodic).decay_exponent;
+        let adjusted = engine
+            .get_decay_defaults(StoreType::Episodic)
+            .decay_exponent;
         assert_eq!(
             adjusted, original,
             "High fidelity should not change decay_exponent"
@@ -383,14 +389,18 @@ mod tests {
     #[test]
     fn low_recall_increases_boost() {
         let engine = EvolutionEngine::new();
-        let original = engine.get_decay_defaults(StoreType::Semantic).retrieval_boost;
+        let original = engine
+            .get_decay_defaults(StoreType::Semantic)
+            .retrieval_boost;
 
         // Feed low hit rates (need >= 5 observations)
         for _ in 0..10 {
             engine.observe_recall(StoreType::Semantic, 0.1);
         }
 
-        let adjusted = engine.get_decay_defaults(StoreType::Semantic).retrieval_boost;
+        let adjusted = engine
+            .get_decay_defaults(StoreType::Semantic)
+            .retrieval_boost;
         assert!(
             adjusted > original,
             "Expected retrieval_boost to increase: original={original}, adjusted={adjusted}"
@@ -407,7 +417,9 @@ mod tests {
             engine.observe_recall(StoreType::Semantic, 0.0);
         }
 
-        let adjusted = engine.get_decay_defaults(StoreType::Semantic).retrieval_boost;
+        let adjusted = engine
+            .get_decay_defaults(StoreType::Semantic)
+            .retrieval_boost;
         let max_allowed = original_boost * 1.5;
         assert!(
             adjusted <= max_allowed + 1e-10,
@@ -531,14 +543,18 @@ mod tests {
     #[test]
     fn recall_requires_minimum_observations() {
         let engine = EvolutionEngine::new();
-        let original = engine.get_decay_defaults(StoreType::Episodic).retrieval_boost;
+        let original = engine
+            .get_decay_defaults(StoreType::Episodic)
+            .retrieval_boost;
 
         // Feed only 3 low hit rates (below the 5 minimum)
         for _ in 0..3 {
             engine.observe_recall(StoreType::Episodic, 0.1);
         }
 
-        let adjusted = engine.get_decay_defaults(StoreType::Episodic).retrieval_boost;
+        let adjusted = engine
+            .get_decay_defaults(StoreType::Episodic)
+            .retrieval_boost;
         assert_eq!(
             adjusted, original,
             "Should not adjust with fewer than 5 recall observations"
@@ -549,7 +565,9 @@ mod tests {
             engine.observe_recall(StoreType::Episodic, 0.1);
         }
 
-        let adjusted = engine.get_decay_defaults(StoreType::Episodic).retrieval_boost;
+        let adjusted = engine
+            .get_decay_defaults(StoreType::Episodic)
+            .retrieval_boost;
         assert!(
             adjusted > original,
             "Should adjust after reaching 5 recall observations"

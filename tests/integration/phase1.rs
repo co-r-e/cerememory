@@ -475,7 +475,11 @@ async fn test_mode_switch() {
 
     assert!(!recall_perfect.memories.is_empty());
     let perfect_data = &recall_perfect.memories[0].rendered_content.blocks[0].data;
-    assert_eq!(perfect_data, original_text.as_bytes(), "Perfect mode should return exact content");
+    assert_eq!(
+        perfect_data,
+        original_text.as_bytes(),
+        "Perfect mode should return exact content"
+    );
 
     // Human mode: rendered content should be degraded if fidelity < 0.9
     engine
@@ -509,6 +513,10 @@ async fn test_mode_switch() {
     let human_data = &recall_human.memories[0].rendered_content.blocks[0].data;
     // With decayed fidelity, human mode should produce different (degraded) content
     if record.fidelity.score < 0.5 {
-        assert_ne!(human_data, original_text.as_bytes(), "Human mode should degrade low-fidelity content");
+        assert_ne!(
+            human_data,
+            original_text.as_bytes(),
+            "Human mode should degrade low-fidelity content"
+        );
     }
 }

@@ -25,8 +25,7 @@ use cerememory_core::types::{EmotionVector, FidelityState, MemoryContent, Memory
 // ---------------------------------------------------------------------------
 
 /// Primary table: UUID (16 bytes) -> MessagePack-encoded `MemoryRecord`.
-const EMOTIONAL_RECORDS: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("emotional_records");
+const EMOTIONAL_RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("emotional_records");
 
 /// Fidelity index: (fidelity_bucket_u8 ++ record_id) -> ().
 /// Bucket = (fidelity.score * 100).round() clamped to [0, 100].
@@ -89,9 +88,8 @@ impl EmotionalStore {
 
     /// Open (or create) a persistent store at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CerememoryError> {
-        let db = Database::create(path.as_ref()).map_err(|e| {
-            CerememoryError::Storage(format!("Failed to open redb database: {e}"))
-        })?;
+        let db = Database::create(path.as_ref())
+            .map_err(|e| CerememoryError::Storage(format!("Failed to open redb database: {e}")))?;
 
         let store = Self { db: Arc::new(db) };
         store.ensure_tables()?;
@@ -102,9 +100,8 @@ impl EmotionalStore {
     ///
     /// Useful for testing. The file is automatically cleaned up on drop via `tempfile`.
     pub fn open_in_memory() -> Result<Self, CerememoryError> {
-        let tmp = tempfile::NamedTempFile::new().map_err(|e| {
-            CerememoryError::Storage(format!("Failed to create temp file: {e}"))
-        })?;
+        let tmp = tempfile::NamedTempFile::new()
+            .map_err(|e| CerememoryError::Storage(format!("Failed to create temp file: {e}")))?;
         // We intentionally persist the path -- redb manages the file.
         let path = tmp.into_temp_path();
         // Remove the file so redb can create it fresh.
@@ -123,8 +120,12 @@ impl EmotionalStore {
         let txn = self.db.begin_write().map_err(storage_err)?;
         {
             let _ = txn.open_table(EMOTIONAL_RECORDS).map_err(storage_err)?;
-            let _ = txn.open_table(EMOTIONAL_FIDELITY_INDEX).map_err(storage_err)?;
-            let _ = txn.open_table(EMOTIONAL_INTENSITY_INDEX).map_err(storage_err)?;
+            let _ = txn
+                .open_table(EMOTIONAL_FIDELITY_INDEX)
+                .map_err(storage_err)?;
+            let _ = txn
+                .open_table(EMOTIONAL_INTENSITY_INDEX)
+                .map_err(storage_err)?;
         }
         txn.commit().map_err(storage_err)?;
         Ok(())
@@ -142,7 +143,9 @@ impl EmotionalStore {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
-            let fidelity_table = txn.open_table(EMOTIONAL_FIDELITY_INDEX).map_err(storage_err)?;
+            let fidelity_table = txn
+                .open_table(EMOTIONAL_FIDELITY_INDEX)
+                .map_err(storage_err)?;
             let records_table = txn.open_table(EMOTIONAL_RECORDS).map_err(storage_err)?;
 
             // Scan buckets [0, threshold_bucket).
@@ -206,8 +209,9 @@ impl EmotionalStore {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
-            let intensity_table =
-                txn.open_table(EMOTIONAL_INTENSITY_INDEX).map_err(storage_err)?;
+            let intensity_table = txn
+                .open_table(EMOTIONAL_INTENSITY_INDEX)
+                .map_err(storage_err)?;
             let records_table = txn.open_table(EMOTIONAL_RECORDS).map_err(storage_err)?;
 
             let start_bucket = intensity_bucket(min_intensity);
@@ -287,15 +291,17 @@ impl Store for EmotionalStore {
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
 
-                let mut fidelity_idx =
-                    txn.open_table(EMOTIONAL_FIDELITY_INDEX).map_err(storage_err)?;
+                let mut fidelity_idx = txn
+                    .open_table(EMOTIONAL_FIDELITY_INDEX)
+                    .map_err(storage_err)?;
                 let fk = fidelity_key(record.fidelity.score, &id);
                 fidelity_idx
                     .insert(fk.as_slice(), ())
                     .map_err(storage_err)?;
 
-                let mut intensity_idx =
-                    txn.open_table(EMOTIONAL_INTENSITY_INDEX).map_err(storage_err)?;
+                let mut intensity_idx = txn
+                    .open_table(EMOTIONAL_INTENSITY_INDEX)
+                    .map_err(storage_err)?;
                 let ik = intensity_key(record.emotion.intensity, &id);
                 intensity_idx
                     .insert(ik.as_slice(), ())
@@ -348,13 +354,15 @@ impl Store for EmotionalStore {
                         .remove(id.as_bytes().as_slice())
                         .map_err(storage_err)?;
 
-                    let mut fidelity_idx =
-                        txn.open_table(EMOTIONAL_FIDELITY_INDEX).map_err(storage_err)?;
+                    let mut fidelity_idx = txn
+                        .open_table(EMOTIONAL_FIDELITY_INDEX)
+                        .map_err(storage_err)?;
                     let fk = fidelity_key(record.fidelity.score, &id);
                     fidelity_idx.remove(fk.as_slice()).map_err(storage_err)?;
 
-                    let mut intensity_idx =
-                        txn.open_table(EMOTIONAL_INTENSITY_INDEX).map_err(storage_err)?;
+                    let mut intensity_idx = txn
+                        .open_table(EMOTIONAL_INTENSITY_INDEX)
+                        .map_err(storage_err)?;
                     let ik = intensity_key(record.emotion.intensity, &id);
                     intensity_idx.remove(ik.as_slice()).map_err(storage_err)?;
 
@@ -388,9 +396,7 @@ impl Store for EmotionalStore {
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
                 let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack decode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
                 drop(guard);
 
                 let old_fidelity_score = record.fidelity.score;
@@ -398,18 +404,19 @@ impl Store for EmotionalStore {
                 record.updated_at = Utc::now();
 
                 let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack encode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
 
                 // Update fidelity index: remove old, insert new.
-                let mut fidelity_idx =
-                    txn.open_table(EMOTIONAL_FIDELITY_INDEX).map_err(storage_err)?;
+                let mut fidelity_idx = txn
+                    .open_table(EMOTIONAL_FIDELITY_INDEX)
+                    .map_err(storage_err)?;
                 let old_fk = fidelity_key(old_fidelity_score, &id);
-                fidelity_idx.remove(old_fk.as_slice()).map_err(storage_err)?;
+                fidelity_idx
+                    .remove(old_fk.as_slice())
+                    .map_err(storage_err)?;
                 let new_fk = fidelity_key(record.fidelity.score, &id);
                 fidelity_idx
                     .insert(new_fk.as_slice(), ())
@@ -511,9 +518,7 @@ impl Store for EmotionalStore {
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
                 let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack decode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
                 drop(guard);
 
                 let old_intensity = record.emotion.intensity;
@@ -531,19 +536,20 @@ impl Store for EmotionalStore {
                 record.version += 1;
 
                 let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack encode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
 
                 // If emotion was updated, update intensity index.
                 if emotion.is_some() {
-                    let mut intensity_idx =
-                        txn.open_table(EMOTIONAL_INTENSITY_INDEX).map_err(storage_err)?;
+                    let mut intensity_idx = txn
+                        .open_table(EMOTIONAL_INTENSITY_INDEX)
+                        .map_err(storage_err)?;
                     let old_ik = intensity_key(old_intensity, &id);
-                    intensity_idx.remove(old_ik.as_slice()).map_err(storage_err)?;
+                    intensity_idx
+                        .remove(old_ik.as_slice())
+                        .map_err(storage_err)?;
                     let new_ik = intensity_key(record.emotion.intensity, &id);
                     intensity_idx
                         .insert(new_ik.as_slice(), ())
@@ -575,9 +581,7 @@ impl Store for EmotionalStore {
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
                 let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack decode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
                 drop(guard);
 
                 record.access_count = access_count;
@@ -585,9 +589,7 @@ impl Store for EmotionalStore {
                 record.updated_at = Utc::now();
 
                 let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| {
-                        CerememoryError::Serialization(format!("msgpack encode: {e}"))
-                    })?;
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -1017,10 +1019,7 @@ mod tests {
         let results = store.query_text("Something", 0).await.unwrap();
         assert!(results.is_empty());
 
-        let results = store
-            .query_by_intensity_range(0.0, 1.0, 0)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.0, 1.0, 0).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -1035,9 +1034,7 @@ mod tests {
             .await;
         assert!(result.is_err());
 
-        let result = store
-            .update_record(&fake_id, None, None, None)
-            .await;
+        let result = store.update_record(&fake_id, None, None, None).await;
         assert!(result.is_err());
     }
 
@@ -1060,43 +1057,28 @@ mod tests {
         }
 
         // Query [0.4, 0.6] -> should get r_mid only
-        let results = store
-            .query_by_intensity_range(0.4, 0.6, 100)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.4, 0.6, 100).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, r_mid.id);
 
         // Query [0.0, 0.2] -> should get r_low only
-        let results = store
-            .query_by_intensity_range(0.0, 0.2, 100)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.0, 0.2, 100).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, r_low.id);
 
         // Query [0.8, 1.0] -> should get r_high and r_max
-        let results = store
-            .query_by_intensity_range(0.8, 1.0, 100)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.8, 1.0, 100).await.unwrap();
         assert_eq!(results.len(), 2);
         let result_ids: Vec<Uuid> = results.iter().map(|r| r.id).collect();
         assert!(result_ids.contains(&r_high.id));
         assert!(result_ids.contains(&r_max.id));
 
         // Query full range [0.0, 1.0] -> all 4
-        let results = store
-            .query_by_intensity_range(0.0, 1.0, 100)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.0, 1.0, 100).await.unwrap();
         assert_eq!(results.len(), 4);
 
         // Query with limit
-        let results = store
-            .query_by_intensity_range(0.0, 1.0, 2)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.0, 1.0, 2).await.unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -1110,18 +1092,12 @@ mod tests {
         let id = store.store(record).await.unwrap();
 
         // Should appear in [0.1, 0.3]
-        let results = store
-            .query_by_intensity_range(0.1, 0.3, 100)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.1, 0.3, 100).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, id);
 
         // Should NOT appear in [0.7, 0.9]
-        let results = store
-            .query_by_intensity_range(0.7, 0.9, 100)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.7, 0.9, 100).await.unwrap();
         assert!(results.is_empty());
 
         // Update emotion to high intensity
@@ -1135,18 +1111,12 @@ mod tests {
             .unwrap();
 
         // Should now appear in [0.7, 0.9]
-        let results = store
-            .query_by_intensity_range(0.7, 0.9, 100)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.7, 0.9, 100).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, id);
 
         // Should NOT appear in old range [0.1, 0.3]
-        let results = store
-            .query_by_intensity_range(0.1, 0.3, 100)
-            .await
-            .unwrap();
+        let results = store.query_by_intensity_range(0.1, 0.3, 100).await.unwrap();
         assert!(results.is_empty());
     }
 }
