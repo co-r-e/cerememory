@@ -62,3 +62,12 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.9"
 strict = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+    "cerememory.integrations.*",
+    "langchain_core.*",
+    "llama_index.*",
+]
+ignore_missing_imports = true
+warn_unused_ignores = false
