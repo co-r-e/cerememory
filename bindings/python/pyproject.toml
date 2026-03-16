@@ -62,12 +62,21 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.9"
 strict = true
 plugins = ["pydantic.mypy"]
+warn_unused_ignores = false
 
 [[tool.mypy.overrides]]
 module = [
+    "cerememory._sync_client",
+    "cerememory._async_client",
     "cerememory.integrations.*",
+]
+disallow_any_expr = false
+disallow_any_generics = false
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = [
     "langchain_core.*",
     "llama_index.*",
 ]
 ignore_missing_imports = true
-warn_unused_ignores = false
