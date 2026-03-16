@@ -728,8 +728,8 @@ impl CerememoryEngine {
             // Process audio transcriptions concurrently
             if !audio_tasks.is_empty() {
                 let audio_results: Vec<Result<String, _>> =
-                    futures::future::join_all(audio_tasks.iter().map(|(data, fmt)| {
-                        async move { provider.transcribe_audio(data, fmt).await }
+                    futures::future::join_all(audio_tasks.iter().map(|(data, fmt)| async move {
+                        provider.transcribe_audio(data, fmt).await
                     }))
                     .await;
 
@@ -4331,22 +4331,13 @@ mod tests {
         assert_eq!(record.content.blocks.len(), 2);
         assert_eq!(record.content.blocks[0].modality, Modality::Image);
         assert_eq!(record.content.blocks[1].modality, Modality::Image);
-        assert_eq!(
-            record.content.blocks[0].embedding.as_ref().unwrap()[0],
-            8.0
-        );
+        assert_eq!(record.content.blocks[0].embedding.as_ref().unwrap()[0], 8.0);
         assert_eq!(
             record.content.blocks[1].embedding.as_ref().unwrap()[0],
             13.0
         );
-        assert_eq!(
-            record.content.blocks[0].embedding.as_ref().unwrap()[1],
-            2.0
-        );
-        assert_eq!(
-            record.content.blocks[1].embedding.as_ref().unwrap()[1],
-            2.0
-        );
+        assert_eq!(record.content.blocks[0].embedding.as_ref().unwrap()[1], 2.0);
+        assert_eq!(record.content.blocks[1].embedding.as_ref().unwrap()[1], 2.0);
     }
 
     #[tokio::test]

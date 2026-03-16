@@ -506,8 +506,14 @@ mod tests {
 
     #[test]
     fn store_type_from_str_valid() {
-        assert_eq!("episodic".parse::<StoreType>().unwrap(), StoreType::Episodic);
-        assert_eq!("semantic".parse::<StoreType>().unwrap(), StoreType::Semantic);
+        assert_eq!(
+            "episodic".parse::<StoreType>().unwrap(),
+            StoreType::Episodic
+        );
+        assert_eq!(
+            "semantic".parse::<StoreType>().unwrap(),
+            StoreType::Semantic
+        );
         assert_eq!(
             "procedural".parse::<StoreType>().unwrap(),
             StoreType::Procedural
@@ -522,6 +528,9 @@ mod tests {
     #[test]
     fn store_type_from_str_invalid() {
         let err = "unknown".parse::<StoreType>().unwrap_err();
-        assert!(matches!(err, crate::error::CerememoryError::StoreInvalid(_)));
+        assert!(matches!(
+            err,
+            crate::error::CerememoryError::StoreInvalid(_)
+        ));
     }
 }
