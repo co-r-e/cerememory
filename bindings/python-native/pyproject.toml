@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Native Python bindings for Cerememory (no HTTP needed)"
 requires-python = ">=3.9"
 license = { text = "MIT" }
+authors = [
+    { name = "CORe Inc.", email = "dev@core-inc.jp" },
+]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
@@ -15,6 +18,10 @@ classifiers = [
     "Intended Audience :: Developers",
     "Topic :: Database",
 ]
+
+[project.urls]
+Homepage = "https://github.com/co-r-e/cerememory"
+Repository = "https://github.com/co-r-e/cerememory"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

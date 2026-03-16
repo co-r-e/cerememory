@@ -15,5 +15,12 @@
     "build": "napi build --release",
     "build:debug": "napi build"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/co-r-e/cerememory.git",
+    "directory": "bindings/typescript-native"
+  },
+  "author": "CORe Inc.",
+  "homepage": "https://github.com/co-r-e/cerememory"
 }
