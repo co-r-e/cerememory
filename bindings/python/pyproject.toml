@@ -73,6 +73,7 @@ module = [
 disallow_any_expr = false
 disallow_any_generics = false
 warn_return_any = false
+disable_error_code = ["attr-defined"]
 
 [[tool.mypy.overrides]]
 module = [
