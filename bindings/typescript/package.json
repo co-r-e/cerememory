@@ -25,10 +25,10 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/core-inc/cerememory",
+    "url": "https://github.com/co-r-e/cerememory.git",
     "directory": "bindings/typescript"
   },
   "keywords": [

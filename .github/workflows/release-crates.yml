@@ -1,0 +1,101 @@
+name: Publish to crates.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no actual publish)"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-crates-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish crates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure workflow runs from main
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "This workflow must be run from the main branch."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+
+      - name: Run tests before publish
+        run: cargo test --workspace --locked
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          flag=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            flag="--dry-run"
+          fi
+
+          publish_crate() {
+            local crate="$1"
+            local attempts=1
+            local max_attempts=8
+
+            while true; do
+              echo "Publishing ${crate} (attempt ${attempts}/${max_attempts})"
+              if cargo publish --locked -p "${crate}" ${flag}; then
+                break
+              fi
+
+              if [ "${{ inputs.dry_run }}" = "true" ] || [ "${attempts}" -ge "${max_attempts}" ]; then
+                echo "Failed to publish ${crate}"
+                return 1
+              fi
+
+              attempts=$((attempts + 1))
+              sleep 20
+            done
+          }
+
+          for crate in \
+            cerememory-core \
+            cerememory-store-episodic \
+            cerememory-store-semantic \
+            cerememory-store-procedural \
+            cerememory-store-emotional \
+            cerememory-store-working \
+            cerememory-decay \
+            cerememory-association \
+            cerememory-evolution \
+            cerememory-index \
+            cerememory-archive \
+            cerememory-adapter-claude \
+            cerememory-adapter-openai \
+            cerememory-adapter-gemini \
+            cerememory-engine \
+            cerememory-config \
+            cerememory-transport-http \
+            cerememory-transport-grpc \
+            cerememory-cli; do
+            publish_crate "${crate}"
+          done

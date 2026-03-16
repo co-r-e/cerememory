@@ -62,7 +62,7 @@ Adapters translate between Cerememory's internal representation and LLM-specific
 
 ### Python and TypeScript SDKs
 
-The SDK bindings make Cerememory accessible to the broader AI ecosystem. These are built with PyO3 (Python) and napi-rs (TypeScript).
+The HTTP SDKs make Cerememory accessible to the broader AI ecosystem from Python and TypeScript applications. Native bindings live separately under `bindings/python-native` (PyO3) and `bindings/typescript-native` (napi-rs).
 
 ### Neuroscience Review
 
@@ -86,6 +86,8 @@ If you have expertise in cognitive neuroscience or memory research, we especiall
 
 - Rust 1.77 or later (install via [rustup](https://rustup.rs/))
 - Cargo (included with Rust)
+- Python 3.9 or later (for Python SDK work)
+- Node.js 18 or later (for TypeScript SDK work)
 
 ### Build
 
@@ -106,6 +108,25 @@ cargo test --workspace
 ```bash
 cargo fmt --all
 cargo clippy --workspace -- -D warnings
+```
+
+### Python SDK Development
+
+```bash
+cd bindings/python
+python -m pip install -e '.[dev]'
+python -m pytest -v
+python -m ruff check .
+python -m mypy src
+```
+
+### TypeScript SDK Development
+
+```bash
+cd bindings/typescript
+npm ci
+npm run typecheck
+npm test
 ```
 
 ## Architecture Overview

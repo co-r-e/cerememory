@@ -1,7 +1,6 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # IDE
 .idea/
@@ -17,6 +16,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+.venv/
 
 # Build artifacts
 *.so
@@ -24,18 +24,32 @@ Thumbs.db
 *.dll
 
 # Python bindings
-bindings/python/__pycache__/
+__pycache__/
 bindings/python/*.egg-info/
 bindings/python/dist/
 bindings/python/build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.pyc
 
 # TypeScript bindings
 bindings/typescript/node_modules/
 bindings/typescript/dist/
+bindings/typescript/*.tgz
+bindings/typescript-native/node_modules/
 bindings/typescript/*.js
 bindings/typescript/*.d.ts
+bindings/typescript-native/target/
+bindings/typescript-native/*.node
+bindings/typescript-native/index.js
+bindings/typescript-native/index.d.ts
+bindings/python-native/target/
 
 # Test artifacts
 *.profraw
 *.profdata
+artifacts/
+coverage/
+data/
+*.crate

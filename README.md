@@ -1,22 +1,23 @@
+# CEREMEMORY
+
 <p align="center">
-  <h1 align="center">CEREMEMORY</h1>
-  <p align="center">
-    <strong>A Living Memory Database for the Age of AI</strong>
-  </p>
-  <p align="center">
-    Open-Source | LLM-Agnostic | Brain-Inspired | User-Sovereign
-  </p>
-  <p align="center">
-    <a href="https://github.com/co-r-e/cerememory/blob/main/LICENSE">
-      <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License">
-    </a>
-    <a href="https://github.com/co-r-e/cerememory">
-      <img src="https://img.shields.io/badge/status-pre--alpha-orange.svg" alt="Status">
-    </a>
-    <a href="https://github.com/co-r-e/cerememory">
-      <img src="https://img.shields.io/badge/rust-1.77+-orange.svg" alt="Rust">
-    </a>
-  </p>
+  <strong>A Living Memory Database for the Age of AI</strong>
+</p>
+
+<p align="center">
+  Open Source | LLM-Agnostic | Brain-Inspired | User-Sovereign
+</p>
+
+<p align="center">
+  <a href="https://github.com/co-r-e/cerememory/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License">
+  </a>
+  <a href="https://github.com/co-r-e/cerememory">
+    <img src="https://img.shields.io/badge/status-alpha-green.svg" alt="Status">
+  </a>
+  <a href="https://github.com/co-r-e/cerememory">
+    <img src="https://img.shields.io/badge/rust-1.77+-orange.svg" alt="Rust">
+  </a>
 </p>
 
 ---
@@ -35,7 +36,7 @@ Cerememory is an open-source memory architecture inspired by the human brain's m
 
 **It is LLM-agnostic.** A standardized protocol (the Cerememory Protocol, or CMP) allows any LLM to read from and write to the memory layer. Switch from one model to another; your memory persists.
 
-**It belongs to the user.** Memory data is local-first, encrypted by default, and fully exportable. No vendor lock-in. No corporate surveillance of your cognitive history.
+**It belongs to the user.** Memory data is local-first, fully exportable, and designed for user-controlled deployment. No vendor lock-in. No corporate surveillance of your cognitive history.
 
 ---
 
@@ -127,12 +128,14 @@ See the [CMP Specification](docs/cmp-spec-v1.pdf) for the complete protocol defi
 | Async Runtime | Tokio | I/O-bound CMP request handling |
 | Compute Pool | Rayon | CPU-bound decay engine and spreading activation |
 | Episodic Store | redb | ACID transactions, zero-copy reads |
-| Vector Search | usearch | Lightweight embedded HNSW index |
+| Vector Search | hnsw_rs | Lightweight embedded HNSW index |
 | Full-Text Search | Tantivy | Rust-native Lucene equivalent |
 | Internal Serialization | MessagePack | Compact binary, schema-less |
 | Archive Format | SQLite (CMA) | Universal, inspectable, single-file |
-| Python SDK | PyO3 | AI/ML ecosystem integration |
-| TypeScript SDK | napi-rs | Web/LLM toolchain integration |
+| Python SDK | httpx + Pydantic | Typed HTTP client for Python applications |
+| TypeScript SDK | TypeScript + fetch | Zero-dependency HTTP client for Node.js and browser runtimes |
+| Python Native Binding | PyO3 | Direct native integration without HTTP |
+| TypeScript Native Binding | napi-rs | Direct Node.js native integration without HTTP |
 
 See the [Architecture Decision Records](docs/adr/) for detailed rationale behind each decision.
 
@@ -157,10 +160,13 @@ cerememory/
     cerememory-transport-http/    # HTTP/REST binding
     cerememory-transport-grpc/    # gRPC binding
     cerememory-archive/           # CMA export/import
-    cerememory-cli/               # CLI tool
+    cerememory-cli/               # CLI tool + `cerememory` binary
+    cerememory-config/            # Configuration management
   bindings/
-    python/                       # PyO3 SDK
-    typescript/                   # napi-rs SDK
+    python/                       # HTTP SDK (pure Python)
+    python-native/                # Native SDK (PyO3)
+    typescript/                   # HTTP SDK (pure TypeScript)
+    typescript-native/            # Native SDK (napi-rs)
   adapters/
     adapter-claude/               # Anthropic Claude adapter
     adapter-openai/               # OpenAI GPT adapter
@@ -174,13 +180,67 @@ cerememory/
 
 ## Roadmap
 
-| Phase | Timeline | Focus |
-|-------|----------|-------|
-| **Phase 1: Foundation** | Q2 2026 | Core episodic + semantic stores, decay engine, basic LLM adapters, text-only |
-| **Phase 2: Dynamics** | Q3 2026 | Cross-modal associations, emotional metadata, reconsolidation, consolidation cycles |
-| **Phase 3: Multimodal** | Q4 2026 | Image, audio, and structured data memory stores |
-| **Phase 4: Evolution** | Q1 2027 | Self-tuning parameters, dynamic schema generation |
-| **Phase 5: Ecosystem** | Q2 2027+ | Multi-agent shared memory, plugins, mobile support |
+| Phase | Status | Focus |
+|-------|--------|-------|
+| **Phase 1: Foundation** | Done | Core stores, decay engine, CMP protocol, LLM adapters |
+| **Phase 2: Dynamics** | Done | Cross-modal associations, emotional metadata, reconsolidation |
+| **Phase 3: Hardening** | Done | Error handling, observability, performance optimization |
+| **Phase 4: Intelligence** | Done | Evolution engine, self-tuning parameters |
+| **Phase 5: Production** | Done | CLI, config management, Docker, CI/CD |
+| **Phase 6: SDK** | Done | Python & TypeScript HTTP SDKs |
+| **Phase 7: Benchmarks** | Done | Performance benchmarks (store, decay, association, index) |
+| **Phase 8: Multimodal** | Done | Image, audio, and structured data memory |
+| **Phase 9: Native Bindings** | Done | PyO3 (Python) and napi-rs (TypeScript) native bindings |
+| **Phase 10: Integrations** | Done | LLM adapter integration tests |
+| **Phase 11: Encryption** | Done | Encrypted CMA export/import |
+
+---
+
+## Quick Start
+
+The Python and TypeScript SDKs talk to the Cerememory HTTP server. Start a local server first:
+
+```bash
+cargo run -p cerememory-cli -- serve --port 8420
+```
+
+Or run the published container:
+
+```bash
+docker run --rm -p 8420:8420 ghcr.io/co-r-e/cerememory:latest
+```
+
+### Python
+
+```bash
+pip install cerememory
+```
+
+```python
+from cerememory import Client
+
+client = Client("http://localhost:8420")
+record_id = client.store("Had coffee with Alice at the park", store="episodic")
+results = client.recall("Alice", limit=5)
+client.forget(record_id, confirm=True)
+```
+
+### TypeScript
+
+```bash
+npm install @cerememory/sdk
+```
+
+```typescript
+import { CerememoryClient } from "@cerememory/sdk";
+
+const client = new CerememoryClient("http://localhost:8420");
+const recordId = await client.store("Had coffee with Alice at the park", {
+  store: "episodic",
+});
+const results = await client.recall("Alice", { limit: 5 });
+await client.forget(recordId, { confirm: true });
+```
 
 ---
 

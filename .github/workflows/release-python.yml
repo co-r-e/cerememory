@@ -1,0 +1,66 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no actual publish)"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-python-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish Python SDK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure workflow runs from main
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "This workflow must be run from the main branch."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Run tests
+        working-directory: bindings/python
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m ruff check .
+          python -m mypy src
+          python -m pytest -v
+
+      - name: Build package
+        working-directory: bindings/python
+        run: python -m build
+
+      - name: Check package
+        working-directory: bindings/python
+        run: python -m twine check dist/*
+
+      - name: Publish to PyPI
+        if: inputs.dry_run == 'false'
+        working-directory: bindings/python
+        run: python -m twine upload --non-interactive dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}

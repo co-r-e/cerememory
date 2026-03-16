@@ -25,9 +25,9 @@ cerememory-engine = { workspace = true }
 cerememory-archive = { workspace = true }
 cerememory-transport-http = { workspace = true, features = [] }
 cerememory-transport-grpc = { workspace = true }
-cerememory-adapter-openai = { path = "../../adapters/adapter-openai", optional = true }
-cerememory-adapter-claude = { path = "../../adapters/adapter-claude", optional = true }
-cerememory-adapter-gemini = { path = "../../adapters/adapter-gemini", optional = true }
+cerememory-adapter-openai = { workspace = true, optional = true }
+cerememory-adapter-claude = { workspace = true, optional = true }
+cerememory-adapter-gemini = { workspace = true, optional = true }
 axum = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
