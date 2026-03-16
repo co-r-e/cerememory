@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any
 from uuid import UUID
 
-import httpx
 import pytest
 import respx
 
@@ -33,7 +30,7 @@ def make_encode_store_response(
     store: str = "episodic",
     initial_fidelity: float = 1.0,
     associations_created: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     return {
         "record_id": str(record_id),
         "store": store,
@@ -46,7 +43,7 @@ def make_memory_record_json(
     record_id: UUID = SAMPLE_RECORD_ID,
     store: str = "episodic",
     text: str = "Hello, world!",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     return {
         "id": str(record_id),
         "store": store,
@@ -96,7 +93,7 @@ def make_recall_query_response(
     record_id: UUID = SAMPLE_RECORD_ID,
     text: str = "Hello, world!",
     total_candidates: int = 1,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     record = make_memory_record_json(record_id=record_id, text=text)
     return {
         "memories": [
@@ -112,7 +109,7 @@ def make_recall_query_response(
     }
 
 
-def make_stats_response() -> Dict[str, Any]:
+def make_stats_response() -> dict[str, Any]:
     return {
         "total_records": 42,
         "records_by_store": {"episodic": 30, "semantic": 12},
@@ -132,8 +129,8 @@ def make_cmp_error(
     message: str = "Record not found",
     details: Any = None,
     retry_after: Any = None,
-) -> Dict[str, Any]:
-    result: Dict[str, Any] = {"code": code, "message": message}
+) -> dict[str, Any]:
+    result: dict[str, Any] = {"code": code, "message": message}
     if details is not None:
         result["details"] = details
     if retry_after is not None:

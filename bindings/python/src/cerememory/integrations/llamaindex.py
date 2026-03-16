@@ -10,7 +10,8 @@ pipelines.
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+import contextlib
+from typing import Any
 
 from cerememory.client import Client
 
@@ -21,12 +22,12 @@ from cerememory.client import Client
 _LLAMAINDEX_AVAILABLE = False
 
 try:
+    from llama_index.core.schema import TextNode  # type: ignore[import-untyped]
     from llama_index.core.vector_stores.types import (  # type: ignore[import-untyped]
         BasePydanticVectorStore,
         VectorStoreQuery,
         VectorStoreQueryResult,
     )
-    from llama_index.core.schema import TextNode  # type: ignore[import-untyped]
 
     _LLAMAINDEX_AVAILABLE = True
 except ImportError:
@@ -39,7 +40,7 @@ except ImportError:
 
         def __init__(
             self,
-            query_str: Optional[str] = None,
+            query_str: str | None = None,
             similarity_top_k: int = 10,
             **kwargs: Any,
         ) -> None:
@@ -51,9 +52,9 @@ except ImportError:
 
         def __init__(
             self,
-            nodes: Optional[List[Any]] = None,
-            similarities: Optional[List[float]] = None,
-            ids: Optional[List[str]] = None,
+            nodes: list[Any] | None = None,
+            similarities: list[float] | None = None,
+            ids: list[str] | None = None,
         ) -> None:
             self.nodes = nodes or []
             self.similarities = similarities or []
@@ -103,16 +104,14 @@ class CerememoryVectorStore(BasePydanticVectorStore):  # type: ignore[misc]
     def __init__(
         self,
         base_url: str,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         *,
         store: str = "semantic",
         timeout: float = 30.0,
         max_retries: int = 3,
     ) -> None:
-        try:
+        with contextlib.suppress(TypeError):
             super().__init__()
-        except TypeError:
-            pass
 
         self._client = Client(
             base_url,
@@ -124,12 +123,12 @@ class CerememoryVectorStore(BasePydanticVectorStore):  # type: ignore[misc]
 
     # -- BasePydanticVectorStore interface -----------------------------------
 
-    def add(self, nodes: List[Any], **kwargs: Any) -> List[str]:
+    def add(self, nodes: list[Any], **kwargs: Any) -> list[str]:
         """Add LlamaIndex ``TextNode`` instances to Cerememory.
 
         Returns a list of record-ID strings.
         """
-        ids: List[str] = []
+        ids: list[str] = []
         for node in nodes:
             text = node.get_content() if hasattr(node, "get_content") else str(node)
             record_id = self._client.store(text, store=self._store)
@@ -145,7 +144,7 @@ class CerememoryVectorStore(BasePydanticVectorStore):  # type: ignore[misc]
 
         self._client.forget(UUID(ref_doc_id), confirm=True)
 
-    def query(self, query: "VectorStoreQuery", **kwargs: Any) -> "VectorStoreQueryResult":
+    def query(self, query: VectorStoreQuery, **kwargs: Any) -> VectorStoreQueryResult:
         """Execute a similarity search against Cerememory.
 
         Returns a ``VectorStoreQueryResult`` with ``TextNode`` objects,
@@ -156,9 +155,9 @@ class CerememoryVectorStore(BasePydanticVectorStore):  # type: ignore[misc]
 
         recalled = self._client.recall(query_str, limit=limit)
 
-        nodes: List[Any] = []
-        similarities: List[float] = []
-        ids: List[str] = []
+        nodes: list[Any] = []
+        similarities: list[float] = []
+        ids: list[str] = []
 
         for mem in recalled:
             text = _extract_text(mem)

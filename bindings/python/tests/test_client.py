@@ -6,41 +6,34 @@ from uuid import UUID
 
 import httpx
 import pytest
-import respx
 
 from cerememory import (
-    Client,
     CerememoryError,
+    Client,
     ConsolidateRequest,
     ContentBlock,
+    DecayForecastRequest,
     DecayTickRequest,
     EmotionVector,
     EncodeBatchRequest,
     EncodeStoreRequest,
     EncodeUpdateRequest,
-    ForgetRequest,
     ForgetUnconfirmedError,
     MemoryContent,
     Modality,
     RateLimitedError,
-    RecallAssociateRequest,
     RecallCue,
-    RecallGraphRequest,
     RecallMode,
     RecallQueryRequest,
-    RecallTimelineRequest,
     RecordNotFoundError,
     SetModeRequest,
     StoreType,
-    TemporalRange,
     UnauthorizedError,
     ValidationError,
-    DecayForecastRequest,
 )
 from tests.conftest import (
     BASE_URL,
     SAMPLE_RECORD_ID,
-    SAMPLE_RECORD_ID_2,
     make_cmp_error,
     make_encode_store_response,
     make_memory_record_json,
@@ -102,7 +95,7 @@ class TestHighLevelRecall:
         mock_api.post("/v1/recall/query").mock(
             return_value=httpx.Response(200, json=make_recall_query_response())
         )
-        memories = high_level_client.recall("hello", limit=5)
+        high_level_client.recall("hello", limit=5)
 
         import json
 

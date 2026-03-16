@@ -10,7 +10,8 @@ chains (they won't pass ``isinstance`` checks against the real base classes).
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import contextlib
+from typing import Any
 from uuid import UUID
 
 from cerememory.client import Client
@@ -22,10 +23,10 @@ from cerememory.client import Client
 _LANGCHAIN_AVAILABLE = False
 
 try:
-    from langchain_core.memory import BaseMemory  # type: ignore[import-untyped]
-    from langchain_core.vectorstores import VectorStore  # type: ignore[import-untyped]
     from langchain_core.documents import Document  # type: ignore[import-untyped]
     from langchain_core.embeddings import Embeddings  # type: ignore[import-untyped]
+    from langchain_core.memory import BaseMemory  # type: ignore[import-untyped]
+    from langchain_core.vectorstores import VectorStore  # type: ignore[import-untyped]
 
     _LANGCHAIN_AVAILABLE = True
 except ImportError:
@@ -39,7 +40,12 @@ except ImportError:
     class Document:  # type: ignore[no-redef]
         """Stub used when ``langchain_core`` is not installed."""
 
-        def __init__(self, *, page_content: str = "", metadata: Optional[Dict[str, Any]] = None) -> None:
+        def __init__(
+            self,
+            *,
+            page_content: str = "",
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
             self.page_content = page_content
             self.metadata = metadata or {}
 
@@ -83,7 +89,7 @@ class CerememoryMemory(BaseMemory):  # type: ignore[misc]
     def __init__(
         self,
         base_url: str,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         *,
         memory_key: str = "history",
         input_key: str = "input",
@@ -96,10 +102,8 @@ class CerememoryMemory(BaseMemory):  # type: ignore[misc]
         # BaseMemory.__init__ may or may not accept kwargs depending on
         # whether the real class or the stub is being used.  We guard
         # against both cases.
-        try:
+        with contextlib.suppress(TypeError):
             super().__init__()
-        except TypeError:
-            pass
 
         self._client = Client(
             base_url,
@@ -116,11 +120,11 @@ class CerememoryMemory(BaseMemory):  # type: ignore[misc]
     # -- BaseMemory interface ------------------------------------------------
 
     @property
-    def memory_variables(self) -> List[str]:
+    def memory_variables(self) -> list[str]:
         """Return the list of memory variable names provided by this memory."""
         return [self._memory_key]
 
-    def load_memory_variables(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def load_memory_variables(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """Recall relevant memories using the latest user input as a cue.
 
         If no query text is available, an empty list is returned.
@@ -133,7 +137,7 @@ class CerememoryMemory(BaseMemory):  # type: ignore[misc]
 
         # Convert RecalledMemory objects to plain dicts for downstream
         # chain consumption.
-        memories: List[Dict[str, Any]] = []
+        memories: list[dict[str, Any]] = []
         for mem in recalled:
             text = _extract_text(mem)
             memories.append(
@@ -146,7 +150,7 @@ class CerememoryMemory(BaseMemory):  # type: ignore[misc]
 
         return {self._memory_key: memories}
 
-    def save_context(self, inputs: Dict[str, Any], outputs: Dict[str, str]) -> None:
+    def save_context(self, inputs: dict[str, Any], outputs: dict[str, str]) -> None:
         """Store the input/output pair as an episodic memory."""
         input_str = str(inputs.get(self._input_key, ""))
         output_str = str(outputs.get(self._output_key, ""))
@@ -186,17 +190,15 @@ class CerememoryVectorStore(VectorStore):  # type: ignore[misc]
     def __init__(
         self,
         base_url: str,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         *,
         store: str = "semantic",
         timeout: float = 30.0,
         max_retries: int = 3,
         **kwargs: Any,
     ) -> None:
-        try:
+        with contextlib.suppress(TypeError):
             super().__init__(**kwargs)
-        except TypeError:
-            pass
 
         self._client = Client(
             base_url,
@@ -210,15 +212,15 @@ class CerememoryVectorStore(VectorStore):  # type: ignore[misc]
 
     def add_texts(
         self,
-        texts: List[str],
-        metadatas: Optional[List[Dict[str, Any]]] = None,
+        texts: list[str],
+        metadatas: list[dict[str, Any]] | None = None,
         **kwargs: Any,
-    ) -> List[str]:
+    ) -> list[str]:
         """Store each text as a separate memory record.
 
         Returns a list of record-ID strings.
         """
-        ids: List[str] = []
+        ids: list[str] = []
         for text in texts:
             record_id: UUID = self._client.store(text, store=self._store)
             ids.append(str(record_id))
@@ -229,13 +231,13 @@ class CerememoryVectorStore(VectorStore):  # type: ignore[misc]
         query: str,
         k: int = 4,
         **kwargs: Any,
-    ) -> List[Document]:
+    ) -> list[Document]:
         """Search for memories similar to *query*.
 
         Returns up to *k* ``Document`` instances.
         """
         recalled = self._client.recall(query, limit=k)
-        documents: List[Document] = []
+        documents: list[Document] = []
         for mem in recalled:
             text = _extract_text(mem)
             doc = Document(
@@ -243,7 +245,11 @@ class CerememoryVectorStore(VectorStore):  # type: ignore[misc]
                 metadata={
                     "record_id": str(mem.record.id),
                     "relevance_score": mem.relevance_score,
-                    "store": mem.record.store.value if hasattr(mem.record.store, "value") else str(mem.record.store),
+                    "store": (
+                        mem.record.store.value
+                        if hasattr(mem.record.store, "value")
+                        else str(mem.record.store)
+                    ),
                 },
             )
             documents.append(doc)
@@ -252,11 +258,11 @@ class CerememoryVectorStore(VectorStore):  # type: ignore[misc]
     @classmethod
     def from_texts(
         cls,
-        texts: List[str],
-        embedding: Optional[Any] = None,
-        metadatas: Optional[List[Dict[str, Any]]] = None,
+        texts: list[str],
+        embedding: Any | None = None,
+        metadatas: list[dict[str, Any]] | None = None,
         **kwargs: Any,
-    ) -> "CerememoryVectorStore":
+    ) -> CerememoryVectorStore:
         """Create a new store and populate it with *texts*."""
         store = cls(**kwargs)
         store.add_texts(texts, metadatas)

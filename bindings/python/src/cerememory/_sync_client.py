@@ -5,7 +5,7 @@ Provides full CMP protocol access over HTTP using ``httpx``.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Type, TypeVar
+from typing import Any, TypeVar
 from uuid import UUID
 
 import httpx
@@ -67,11 +67,11 @@ class SyncCerememoryClient:
         self,
         base_url: str,
         *,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = 30.0,
         max_retries: int = 3,
-        headers: Optional[Dict[str, str]] = None,
-        http_client: Optional[httpx.Client] = None,
+        headers: dict[str, str] | None = None,
+        http_client: httpx.Client | None = None,
     ) -> None:
         self._transport = SyncTransport(
             base_url,
@@ -96,11 +96,11 @@ class SyncCerememoryClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _post(self, path: str, body: Any, response_model: Type[M]) -> M:
+    def _post(self, path: str, body: Any, response_model: type[M]) -> M:
         resp = self._transport.request("POST", path, json=body)
         return response_model.model_validate(resp.json())
 
-    def _get(self, path: str, response_model: Type[M], params: Optional[Dict[str, Any]] = None) -> M:
+    def _get(self, path: str, response_model: type[M], params: dict[str, Any] | None = None) -> M:
         resp = self._transport.request("GET", path, params=params)
         return response_model.model_validate(resp.json())
 

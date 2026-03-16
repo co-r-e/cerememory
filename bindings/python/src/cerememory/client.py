@@ -7,7 +7,7 @@ underlying transport clients.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -94,11 +94,11 @@ class Client:
         self,
         base_url: str,
         *,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = 30.0,
         max_retries: int = 3,
-        headers: Optional[Dict[str, str]] = None,
-        http_client: Optional[httpx.Client] = None,
+        headers: dict[str, str] | None = None,
+        http_client: httpx.Client | None = None,
     ) -> None:
         self._client = SyncCerememoryClient(
             base_url,
@@ -127,9 +127,9 @@ class Client:
         self,
         text: str,
         *,
-        store: Union[str, StoreType] = StoreType.EPISODIC,
-        emotion: Optional[EmotionVector] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        store: str | StoreType = StoreType.EPISODIC,
+        emotion: EmotionVector | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> UUID:
         """Store a text memory and return its record ID.
 
@@ -157,10 +157,10 @@ class Client:
         query: str,
         *,
         limit: int = 10,
-        stores: Optional[List[Union[str, StoreType]]] = None,
-        mode: Union[str, RecallMode] = RecallMode.HUMAN,
-        min_fidelity: Optional[float] = None,
-    ) -> List[RecalledMemory]:
+        stores: list[str | StoreType] | None = None,
+        mode: str | RecallMode = RecallMode.HUMAN,
+        min_fidelity: float | None = None,
+    ) -> list[RecalledMemory]:
         """Recall memories matching a text query.
 
         Args:
@@ -173,11 +173,10 @@ class Client:
         Returns:
             List of recalled memories with relevance scores.
         """
-        from cerememory.types import RecalledMemory
 
         if isinstance(mode, str):
             mode = RecallMode(mode)
-        resolved_stores: Optional[List[StoreType]] = None
+        resolved_stores: list[StoreType] | None = None
         if stores is not None:
             resolved_stores = [
                 StoreType(s) if isinstance(s, str) else s for s in stores
@@ -195,7 +194,7 @@ class Client:
     def forget(
         self,
         *record_ids: UUID,
-        store: Optional[Union[str, StoreType]] = None,
+        store: str | StoreType | None = None,
         confirm: bool = True,
         cascade: bool = False,
     ) -> int:
@@ -210,7 +209,7 @@ class Client:
         Returns:
             Number of records deleted.
         """
-        resolved_store: Optional[StoreType] = None
+        resolved_store: StoreType | None = None
         if store is not None:
             resolved_store = StoreType(store) if isinstance(store, str) else store
         ids = list(record_ids) if record_ids else None
@@ -343,11 +342,11 @@ class AsyncClient:
         self,
         base_url: str,
         *,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = 30.0,
         max_retries: int = 3,
-        headers: Optional[Dict[str, str]] = None,
-        http_client: Optional[httpx.AsyncClient] = None,
+        headers: dict[str, str] | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._client = AsyncCerememoryClient(
             base_url,
@@ -376,9 +375,9 @@ class AsyncClient:
         self,
         text: str,
         *,
-        store: Union[str, StoreType] = StoreType.EPISODIC,
-        emotion: Optional[EmotionVector] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        store: str | StoreType = StoreType.EPISODIC,
+        emotion: EmotionVector | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> UUID:
         """Store a text memory and return its record ID."""
         if isinstance(store, str):
@@ -396,16 +395,15 @@ class AsyncClient:
         query: str,
         *,
         limit: int = 10,
-        stores: Optional[List[Union[str, StoreType]]] = None,
-        mode: Union[str, RecallMode] = RecallMode.HUMAN,
-        min_fidelity: Optional[float] = None,
-    ) -> List[RecalledMemory]:
+        stores: list[str | StoreType] | None = None,
+        mode: str | RecallMode = RecallMode.HUMAN,
+        min_fidelity: float | None = None,
+    ) -> list[RecalledMemory]:
         """Recall memories matching a text query."""
-        from cerememory.types import RecalledMemory
 
         if isinstance(mode, str):
             mode = RecallMode(mode)
-        resolved_stores: Optional[List[StoreType]] = None
+        resolved_stores: list[StoreType] | None = None
         if stores is not None:
             resolved_stores = [
                 StoreType(s) if isinstance(s, str) else s for s in stores
@@ -423,12 +421,12 @@ class AsyncClient:
     async def forget(
         self,
         *record_ids: UUID,
-        store: Optional[Union[str, StoreType]] = None,
+        store: str | StoreType | None = None,
         confirm: bool = True,
         cascade: bool = False,
     ) -> int:
         """Forget (delete) memory records."""
-        resolved_store: Optional[StoreType] = None
+        resolved_store: StoreType | None = None
         if store is not None:
             resolved_store = StoreType(store) if isinstance(store, str) else store
         ids = list(record_ids) if record_ids else None

@@ -5,7 +5,7 @@ Provides full CMP protocol access over HTTP using ``httpx.AsyncClient``.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Type, TypeVar
+from typing import Any, TypeVar
 from uuid import UUID
 
 import httpx
@@ -66,11 +66,11 @@ class AsyncCerememoryClient:
         self,
         base_url: str,
         *,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = 30.0,
         max_retries: int = 3,
-        headers: Optional[Dict[str, str]] = None,
-        http_client: Optional[httpx.AsyncClient] = None,
+        headers: dict[str, str] | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._transport = AsyncTransport(
             base_url,
@@ -95,12 +95,12 @@ class AsyncCerememoryClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _post(self, path: str, body: Any, response_model: Type[M]) -> M:
+    async def _post(self, path: str, body: Any, response_model: type[M]) -> M:
         resp = await self._transport.request("POST", path, json=body)
         return response_model.model_validate(resp.json())
 
     async def _get(
-        self, path: str, response_model: Type[M], params: Optional[Dict[str, Any]] = None
+        self, path: str, response_model: type[M], params: dict[str, Any] | None = None
     ) -> M:
         resp = await self._transport.request("GET", path, params=params)
         return response_model.model_validate(resp.json())

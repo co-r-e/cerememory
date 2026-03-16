@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Optional, Type, TypeVar
+from typing import Any, TypeVar
 
 import httpx
 
 from cerememory.errors import (
     CerememoryError,
-    ConnectionError as CerememoryConnectionError,
-    TimeoutError as CerememoryTimeoutError,
     error_from_code,
+)
+from cerememory.errors import (
+    ConnectionError as CerememoryConnectionError,
+)
+from cerememory.errors import (
+    TimeoutError as CerememoryTimeoutError,
 )
 
 logger = logging.getLogger("cerememory")
@@ -34,9 +38,9 @@ DEFAULT_BACKOFF_MAX = 30.0
 DEFAULT_BACKOFF_FACTOR = 2.0
 
 
-def _build_headers(api_key: Optional[str], extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+def _build_headers(api_key: str | None, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Build the default request headers."""
-    headers: Dict[str, str] = {
+    headers: dict[str, str] = {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "User-Agent": "cerememory-python/0.1.0",
@@ -75,7 +79,7 @@ def _parse_cmp_error(response: httpx.Response) -> CerememoryError:
         )
 
 
-def _compute_backoff(attempt: int, retry_after: Optional[int] = None) -> float:
+def _compute_backoff(attempt: int, retry_after: int | None = None) -> float:
     """Compute wait time in seconds using exponential backoff with jitter.
 
     If the server sent a ``retry_after`` hint, that takes precedence.
@@ -104,11 +108,11 @@ class SyncTransport:
         self,
         base_url: str,
         *,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        headers: Optional[Dict[str, str]] = None,
-        http_client: Optional[httpx.Client] = None,
+        headers: dict[str, str] | None = None,
+        http_client: httpx.Client | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -137,15 +141,15 @@ class SyncTransport:
         method: str,
         path: str,
         *,
-        json: Optional[Any] = None,
-        params: Optional[Dict[str, Any]] = None,
+        json: Any | None = None,
+        params: dict[str, Any] | None = None,
     ) -> httpx.Response:
         """Execute an HTTP request with retry logic.
 
         Raises:
             CerememoryError: On any non-2xx final response or transport error.
         """
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
 
         for attempt in range(self._max_retries + 1):
             try:
@@ -218,11 +222,11 @@ class AsyncTransport:
         self,
         base_url: str,
         *,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        headers: Optional[Dict[str, str]] = None,
-        http_client: Optional[httpx.AsyncClient] = None,
+        headers: dict[str, str] | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -251,8 +255,8 @@ class AsyncTransport:
         method: str,
         path: str,
         *,
-        json: Optional[Any] = None,
-        params: Optional[Dict[str, Any]] = None,
+        json: Any | None = None,
+        params: dict[str, Any] | None = None,
     ) -> httpx.Response:
         """Execute an HTTP request with retry logic.
 
@@ -261,7 +265,7 @@ class AsyncTransport:
         """
         import asyncio
 
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
 
         for attempt in range(self._max_retries + 1):
             try:

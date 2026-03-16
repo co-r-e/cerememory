@@ -13,7 +13,7 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Optional, TypeVar
+from typing import TypeVar
 
 import pytest
 
@@ -28,7 +28,7 @@ T = TypeVar("T")
 
 
 def wait_for(
-    callback: Callable[[], Optional[T]],
+    callback: Callable[[], T | None],
     *,
     timeout: float = 10.0,
     interval: float = 0.25,
@@ -44,7 +44,7 @@ def wait_for(
 
 
 async def wait_for_async(
-    callback: Callable[[], Awaitable[Optional[T]]],
+    callback: Callable[[], Awaitable[T | None]],
     *,
     timeout: float = 10.0,
     interval: float = 0.25,

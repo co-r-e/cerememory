@@ -9,11 +9,10 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
-
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -96,11 +95,11 @@ class ContentBlock(BaseModel):
     modality: Modality
     format: str
     data: bytes
-    embedding: Optional[List[float]] = None
+    embedding: list[float] | None = None
 
     @field_serializer("data")
     @classmethod
-    def _serialize_data(cls, v: bytes, _info: Any) -> List[int]:
+    def _serialize_data(cls, v: bytes, _info: Any) -> list[int]:
         """Serialize bytes as a JSON array of integers (matching Rust serde default)."""
         return list(v)
 
@@ -120,8 +119,8 @@ class ContentBlock(BaseModel):
 class MemoryContent(BaseModel):
     """The payload of a memory record."""
 
-    blocks: List[ContentBlock]
-    summary: Optional[str] = None
+    blocks: list[ContentBlock]
+    summary: str | None = None
 
 
 class FidelityState(BaseModel):
@@ -175,8 +174,8 @@ class MemoryRecord(BaseModel):
     content: MemoryContent
     fidelity: FidelityState = Field(default_factory=FidelityState)
     emotion: EmotionVector = Field(default_factory=EmotionVector)
-    associations: List[Association] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    associations: list[Association] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     version: int = 1
 
 
@@ -202,10 +201,10 @@ class CMPHeader(BaseModel):
 class EncodeContext(BaseModel):
     """Contextual metadata for encode operations."""
 
-    source: Optional[str] = None
-    session_id: Optional[str] = None
-    spatial: Optional[Any] = None
-    temporal: Optional[Any] = None
+    source: str | None = None
+    session_id: str | None = None
+    spatial: Any | None = None
+    temporal: Any | None = None
 
 
 class ManualAssociation(BaseModel):
@@ -219,12 +218,12 @@ class ManualAssociation(BaseModel):
 class EncodeStoreRequest(BaseModel):
     """Request body for ``POST /v1/encode``."""
 
-    header: Optional[CMPHeader] = None
+    header: CMPHeader | None = None
     content: MemoryContent
-    store: Optional[StoreType] = None
-    emotion: Optional[EmotionVector] = None
-    context: Optional[EncodeContext] = None
-    associations: Optional[List[ManualAssociation]] = None
+    store: StoreType | None = None
+    emotion: EmotionVector | None = None
+    context: EncodeContext | None = None
+    associations: list[ManualAssociation] | None = None
 
 
 class EncodeStoreResponse(BaseModel):
@@ -239,26 +238,26 @@ class EncodeStoreResponse(BaseModel):
 class EncodeBatchRequest(BaseModel):
     """Request body for ``POST /v1/encode/batch``."""
 
-    header: Optional[CMPHeader] = None
-    records: List[EncodeStoreRequest]
+    header: CMPHeader | None = None
+    records: list[EncodeStoreRequest]
     infer_associations: bool = False
 
 
 class EncodeBatchResponse(BaseModel):
     """Response from ``POST /v1/encode/batch``."""
 
-    results: List[EncodeStoreResponse]
+    results: list[EncodeStoreResponse]
     associations_inferred: int
 
 
 class EncodeUpdateRequest(BaseModel):
     """Request body for ``PATCH /v1/encode/:record_id``."""
 
-    header: Optional[CMPHeader] = None
+    header: CMPHeader | None = None
     record_id: UUID
-    content: Optional[MemoryContent] = None
-    emotion: Optional[EmotionVector] = None
-    metadata: Optional[Dict[str, Any]] = None
+    content: MemoryContent | None = None
+    emotion: EmotionVector | None = None
+    metadata: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -276,25 +275,25 @@ class TemporalRange(BaseModel):
 class RecallCue(BaseModel):
     """Multimodal recall cue."""
 
-    text: Optional[str] = None
-    image: Optional[bytes] = None
-    audio: Optional[bytes] = None
-    emotion: Optional[EmotionVector] = None
-    temporal: Optional[TemporalRange] = None
-    spatial: Optional[Any] = None
-    semantic: Optional[Any] = None
-    embedding: Optional[List[float]] = None
+    text: str | None = None
+    image: bytes | None = None
+    audio: bytes | None = None
+    emotion: EmotionVector | None = None
+    temporal: TemporalRange | None = None
+    spatial: Any | None = None
+    semantic: Any | None = None
+    embedding: list[float] | None = None
 
     @field_serializer("image", "audio")
     @classmethod
-    def _serialize_bytes(cls, v: Optional[bytes], _info: Any) -> Optional[List[int]]:
+    def _serialize_bytes(cls, v: bytes | None, _info: Any) -> list[int] | None:
         if v is None:
             return None
         return list(v)
 
     @field_validator("image", "audio", mode="before")
     @classmethod
-    def _deserialize_bytes(cls, v: Any) -> Optional[bytes]:
+    def _deserialize_bytes(cls, v: Any) -> bytes | None:
         if v is None:
             return None
         if isinstance(v, bytes):
@@ -309,11 +308,11 @@ class RecallCue(BaseModel):
 class RecallQueryRequest(BaseModel):
     """Request body for ``POST /v1/recall/query``."""
 
-    header: Optional[CMPHeader] = None
+    header: CMPHeader | None = None
     cue: RecallCue
-    stores: Optional[List[StoreType]] = None
+    stores: list[StoreType] | None = None
     limit: int = 10
-    min_fidelity: Optional[float] = None
+    min_fidelity: float | None = None
     include_decayed: bool = False
     reconsolidate: bool = True
     activation_depth: int = 2
@@ -325,7 +324,7 @@ class RecalledMemory(BaseModel):
 
     record: MemoryRecord
     relevance_score: float
-    activation_path: Optional[List[UUID]] = None
+    activation_path: list[UUID] | None = None
     rendered_content: MemoryContent
 
 
@@ -342,23 +341,23 @@ class ActivationTrace(BaseModel):
     """Activation trace for debugging recall paths."""
 
     source_id: UUID
-    activations: List[ActivationNode]
+    activations: list[ActivationNode]
 
 
 class RecallQueryResponse(BaseModel):
     """Response from ``POST /v1/recall/query``."""
 
-    memories: List[RecalledMemory]
-    activation_trace: Optional[ActivationTrace] = None
+    memories: list[RecalledMemory]
+    activation_trace: ActivationTrace | None = None
     total_candidates: int
 
 
 class RecallAssociateRequest(BaseModel):
     """Request body for ``POST /v1/recall/associate/:id``."""
 
-    header: Optional[CMPHeader] = None
+    header: CMPHeader | None = None
     record_id: UUID
-    association_types: Optional[List[AssociationType]] = None
+    association_types: list[AssociationType] | None = None
     depth: int = 2
     min_weight: float = 0.1
     limit: int = 10
@@ -367,18 +366,18 @@ class RecallAssociateRequest(BaseModel):
 class RecallAssociateResponse(BaseModel):
     """Response from ``POST /v1/recall/associate/:id``."""
 
-    memories: List[RecalledMemory]
+    memories: list[RecalledMemory]
     total_candidates: int
 
 
 class RecallTimelineRequest(BaseModel):
     """Request body for ``POST /v1/recall/timeline``."""
 
-    header: Optional[CMPHeader] = None
+    header: CMPHeader | None = None
     range: TemporalRange
     granularity: TimeGranularity = TimeGranularity.HOUR
-    min_fidelity: Optional[float] = None
-    emotion_filter: Optional[EmotionVector] = None
+    min_fidelity: float | None = None
+    emotion_filter: EmotionVector | None = None
 
 
 class TimelineBucket(BaseModel):
@@ -386,23 +385,23 @@ class TimelineBucket(BaseModel):
 
     start: datetime
     end: datetime
-    memories: List[RecalledMemory]
+    memories: list[RecalledMemory]
     count: int
 
 
 class RecallTimelineResponse(BaseModel):
     """Response from ``POST /v1/recall/timeline``."""
 
-    buckets: List[TimelineBucket]
+    buckets: list[TimelineBucket]
 
 
 class RecallGraphRequest(BaseModel):
     """Request body for ``POST /v1/recall/graph``."""
 
-    header: Optional[CMPHeader] = None
-    center_id: Optional[UUID] = None
+    header: CMPHeader | None = None
+    center_id: UUID | None = None
     depth: int = 2
-    edge_types: Optional[List[str]] = None
+    edge_types: list[str] | None = None
     limit_nodes: int = 10
 
 
@@ -411,7 +410,7 @@ class GraphNode(BaseModel):
 
     id: UUID
     store: StoreType
-    summary: Optional[str] = None
+    summary: str | None = None
     fidelity: float
 
 
@@ -427,8 +426,8 @@ class GraphEdge(BaseModel):
 class RecallGraphResponse(BaseModel):
     """Response from ``POST /v1/recall/graph``."""
 
-    nodes: List[GraphNode]
-    edges: List[GraphEdge]
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
     total_nodes: int
 
 
@@ -440,7 +439,7 @@ class RecallGraphResponse(BaseModel):
 class ConsolidateRequest(BaseModel):
     """Request body for ``POST /v1/lifecycle/consolidate``."""
 
-    header: Optional[CMPHeader] = None
+    header: CMPHeader | None = None
     strategy: ConsolidationStrategy = ConsolidationStrategy.INCREMENTAL
     min_age_hours: int = 0
     min_access_count: int = 0
@@ -460,8 +459,8 @@ class ConsolidateResponse(BaseModel):
 class DecayTickRequest(BaseModel):
     """Request body for ``POST /v1/lifecycle/decay-tick``."""
 
-    header: Optional[CMPHeader] = None
-    tick_duration_seconds: Optional[int] = None
+    header: CMPHeader | None = None
+    tick_duration_seconds: int | None = None
 
 
 class DecayTickResponse(BaseModel):
@@ -475,18 +474,18 @@ class DecayTickResponse(BaseModel):
 class SetModeRequest(BaseModel):
     """Request body for ``PUT /v1/lifecycle/mode``."""
 
-    header: Optional[CMPHeader] = None
+    header: CMPHeader | None = None
     mode: RecallMode
-    scope: Optional[List[StoreType]] = None
+    scope: list[StoreType] | None = None
 
 
 class ForgetRequest(BaseModel):
     """Request body for ``DELETE /v1/lifecycle/forget``."""
 
-    header: Optional[CMPHeader] = None
-    record_ids: Optional[List[UUID]] = None
-    store: Optional[StoreType] = None
-    temporal_range: Optional[TemporalRange] = None
+    header: CMPHeader | None = None
+    record_ids: list[UUID] | None = None
+    store: StoreType | None = None
+    temporal_range: TemporalRange | None = None
     cascade: bool = False
     confirm: bool
 
@@ -515,31 +514,31 @@ class ParameterAdjustment(BaseModel):
 class EvolutionMetrics(BaseModel):
     """Self-evolution metrics."""
 
-    parameter_adjustments: List[ParameterAdjustment] = Field(default_factory=list)
-    detected_patterns: List[str] = Field(default_factory=list)
-    schema_adaptations: List[str] = Field(default_factory=list)
+    parameter_adjustments: list[ParameterAdjustment] = Field(default_factory=list)
+    detected_patterns: list[str] = Field(default_factory=list)
+    schema_adaptations: list[str] = Field(default_factory=list)
 
 
 class StatsResponse(BaseModel):
     """Response from ``GET /v1/introspect/stats``."""
 
     total_records: int
-    records_by_store: Dict[str, int]
+    records_by_store: dict[str, int]
     total_associations: int
     avg_fidelity: float
-    avg_fidelity_by_store: Dict[str, float] = Field(default_factory=dict)
-    oldest_record: Optional[datetime] = None
-    newest_record: Optional[datetime] = None
+    avg_fidelity_by_store: dict[str, float] = Field(default_factory=dict)
+    oldest_record: datetime | None = None
+    newest_record: datetime | None = None
     total_recall_count: int
-    evolution_metrics: Optional[EvolutionMetrics] = None
+    evolution_metrics: EvolutionMetrics | None = None
     background_decay_enabled: bool = False
 
 
 class DecayForecastRequest(BaseModel):
     """Request body for ``POST /v1/introspect/decay-forecast``."""
 
-    header: Optional[CMPHeader] = None
-    record_ids: List[UUID]
+    header: CMPHeader | None = None
+    record_ids: list[UUID]
     forecast_at: datetime
 
 
@@ -549,13 +548,13 @@ class DecayForecast(BaseModel):
     record_id: UUID
     current_fidelity: float
     forecasted_fidelity: float
-    estimated_threshold_date: Optional[datetime] = None
+    estimated_threshold_date: datetime | None = None
 
 
 class DecayForecastResponse(BaseModel):
     """Response from ``POST /v1/introspect/decay-forecast``."""
 
-    forecasts: List[DecayForecast]
+    forecasts: list[DecayForecast]
 
 
 # ---------------------------------------------------------------------------

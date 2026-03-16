@@ -7,9 +7,6 @@ to the underlying Cerememory ``Client``.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
-from uuid import UUID
-
 import httpx
 import pytest
 import respx
@@ -17,11 +14,9 @@ import respx
 from cerememory.integrations.langchain import (
     CerememoryMemory,
     CerememoryVectorStore,
-    _LANGCHAIN_AVAILABLE,
 )
 from cerememory.integrations.llamaindex import (
     CerememoryVectorStore as LlamaIndexVectorStore,
-    _LLAMAINDEX_AVAILABLE,
 )
 from tests.conftest import (
     BASE_URL,
@@ -29,7 +24,6 @@ from tests.conftest import (
     make_encode_store_response,
     make_recall_query_response,
 )
-
 
 # ---------------------------------------------------------------------------
 # Module-level sanity checks

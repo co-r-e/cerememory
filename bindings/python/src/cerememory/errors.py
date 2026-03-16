@@ -7,7 +7,7 @@ code, message, details, and retry_after hint from the server.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 
 class CerememoryError(Exception):
@@ -27,10 +27,10 @@ class CerememoryError(Exception):
         self,
         message: str,
         *,
-        code: Optional[str] = None,
-        details: Optional[Any] = None,
-        retry_after: Optional[int] = None,
-        status_code: Optional[int] = None,
+        code: str | None = None,
+        details: Any | None = None,
+        retry_after: int | None = None,
+        status_code: int | None = None,
     ) -> None:
         super().__init__(message)
         if code is not None:
@@ -194,9 +194,9 @@ def error_from_code(
     code: str,
     message: str,
     *,
-    details: Optional[Any] = None,
-    retry_after: Optional[int] = None,
-    status_code: Optional[int] = None,
+    details: Any | None = None,
+    retry_after: int | None = None,
+    status_code: int | None = None,
 ) -> CerememoryError:
     """Create the appropriate exception subclass from a CMP error code."""
     cls = _CODE_TO_EXCEPTION.get(code, CerememoryError)

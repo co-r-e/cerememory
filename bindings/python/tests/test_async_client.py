@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from uuid import UUID
 
 import httpx
@@ -11,9 +10,9 @@ import respx
 
 from cerememory import (
     AsyncClient,
-    CerememoryError,
     ConsolidateRequest,
     ContentBlock,
+    DecayForecastRequest,
     DecayTickRequest,
     EmotionVector,
     EncodeBatchRequest,
@@ -23,7 +22,6 @@ from cerememory import (
     ForgetUnconfirmedError,
     MemoryContent,
     Modality,
-    RateLimitedError,
     RecallAssociateRequest,
     RecallCue,
     RecallGraphRequest,
@@ -35,11 +33,10 @@ from cerememory import (
     StoreType,
     TemporalRange,
     UnauthorizedError,
-    DecayForecastRequest,
 )
 from tests.conftest import (
-    BASE_URL,
     API_KEY,
+    BASE_URL,
     SAMPLE_RECORD_ID,
     make_cmp_error,
     make_encode_store_response,
