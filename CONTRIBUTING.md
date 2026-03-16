@@ -164,7 +164,7 @@ The crate structure follows the architecture closely:
 
 ## License
 
-By contributing to Cerememory, you agree that your contributions will be licensed under the Apache License 2.0.
+By contributing to Cerememory, you agree that your contributions will be licensed under the MIT License.
 
 ## Code of Conduct
 

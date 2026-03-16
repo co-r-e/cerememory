@@ -15,5 +15,5 @@
     "build": "napi build --release",
     "build:debug": "napi build"
   },
-  "license": "Apache-2.0"
+  "license": "MIT"
 }

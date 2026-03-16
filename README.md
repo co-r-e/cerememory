@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/co-r-e/cerememory/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
   </a>
   <a href="https://github.com/co-r-e/cerememory">
     <img src="https://img.shields.io/badge/status-alpha-green.svg" alt="Status">
@@ -279,7 +279,7 @@ If the age of AI means that humans will increasingly co-think with AI systems, t
 
 ## License
 
-Cerememory is licensed under the [Apache License 2.0](LICENSE).
+Cerememory is licensed under the [MIT License](LICENSE).
 
 ---
 
