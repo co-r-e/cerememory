@@ -84,7 +84,7 @@ If you have expertise in cognitive neuroscience or memory research, we especiall
 
 ### Prerequisites
 
-- Rust 1.77 or later (install via [rustup](https://rustup.rs/))
+- Rust 1.85 or later (install via [rustup](https://rustup.rs/))
 - Cargo (included with Rust)
 - Python 3.9 or later (for Python SDK work)
 - Node.js 18 or later (for TypeScript SDK work)

@@ -89,8 +89,9 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
           cp LICENSE README.md dist/
-          cd dist && tar czf cerememory-${{ matrix.target }}.tar.gz ${{ matrix.binary }} LICENSE README.md
-          cd dist && shasum -a 256 cerememory-${{ matrix.target }}.tar.gz > cerememory-${{ matrix.target }}.tar.gz.sha256
+          cd dist
+          tar czf cerememory-${{ matrix.target }}.tar.gz ${{ matrix.binary }} LICENSE README.md
+          shasum -a 256 cerememory-${{ matrix.target }}.tar.gz > cerememory-${{ matrix.target }}.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
