@@ -101,6 +101,8 @@ struct ExportParams {
     format: Option<String>,
     /// Encrypt the export (default: false)
     encrypt: Option<bool>,
+    /// Encryption key required when `encrypt` is true
+    encryption_key: Option<String>,
 }
 
 // ─── Server ─────────────────────────────────────────────────────────
@@ -138,8 +140,105 @@ fn ok_json<T: Serialize>(val: &T) -> Result<CallToolResult, McpError> {
     ok_text(text)
 }
 
-fn parse_emotion(label: Option<String>) -> Option<EmotionVector> {
-    label.map(|_l| EmotionVector::default())
+fn parse_emotion(label: Option<String>) -> Result<Option<EmotionVector>, McpError> {
+    let Some(label) = label else {
+        return Ok(None);
+    };
+
+    let normalized = label.trim().to_lowercase();
+    let emotion = match normalized.as_str() {
+        "joy" | "happy" | "happiness" => EmotionVector {
+            joy: 1.0,
+            intensity: 1.0,
+            valence: 1.0,
+            ..Default::default()
+        },
+        "trust" => EmotionVector {
+            trust: 1.0,
+            intensity: 1.0,
+            valence: 0.7,
+            ..Default::default()
+        },
+        "fear" => EmotionVector {
+            fear: 1.0,
+            intensity: 1.0,
+            valence: -0.8,
+            ..Default::default()
+        },
+        "surprise" => EmotionVector {
+            surprise: 1.0,
+            intensity: 1.0,
+            ..Default::default()
+        },
+        "sadness" | "sad" => EmotionVector {
+            sadness: 1.0,
+            intensity: 1.0,
+            valence: -1.0,
+            ..Default::default()
+        },
+        "disgust" => EmotionVector {
+            disgust: 1.0,
+            intensity: 1.0,
+            valence: -0.9,
+            ..Default::default()
+        },
+        "anger" | "angry" => EmotionVector {
+            anger: 1.0,
+            intensity: 1.0,
+            valence: -0.9,
+            ..Default::default()
+        },
+        "anticipation" | "anticipatory" => EmotionVector {
+            anticipation: 1.0,
+            intensity: 1.0,
+            valence: 0.4,
+            ..Default::default()
+        },
+        other => {
+            return Err(McpError::invalid_params(
+                format!(
+                    "Invalid emotion label: {other}. Use one of joy, trust, fear, surprise, sadness, disgust, anger, anticipation."
+                ),
+                None,
+            ));
+        }
+    };
+
+    Ok(Some(emotion))
+}
+
+fn parse_consolidation_strategy(
+    strategy: Option<String>,
+) -> Result<ConsolidationStrategy, McpError> {
+    match strategy
+        .as_deref()
+        .unwrap_or("incremental")
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
+        "full" => Ok(ConsolidationStrategy::Full),
+        "incremental" => Ok(ConsolidationStrategy::Incremental),
+        "selective" => Ok(ConsolidationStrategy::Selective),
+        other => Err(McpError::invalid_params(
+            format!(
+                "Invalid consolidation strategy: {other}. Use one of incremental, full, selective."
+            ),
+            None,
+        )),
+    }
+}
+
+fn parse_export_format(format: Option<String>) -> Result<String, McpError> {
+    let format = format.unwrap_or_else(|| "cma".to_string());
+    if format.eq_ignore_ascii_case("cma") {
+        Ok("cma".to_string())
+    } else {
+        Err(McpError::invalid_params(
+            format!("Unsupported export format: {format}. Only 'cma' is currently supported."),
+            None,
+        ))
+    }
 }
 
 #[tool_router]
@@ -151,10 +250,13 @@ impl CerememoryMcpServer {
         }
     }
 
-    #[tool(description = "Store a new memory record. Returns the record ID, store type, and initial fidelity.")]
+    #[tool(
+        description = "Store a new memory record. Returns the record ID, store type, and initial fidelity."
+    )]
     async fn store(&self, params: Parameters<StoreParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let store_type = p.store.map(|s| parse_store_type(&s)).transpose()?;
+        let emotion = parse_emotion(p.emotion)?;
 
         let req = EncodeStoreRequest {
             header: None,
@@ -168,7 +270,7 @@ impl CerememoryMcpServer {
                 summary: None,
             },
             store: store_type,
-            emotion: parse_emotion(p.emotion),
+            emotion,
             context: None,
             associations: None,
         };
@@ -177,19 +279,20 @@ impl CerememoryMcpServer {
         ok_json(&resp)
     }
 
-    #[tool(description = "Store multiple memory records in a batch. Accepts a JSON array string of records.")]
+    #[tool(
+        description = "Store multiple memory records in a batch. Accepts a JSON array string of records."
+    )]
     async fn batch_store(
         &self,
         params: Parameters<BatchStoreParams>,
     ) -> Result<CallToolResult, McpError> {
-        let records: Vec<BatchRecord> =
-            serde_json::from_str(&params.0.records_json).map_err(|e| {
-                McpError::invalid_params(format!("Invalid records_json: {e}"), None)
-            })?;
+        let records: Vec<BatchRecord> = serde_json::from_str(&params.0.records_json)
+            .map_err(|e| McpError::invalid_params(format!("Invalid records_json: {e}"), None))?;
 
         let mut encode_records = Vec::with_capacity(records.len());
         for r in records {
             let store_type = r.store.map(|s| parse_store_type(&s)).transpose()?;
+            let emotion = parse_emotion(r.emotion)?;
             encode_records.push(EncodeStoreRequest {
                 header: None,
                 content: MemoryContent {
@@ -202,7 +305,7 @@ impl CerememoryMcpServer {
                     summary: None,
                 },
                 store: store_type,
-                emotion: parse_emotion(r.emotion),
+                emotion,
                 context: None,
                 associations: None,
             });
@@ -218,7 +321,9 @@ impl CerememoryMcpServer {
         ok_json(&resp)
     }
 
-    #[tool(description = "Recall memories matching a natural language query. Returns ranked results with relevance scores.")]
+    #[tool(
+        description = "Recall memories matching a natural language query. Returns ranked results with relevance scores."
+    )]
     async fn recall(&self, params: Parameters<RecallParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let stores = p
@@ -249,7 +354,9 @@ impl CerememoryMcpServer {
         ok_json(&resp)
     }
 
-    #[tool(description = "Retrieve memories along a timeline. Filter by start/end time and granularity.")]
+    #[tool(
+        description = "Retrieve memories along a timeline. Filter by start/end time and granularity."
+    )]
     async fn timeline(
         &self,
         params: Parameters<TimelineParams>,
@@ -274,6 +381,12 @@ impl CerememoryMcpServer {
             })
             .transpose()?
             .unwrap_or(now);
+        if start > end {
+            return Err(McpError::invalid_params(
+                "Invalid time range: start must be earlier than or equal to end.".to_string(),
+                None,
+            ));
+        }
         let granularity = p
             .granularity
             .map(|g| match g.to_lowercase().as_str() {
@@ -298,15 +411,13 @@ impl CerememoryMcpServer {
             emotion_filter: None,
         };
 
-        let resp = self
-            .engine
-            .recall_timeline(req)
-            .await
-            .map_err(engine_err)?;
+        let resp = self.engine.recall_timeline(req).await.map_err(engine_err)?;
         ok_json(&resp)
     }
 
-    #[tool(description = "Find memories associated with a given record through spreading activation.")]
+    #[tool(
+        description = "Find memories associated with a given record through spreading activation."
+    )]
     async fn associate(
         &self,
         params: Parameters<AssociateParams>,
@@ -363,16 +474,7 @@ impl CerememoryMcpServer {
         params: Parameters<ConsolidateParams>,
     ) -> Result<CallToolResult, McpError> {
         let p = params.0;
-        let strategy = match p
-            .strategy
-            .as_deref()
-            .unwrap_or("incremental")
-            .to_lowercase()
-            .as_str()
-        {
-            "full" => ConsolidationStrategy::Full,
-            _ => ConsolidationStrategy::Incremental,
-        };
+        let strategy = parse_consolidation_strategy(p.strategy)?;
 
         let req = ConsolidateRequest {
             header: None,
@@ -392,19 +494,14 @@ impl CerememoryMcpServer {
 
     #[tool(description = "Get system statistics: record counts, store sizes, decay state.")]
     async fn stats(&self) -> Result<CallToolResult, McpError> {
-        let resp = self
-            .engine
-            .introspect_stats()
-            .await
-            .map_err(engine_err)?;
+        let resp = self.engine.introspect_stats().await.map_err(engine_err)?;
         ok_json(&resp)
     }
 
-    #[tool(description = "Inspect a specific memory record by UUID. Returns full details including history.")]
-    async fn inspect(
-        &self,
-        params: Parameters<InspectParams>,
-    ) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Inspect a specific memory record by UUID. Returns full details including history."
+    )]
+    async fn inspect(&self, params: Parameters<InspectParams>) -> Result<CallToolResult, McpError> {
         let record_id = parse_uuid(&params.0.record_id)?;
 
         let req = RecordIntrospectRequest {
@@ -423,15 +520,18 @@ impl CerememoryMcpServer {
         ok_json(&record)
     }
 
-    #[tool(description = "Export all memory records as a CMA archive. Returns metadata and archive size.")]
+    #[tool(
+        description = "Export all memory records as a CMA archive. Returns metadata and archive size."
+    )]
     async fn export(&self, params: Parameters<ExportParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        let format = parse_export_format(p.format)?;
         let req = ExportRequest {
             header: None,
-            format: p.format.unwrap_or_else(|| "cma".to_string()),
+            format,
             stores: None,
             encrypt: p.encrypt.unwrap_or(false),
-            encryption_key: None,
+            encryption_key: p.encryption_key,
         };
 
         let (bytes, resp) = self
@@ -447,15 +547,10 @@ impl CerememoryMcpServer {
 
 impl ServerHandler for CerememoryMcpServer {
     fn get_info(&self) -> ServerInfo {
-        let capabilities = ServerCapabilities::builder()
-            .enable_tools()
-            .build();
+        let capabilities = ServerCapabilities::builder().enable_tools().build();
 
         ServerInfo::new(capabilities)
-            .with_server_info(Implementation::new(
-                "cerememory",
-                env!("CARGO_PKG_VERSION"),
-            ))
+            .with_server_info(Implementation::new("cerememory", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Cerememory is a living memory database. Use 'store' to save memories, \
                  'recall' to search, 'timeline' for temporal browsing, 'associate' for \
@@ -499,19 +594,36 @@ mod tests {
 
     #[test]
     fn parse_store_type_valid() {
-        assert_eq!(
-            parse_store_type("episodic").unwrap(),
-            StoreType::Episodic
-        );
-        assert_eq!(
-            parse_store_type("Semantic").unwrap(),
-            StoreType::Semantic
-        );
+        assert_eq!(parse_store_type("episodic").unwrap(), StoreType::Episodic);
+        assert_eq!(parse_store_type("Semantic").unwrap(), StoreType::Semantic);
     }
 
     #[test]
     fn parse_store_type_invalid() {
         assert!(parse_store_type("invalid").is_err());
+    }
+
+    #[test]
+    fn parse_emotion_valid() {
+        let emotion = parse_emotion(Some("joy".to_string())).unwrap().unwrap();
+        assert_eq!(emotion.joy, 1.0);
+        assert_eq!(emotion.intensity, 1.0);
+        assert_eq!(emotion.valence, 1.0);
+    }
+
+    #[test]
+    fn parse_emotion_invalid() {
+        assert!(parse_emotion(Some("unknown".to_string())).is_err());
+    }
+
+    #[test]
+    fn parse_consolidation_strategy_rejects_unknown_values() {
+        assert!(parse_consolidation_strategy(Some("typo".to_string())).is_err());
+    }
+
+    #[test]
+    fn parse_export_format_rejects_non_cma_values() {
+        assert!(parse_export_format(Some("zip".to_string())).is_err());
     }
 
     #[test]
@@ -523,5 +635,32 @@ mod tests {
     #[test]
     fn parse_uuid_invalid() {
         assert!(parse_uuid("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn tool_router_registers_expected_tools() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let server = CerememoryMcpServer::new(engine);
+        let tools = server.tool_router.list_all();
+        let tool_names: Vec<String> = tools
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+
+        assert_eq!(
+            tool_names,
+            vec![
+                "associate".to_string(),
+                "batch_store".to_string(),
+                "consolidate".to_string(),
+                "export".to_string(),
+                "forget".to_string(),
+                "inspect".to_string(),
+                "recall".to_string(),
+                "stats".to_string(),
+                "store".to_string(),
+                "timeline".to_string(),
+            ]
+        );
     }
 }

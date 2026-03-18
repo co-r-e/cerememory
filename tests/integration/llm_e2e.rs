@@ -12,7 +12,7 @@
 use cerememory_core::LLMProvider;
 
 fn llm_e2e_enabled() -> bool {
-    std::env::var("CEREMEMORY_LLM_E2E").map_or(false, |v| v == "1")
+    std::env::var("CEREMEMORY_LLM_E2E").is_ok_and(|v| v == "1")
 }
 
 fn openai_key() -> Option<String> {

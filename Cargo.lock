@@ -691,6 +691,9 @@ name = "cerememory-integration-tests"
 version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
+ "cerememory-adapter-claude",
+ "cerememory-adapter-gemini",
+ "cerememory-adapter-openai",
  "cerememory-archive",
  "cerememory-config",
  "cerememory-core",
@@ -872,8 +875,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
- "tokio",
  "tracing",
  "uuid",
 ]
