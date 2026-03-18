@@ -145,6 +145,66 @@ impl Default for EmotionVector {
     }
 }
 
+impl std::str::FromStr for EmotionVector {
+    type Err = crate::error::CerememoryError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let normalized = s.trim().to_lowercase();
+        match normalized.as_str() {
+            "joy" | "happy" | "happiness" => Ok(Self {
+                joy: 1.0,
+                intensity: 1.0,
+                valence: 1.0,
+                ..Default::default()
+            }),
+            "trust" => Ok(Self {
+                trust: 1.0,
+                intensity: 1.0,
+                valence: 0.7,
+                ..Default::default()
+            }),
+            "fear" => Ok(Self {
+                fear: 1.0,
+                intensity: 1.0,
+                valence: -0.8,
+                ..Default::default()
+            }),
+            "surprise" => Ok(Self {
+                surprise: 1.0,
+                intensity: 1.0,
+                ..Default::default()
+            }),
+            "sadness" | "sad" => Ok(Self {
+                sadness: 1.0,
+                intensity: 1.0,
+                valence: -1.0,
+                ..Default::default()
+            }),
+            "disgust" => Ok(Self {
+                disgust: 1.0,
+                intensity: 1.0,
+                valence: -0.9,
+                ..Default::default()
+            }),
+            "anger" | "angry" => Ok(Self {
+                anger: 1.0,
+                intensity: 1.0,
+                valence: -0.9,
+                ..Default::default()
+            }),
+            "anticipation" | "anticipatory" => Ok(Self {
+                anticipation: 1.0,
+                intensity: 1.0,
+                valence: 0.4,
+                ..Default::default()
+            }),
+            other => Err(crate::error::CerememoryError::Validation(format!(
+                "Invalid emotion label: {other}. Use one of: joy, trust, fear, surprise, sadness, disgust, anger, anticipation"
+            ))),
+        }
+    }
+}
+
 /// A weighted, typed, bidirectional link between two memory records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Association {
@@ -531,6 +591,46 @@ mod tests {
         assert!(matches!(
             err,
             crate::error::CerememoryError::StoreInvalid(_)
+        ));
+    }
+
+    #[test]
+    fn emotion_from_str_valid_labels() {
+        let joy: EmotionVector = "joy".parse().unwrap();
+        assert_eq!(joy.joy, 1.0);
+        assert_eq!(joy.intensity, 1.0);
+        assert_eq!(joy.valence, 1.0);
+
+        let sadness: EmotionVector = "sadness".parse().unwrap();
+        assert_eq!(sadness.sadness, 1.0);
+        assert_eq!(sadness.valence, -1.0);
+
+        let anger: EmotionVector = "anger".parse().unwrap();
+        assert_eq!(anger.anger, 1.0);
+        assert_eq!(anger.valence, -0.9);
+    }
+
+    #[test]
+    fn emotion_from_str_case_insensitive_and_aliases() {
+        let happy: EmotionVector = "Happy".parse().unwrap();
+        assert_eq!(happy.joy, 1.0);
+
+        let sad: EmotionVector = "  SAD  ".parse().unwrap();
+        assert_eq!(sad.sadness, 1.0);
+
+        let angry: EmotionVector = "ANGRY".parse().unwrap();
+        assert_eq!(angry.anger, 1.0);
+
+        let anticipatory: EmotionVector = "Anticipatory".parse().unwrap();
+        assert_eq!(anticipatory.anticipation, 1.0);
+    }
+
+    #[test]
+    fn emotion_from_str_invalid() {
+        let err = "unknown_emotion".parse::<EmotionVector>().unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CerememoryError::Validation(msg) if msg.contains("Invalid emotion label")
         ));
     }
 }

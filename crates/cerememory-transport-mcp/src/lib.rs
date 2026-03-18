@@ -142,70 +142,12 @@ fn ok_json<T: Serialize>(val: &T) -> Result<CallToolResult, McpError> {
 }
 
 fn parse_emotion(label: Option<String>) -> Result<Option<EmotionVector>, McpError> {
-    let Some(label) = label else {
-        return Ok(None);
-    };
-
-    let normalized = label.trim().to_lowercase();
-    let emotion = match normalized.as_str() {
-        "joy" | "happy" | "happiness" => EmotionVector {
-            joy: 1.0,
-            intensity: 1.0,
-            valence: 1.0,
-            ..Default::default()
-        },
-        "trust" => EmotionVector {
-            trust: 1.0,
-            intensity: 1.0,
-            valence: 0.7,
-            ..Default::default()
-        },
-        "fear" => EmotionVector {
-            fear: 1.0,
-            intensity: 1.0,
-            valence: -0.8,
-            ..Default::default()
-        },
-        "surprise" => EmotionVector {
-            surprise: 1.0,
-            intensity: 1.0,
-            ..Default::default()
-        },
-        "sadness" | "sad" => EmotionVector {
-            sadness: 1.0,
-            intensity: 1.0,
-            valence: -1.0,
-            ..Default::default()
-        },
-        "disgust" => EmotionVector {
-            disgust: 1.0,
-            intensity: 1.0,
-            valence: -0.9,
-            ..Default::default()
-        },
-        "anger" | "angry" => EmotionVector {
-            anger: 1.0,
-            intensity: 1.0,
-            valence: -0.9,
-            ..Default::default()
-        },
-        "anticipation" | "anticipatory" => EmotionVector {
-            anticipation: 1.0,
-            intensity: 1.0,
-            valence: 0.4,
-            ..Default::default()
-        },
-        other => {
-            return Err(McpError::invalid_params(
-                format!(
-                    "Invalid emotion label: {other}. Use one of joy, trust, fear, surprise, sadness, disgust, anger, anticipation."
-                ),
-                None,
-            ));
-        }
-    };
-
-    Ok(Some(emotion))
+    label
+        .map(|l| {
+            l.parse::<EmotionVector>()
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))
+        })
+        .transpose()
 }
 
 fn parse_consolidation_strategy(
