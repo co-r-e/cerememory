@@ -121,6 +121,9 @@ enum Commands {
         /// Path to the CMA archive file
         path: String,
     },
+
+    /// Start the MCP (Model Context Protocol) server on stdio
+    Mcp,
 }
 
 fn parse_store_type(s: &str) -> Result<StoreType> {
@@ -342,6 +345,14 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // MCP: stdio server, needs engine but no HTTP/gRPC
+    if matches!(cli.command, Commands::Mcp) {
+        let engine = Arc::new(create_engine_from_config(&config)?);
+        engine.rebuild_coordinator().await?;
+        cerememory_transport_mcp::serve_stdio(engine).await?;
+        return Ok(());
+    }
+
     // Healthcheck: lightweight HTTP probe, no engine needed
     if let Commands::Healthcheck { port } = &cli.command {
         let url = format!("http://127.0.0.1:{port}/health");
@@ -532,6 +543,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Healthcheck { .. } => unreachable!("Handled above"),
+        Commands::Mcp => unreachable!("Handled above"),
     }
 
     Ok(())
