@@ -15,25 +15,11 @@ fn llm_e2e_enabled() -> bool {
     std::env::var("CEREMEMORY_LLM_E2E").is_ok_and(|v| v == "1")
 }
 
-fn openai_key() -> Option<String> {
+fn provider_key(env_var: &str) -> Option<String> {
     if !llm_e2e_enabled() {
         return None;
     }
-    std::env::var("OPENAI_API_KEY").ok()
-}
-
-fn anthropic_key() -> Option<String> {
-    if !llm_e2e_enabled() {
-        return None;
-    }
-    std::env::var("ANTHROPIC_API_KEY").ok()
-}
-
-fn gemini_key() -> Option<String> {
-    if !llm_e2e_enabled() {
-        return None;
-    }
-    std::env::var("GEMINI_API_KEY").ok()
+    std::env::var(env_var).ok()
 }
 
 // ─── OpenAI ─────────────────────────────────────────────────────────
@@ -41,7 +27,7 @@ fn gemini_key() -> Option<String> {
 #[tokio::test]
 #[ignore]
 async fn openai_embed() {
-    let Some(key) = openai_key() else {
+    let Some(key) = provider_key("OPENAI_API_KEY") else {
         eprintln!("Skipping: OPENAI_API_KEY not set");
         return;
     };
@@ -57,7 +43,7 @@ async fn openai_embed() {
 #[tokio::test]
 #[ignore]
 async fn openai_summarize() {
-    let Some(key) = openai_key() else {
+    let Some(key) = provider_key("OPENAI_API_KEY") else {
         eprintln!("Skipping: OPENAI_API_KEY not set");
         return;
     };
@@ -79,7 +65,7 @@ async fn openai_summarize() {
 #[tokio::test]
 #[ignore]
 async fn openai_extract_relations() {
-    let Some(key) = openai_key() else {
+    let Some(key) = provider_key("OPENAI_API_KEY") else {
         eprintln!("Skipping: OPENAI_API_KEY not set");
         return;
     };
@@ -99,7 +85,7 @@ async fn openai_extract_relations() {
 #[tokio::test]
 #[ignore]
 async fn claude_summarize() {
-    let Some(key) = anthropic_key() else {
+    let Some(key) = provider_key("ANTHROPIC_API_KEY") else {
         eprintln!("Skipping: ANTHROPIC_API_KEY not set");
         return;
     };
@@ -121,7 +107,7 @@ async fn claude_summarize() {
 #[tokio::test]
 #[ignore]
 async fn claude_extract_relations() {
-    let Some(key) = anthropic_key() else {
+    let Some(key) = provider_key("ANTHROPIC_API_KEY") else {
         eprintln!("Skipping: ANTHROPIC_API_KEY not set");
         return;
     };
@@ -141,7 +127,7 @@ async fn claude_extract_relations() {
 #[tokio::test]
 #[ignore]
 async fn gemini_embed() {
-    let Some(key) = gemini_key() else {
+    let Some(key) = provider_key("GEMINI_API_KEY") else {
         eprintln!("Skipping: GEMINI_API_KEY not set");
         return;
     };
@@ -157,7 +143,7 @@ async fn gemini_embed() {
 #[tokio::test]
 #[ignore]
 async fn gemini_summarize() {
-    let Some(key) = gemini_key() else {
+    let Some(key) = provider_key("GEMINI_API_KEY") else {
         eprintln!("Skipping: GEMINI_API_KEY not set");
         return;
     };
@@ -179,7 +165,7 @@ async fn gemini_summarize() {
 #[tokio::test]
 #[ignore]
 async fn gemini_extract_relations() {
-    let Some(key) = gemini_key() else {
+    let Some(key) = provider_key("GEMINI_API_KEY") else {
         eprintln!("Skipping: GEMINI_API_KEY not set");
         return;
     };

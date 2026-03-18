@@ -116,7 +116,8 @@ pub struct CerememoryMcpServer {
 }
 
 fn parse_store_type(s: &str) -> Result<StoreType, McpError> {
-    s.to_lowercase()
+    s.trim()
+        .to_lowercase()
         .parse::<StoreType>()
         .map_err(|e| McpError::invalid_params(format!("Invalid store type: {e}"), None))
 }
@@ -229,6 +230,29 @@ fn parse_consolidation_strategy(
     }
 }
 
+fn build_text_store_request(
+    content: String,
+    store: Option<StoreType>,
+    emotion: Option<EmotionVector>,
+) -> EncodeStoreRequest {
+    EncodeStoreRequest {
+        header: None,
+        content: MemoryContent {
+            blocks: vec![ContentBlock {
+                modality: Modality::Text,
+                format: "text/plain".to_string(),
+                data: content.into_bytes(),
+                embedding: None,
+            }],
+            summary: None,
+        },
+        store,
+        emotion,
+        context: None,
+        associations: None,
+    }
+}
+
 fn parse_export_format(format: Option<String>) -> Result<String, McpError> {
     let format = format.unwrap_or_else(|| "cma".to_string());
     if format.eq_ignore_ascii_case("cma") {
@@ -257,24 +281,7 @@ impl CerememoryMcpServer {
         let p = params.0;
         let store_type = p.store.map(|s| parse_store_type(&s)).transpose()?;
         let emotion = parse_emotion(p.emotion)?;
-
-        let req = EncodeStoreRequest {
-            header: None,
-            content: MemoryContent {
-                blocks: vec![ContentBlock {
-                    modality: Modality::Text,
-                    format: "text/plain".to_string(),
-                    data: p.content.into_bytes(),
-                    embedding: None,
-                }],
-                summary: None,
-            },
-            store: store_type,
-            emotion,
-            context: None,
-            associations: None,
-        };
-
+        let req = build_text_store_request(p.content, store_type, emotion);
         let resp = self.engine.encode_store(req).await.map_err(engine_err)?;
         ok_json(&resp)
     }
@@ -293,22 +300,7 @@ impl CerememoryMcpServer {
         for r in records {
             let store_type = r.store.map(|s| parse_store_type(&s)).transpose()?;
             let emotion = parse_emotion(r.emotion)?;
-            encode_records.push(EncodeStoreRequest {
-                header: None,
-                content: MemoryContent {
-                    blocks: vec![ContentBlock {
-                        modality: Modality::Text,
-                        format: "text/plain".to_string(),
-                        data: r.content.into_bytes(),
-                        embedding: None,
-                    }],
-                    summary: None,
-                },
-                store: store_type,
-                emotion,
-                context: None,
-                associations: None,
-            });
+            encode_records.push(build_text_store_request(r.content, store_type, emotion));
         }
 
         let req = EncodeBatchRequest {
