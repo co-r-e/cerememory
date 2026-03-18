@@ -25,6 +25,9 @@ path = "phase4.rs"
 name = "phase5"
 path = "phase5.rs"
 
+[[test]]
+name = "llm_e2e"
+path = "llm_e2e.rs"
 
 [dependencies]
 
@@ -52,3 +55,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 metrics-exporter-prometheus = "0.16"
 rcgen = "0.13"
 rustls = { version = "0.23", features = ["ring"] }
+cerememory-adapter-openai = { path = "../../adapters/adapter-openai" }
+cerememory-adapter-claude = { path = "../../adapters/adapter-claude" }
+cerememory-adapter-gemini = { path = "../../adapters/adapter-gemini" }
