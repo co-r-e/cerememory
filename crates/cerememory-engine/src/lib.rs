@@ -1841,7 +1841,9 @@ impl CerememoryEngine {
         &self,
         req: ExportRequest,
     ) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
-        let records = self.collect_records_for_stores(req.stores.as_deref()).await?;
+        let records = self
+            .collect_records_for_stores(req.stores.as_deref())
+            .await?;
 
         let encryption_key = if req.encrypt {
             let key_str = req.encryption_key.as_deref().ok_or_else(|| {
@@ -1973,10 +1975,15 @@ impl CerememoryEngine {
         let target_stores = stores.unwrap_or(&ALL_STORES);
 
         let mut records = Vec::new();
+        let mut seen_stores = HashSet::with_capacity(target_stores.len());
         for &store_type in target_stores {
+            if !seen_stores.insert(store_type) {
+                continue;
+            }
+
             let ids = dispatch_store!(self, store_type, list_ids())?;
             for id in ids {
-                if let Some((record, _)) = self.get_store_record(&id).await? {
+                if let Some(record) = dispatch_store!(self, store_type, get(&id))? {
                     records.push(record);
                 }
             }
@@ -3314,6 +3321,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.record_count, 1);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_export_store_filter_deduplicates_requested_stores() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(text_store_req("Episodic", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        let (bytes, resp) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: Some(vec![StoreType::Episodic, StoreType::Episodic]),
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.record_count, 1);
+
+        let records = cerememory_archive::import_records(&bytes).unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records.iter().all(|r| r.store == StoreType::Episodic));
     }
 
     #[tokio::test]
