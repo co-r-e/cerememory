@@ -16,7 +16,7 @@
     <img src="https://img.shields.io/badge/status-alpha-green.svg" alt="Status">
   </a>
   <a href="https://github.com/co-r-e/cerememory">
-    <img src="https://img.shields.io/badge/rust-1.85+-orange.svg" alt="Rust">
+    <img src="https://img.shields.io/badge/rust-1.88+-orange.svg" alt="Rust">
   </a>
 </p>
 

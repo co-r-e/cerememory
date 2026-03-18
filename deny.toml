@@ -7,17 +7,19 @@ all-features = false
 no-default-features = false
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
-notice = "warn"
-ignore = []
+ignore = [
+    # Transitive deps with no safe upgrade available:
+    { id = "RUSTSEC-2025-0012", reason = "backoff is transitive dep of adapters; considering migration to backon" },
+    { id = "RUSTSEC-2025-0141", reason = "bincode is transitive dep of hnsw_rs; no alternative available" },
+    { id = "RUSTSEC-2024-0384", reason = "instant is transitive dep of backoff; will be resolved when backoff is replaced" },
+    { id = "RUSTSEC-2025-0020", reason = "pyo3 0.22 is pinned by maturin; upgrade requires maturin update" },
+]
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
@@ -28,8 +30,8 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "MPL-2.0",
+    "CDLA-Permissive-2.0",
 ]
-copyleft = "deny"
 confidence-threshold = 0.8
 
 [[licenses.clarify]]

@@ -33,7 +33,7 @@ license = "MIT"
 repository = "https://github.com/co-r-e/cerememory"
 homepage = "https://github.com/co-r-e/cerememory"
 description = "A living memory database for the age of AI"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Core
@@ -53,13 +53,14 @@ futures = "0.3"
 
 # Storage
 redb = "2"
-tantivy = "0.22"
+tantivy = "0.25"
 
 # Networking
 axum = "0.7"
-tonic = { version = "0.12", features = ["tls"] }
-prost = "0.13"
-tonic-build = "0.12"
+tonic = { version = "0.14", features = ["tls-ring"] }
+prost = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 
 # Observability
 tracing = "0.1"
@@ -94,7 +95,7 @@ backoff = { version = "0.4", features = ["tokio"] }
 base64 = "0.22"
 
 # Health & shutdown
-tonic-health = "0.12"
+tonic-health = "0.14"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Metrics

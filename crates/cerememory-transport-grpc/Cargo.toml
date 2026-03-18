@@ -13,6 +13,7 @@ cerememory-core = { workspace = true }
 cerememory-engine = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+tonic-prost = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = "0.1"
 serde_json = { workspace = true }
@@ -22,7 +23,7 @@ serde = { workspace = true }
 tonic-health = { workspace = true }
 
 [build-dependencies]
-tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

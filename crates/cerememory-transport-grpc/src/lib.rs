@@ -54,7 +54,7 @@ pub async fn serve_with_tls(
     let interceptor = GrpcAuthInterceptor::new(api_keys);
 
     // gRPC health service
-    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_serving::<CerememoryServiceServer<CerememoryGrpcService>>()
         .await;
