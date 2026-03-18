@@ -73,7 +73,8 @@ jobs:
               fi
 
               attempts=$((attempts + 1))
-              sleep 20
+              echo "Waiting 120s before retry (rate limit cooldown)..."
+              sleep 120
             done
           }
 
