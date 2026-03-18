@@ -9,31 +9,12 @@ use cerememory_core::protocol::*;
 use cerememory_core::types::*;
 use cerememory_engine::CerememoryEngine;
 
+#[path = "helpers.rs"]
+mod helpers;
+use helpers::{text_content, text_req};
+
 fn make_engine() -> CerememoryEngine {
     CerememoryEngine::in_memory().unwrap()
-}
-
-fn text_content(text: &str) -> MemoryContent {
-    MemoryContent {
-        blocks: vec![ContentBlock {
-            modality: Modality::Text,
-            format: "text/plain".to_string(),
-            data: text.as_bytes().to_vec(),
-            embedding: None,
-        }],
-        summary: None,
-    }
-}
-
-fn text_req(text: &str, store: StoreType) -> EncodeStoreRequest {
-    EncodeStoreRequest {
-        header: None,
-        content: text_content(text),
-        store: Some(store),
-        emotion: None,
-        context: None,
-        associations: None,
-    }
 }
 
 // ─── 1. Encode → Recall full cycle ──────────────────────────────────
