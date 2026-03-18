@@ -63,9 +63,14 @@ jobs:
 
             while true; do
               echo "Publishing ${crate} (attempt ${attempts}/${max_attempts})"
-              if cargo publish --locked -p "${crate}" ${flag}; then
+              output=$(cargo publish --locked -p "${crate}" ${flag} 2>&1) && break
+
+              if echo "$output" | grep -q "already exists"; then
+                echo "${crate} already published, skipping"
                 break
               fi
+
+              echo "$output"
 
               if [ "${{ inputs.dry_run }}" = "true" ] || [ "${attempts}" -ge "${max_attempts}" ]; then
                 echo "Failed to publish ${crate}"
