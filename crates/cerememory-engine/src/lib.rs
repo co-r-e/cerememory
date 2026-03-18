@@ -1841,7 +1841,7 @@ impl CerememoryEngine {
         &self,
         req: ExportRequest,
     ) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
-        let records = self.collect_all_records().await?;
+        let records = self.collect_records_for_stores(req.stores.as_deref()).await?;
 
         let encryption_key = if req.encrypt {
             let key_str = req.encryption_key.as_deref().ok_or_else(|| {
@@ -1955,14 +1955,25 @@ impl CerememoryEngine {
 
     /// Collect all records for export (used by archive module).
     pub async fn collect_all_records(&self) -> Result<Vec<MemoryRecord>, CerememoryError> {
-        let mut records = Vec::new();
-        for store_type in [
+        self.collect_records_for_stores(None).await
+    }
+
+    /// Collect records from specified stores, or all stores if `None`.
+    pub async fn collect_records_for_stores(
+        &self,
+        stores: Option<&[StoreType]>,
+    ) -> Result<Vec<MemoryRecord>, CerememoryError> {
+        const ALL_STORES: [StoreType; 5] = [
             StoreType::Episodic,
             StoreType::Semantic,
             StoreType::Procedural,
             StoreType::Emotional,
             StoreType::Working,
-        ] {
+        ];
+        let target_stores = stores.unwrap_or(&ALL_STORES);
+
+        let mut records = Vec::new();
+        for &store_type in target_stores {
             let ids = dispatch_store!(self, store_type, list_ids())?;
             for id in ids {
                 if let Some((record, _)) = self.get_store_record(&id).await? {
