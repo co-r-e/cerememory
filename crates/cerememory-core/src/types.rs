@@ -149,59 +149,44 @@ impl std::str::FromStr for EmotionVector {
     type Err = crate::error::CerememoryError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let normalized = s.trim().to_lowercase();
-        match normalized.as_str() {
-            "joy" | "happy" | "happiness" => Ok(Self {
-                joy: 1.0,
-                intensity: 1.0,
-                valence: 1.0,
-                ..Default::default()
-            }),
-            "trust" => Ok(Self {
-                trust: 1.0,
-                intensity: 1.0,
-                valence: 0.7,
-                ..Default::default()
-            }),
-            "fear" => Ok(Self {
-                fear: 1.0,
-                intensity: 1.0,
-                valence: -0.8,
-                ..Default::default()
-            }),
-            "surprise" => Ok(Self {
-                surprise: 1.0,
-                intensity: 1.0,
-                ..Default::default()
-            }),
-            "sadness" | "sad" => Ok(Self {
-                sadness: 1.0,
-                intensity: 1.0,
-                valence: -1.0,
-                ..Default::default()
-            }),
-            "disgust" => Ok(Self {
-                disgust: 1.0,
-                intensity: 1.0,
-                valence: -0.9,
-                ..Default::default()
-            }),
-            "anger" | "angry" => Ok(Self {
-                anger: 1.0,
-                intensity: 1.0,
-                valence: -0.9,
-                ..Default::default()
-            }),
-            "anticipation" | "anticipatory" => Ok(Self {
-                anticipation: 1.0,
-                intensity: 1.0,
-                valence: 0.4,
-                ..Default::default()
-            }),
-            other => Err(crate::error::CerememoryError::Validation(format!(
-                "Invalid emotion label: {other}. Use one of: joy, trust, fear, surprise, sadness, disgust, anger, anticipation"
-            ))),
-        }
+        let t = s.trim();
+
+        // Plutchik primary emotions + common aliases (case-insensitive, no allocation)
+        let (field_setter, valence): (fn(&mut Self), f64) =
+            if t.eq_ignore_ascii_case("joy")
+                || t.eq_ignore_ascii_case("happy")
+                || t.eq_ignore_ascii_case("happiness")
+            {
+                (|e: &mut Self| e.joy = 1.0, 1.0)
+            } else if t.eq_ignore_ascii_case("trust") {
+                (|e| e.trust = 1.0, 0.7)
+            } else if t.eq_ignore_ascii_case("fear") {
+                (|e| e.fear = 1.0, -0.8)
+            } else if t.eq_ignore_ascii_case("surprise") {
+                (|e| e.surprise = 1.0, 0.0)
+            } else if t.eq_ignore_ascii_case("sadness") || t.eq_ignore_ascii_case("sad") {
+                (|e| e.sadness = 1.0, -1.0)
+            } else if t.eq_ignore_ascii_case("disgust") {
+                (|e| e.disgust = 1.0, -0.9)
+            } else if t.eq_ignore_ascii_case("anger") || t.eq_ignore_ascii_case("angry") {
+                (|e| e.anger = 1.0, -0.9)
+            } else if t.eq_ignore_ascii_case("anticipation")
+                || t.eq_ignore_ascii_case("anticipatory")
+            {
+                (|e| e.anticipation = 1.0, 0.4)
+            } else {
+                return Err(crate::error::CerememoryError::Validation(format!(
+                    "Invalid emotion label: {t}. Use one of: joy, trust, fear, surprise, sadness, disgust, anger, anticipation"
+                )));
+            };
+
+        let mut ev = Self {
+            intensity: 1.0,
+            valence,
+            ..Default::default()
+        };
+        field_setter(&mut ev);
+        Ok(ev)
     }
 }
 

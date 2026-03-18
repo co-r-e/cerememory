@@ -16,6 +16,15 @@ use std::sync::Arc;
 /// Default weight for automatically inferred sequential associations in batch encoding.
 const DEFAULT_BATCH_SEQUENTIAL_WEIGHT: f64 = 0.7;
 
+/// All five memory store types.
+const ALL_STORES: [StoreType; 5] = [
+    StoreType::Episodic,
+    StoreType::Semantic,
+    StoreType::Procedural,
+    StoreType::Emotional,
+    StoreType::Working,
+];
+
 /// Scope guard that records a histogram metric on drop (success or error path).
 struct TimerGuard {
     name: &'static str,
@@ -1965,13 +1974,6 @@ impl CerememoryEngine {
         &self,
         stores: Option<&[StoreType]>,
     ) -> Result<Vec<MemoryRecord>, CerememoryError> {
-        const ALL_STORES: [StoreType; 5] = [
-            StoreType::Episodic,
-            StoreType::Semantic,
-            StoreType::Procedural,
-            StoreType::Emotional,
-            StoreType::Working,
-        ];
         let target_stores = stores.unwrap_or(&ALL_STORES);
 
         let mut records = Vec::new();
@@ -2000,13 +2002,7 @@ impl CerememoryEngine {
         let mut total_records = 0u32;
         let mut total_fidelity = 0.0f64;
 
-        for store_type in [
-            StoreType::Episodic,
-            StoreType::Semantic,
-            StoreType::Procedural,
-            StoreType::Emotional,
-            StoreType::Working,
-        ] {
+        for store_type in ALL_STORES {
             let count = dispatch_store!(self, store_type, count())? as u32;
             records_by_store.insert(store_type, count);
             total_records += count;

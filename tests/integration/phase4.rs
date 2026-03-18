@@ -18,20 +18,9 @@ use cerememory_engine::{CerememoryEngine, EngineConfig};
 
 #[path = "helpers.rs"]
 mod helpers;
-use helpers::{text_content, text_req, text_with_embedding};
+use helpers::{text_content, text_req, text_with_embedding, text_with_emotion};
 
 // ─── Helpers ─────────────────────────────────────────────────────────
-
-fn text_with_emotion(text: &str, store: StoreType, emotion: EmotionVector) -> EncodeStoreRequest {
-    EncodeStoreRequest {
-        header: None,
-        content: text_content(text),
-        store: Some(store),
-        emotion: Some(emotion),
-        context: None,
-        associations: None,
-    }
-}
 
 /// Mock LLM provider that generates deterministic embeddings and summaries.
 struct TestLLMProvider;
