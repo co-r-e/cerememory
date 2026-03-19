@@ -1,7 +1,7 @@
 # Cerememory Phase 1 Implementation
 
 ## Phase 1a: Foundation
-- [x] Step 0: cerememory-core — CMP protocol types + trait async化 (17 tests)
+- [x] Step 0: cerememory-core — CMP protocol types + async trait conversion (17 tests)
 - [x] Step 1: cerememory-store-working — InMemory Working Memory (20 tests)
 - [x] Step 2: cerememory-store-episodic — redb Episodic Store (11 tests)
 - [x] Step 3: cerememory-store-semantic — redb Graph Store (18 tests)
