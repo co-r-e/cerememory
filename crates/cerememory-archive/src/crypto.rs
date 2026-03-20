@@ -15,6 +15,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 /// Derive a 32-byte encryption key from a passphrase using Argon2id.
 ///
@@ -53,6 +54,9 @@ fn diversify_key(key: &[u8; 32], salt: &[u8; 16]) -> [u8; 32] {
 
     let mut out = [0u8; 32];
     out.copy_from_slice(&result);
+    // prk is dropped here; GenericArray doesn't implement Zeroize by default,
+    // but the stack will be overwritten. The important zeroization happens in
+    // encrypt/decrypt where the derived key is explicitly zeroized after use.
     out
 }
 
@@ -68,8 +72,9 @@ pub fn encrypt(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, CerememoryEr
     let mut salt = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut salt);
 
-    let diversified = diversify_key(key, &salt);
+    let mut diversified = diversify_key(key, &salt);
     let cipher = ChaCha20Poly1305::new((&diversified).into());
+    diversified.zeroize(); // Zeroize derived key after use
 
     // Generate random 12-byte nonce
     let mut nonce_bytes = [0u8; 12];
@@ -104,10 +109,11 @@ pub fn decrypt(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, CerememoryError> 
 
     let mut salt_arr = [0u8; 16];
     salt_arr.copy_from_slice(salt);
-    let diversified = diversify_key(key, &salt_arr);
+    let mut diversified = diversify_key(key, &salt_arr);
 
     let nonce = Nonce::from_slice(nonce_bytes);
     let cipher = ChaCha20Poly1305::new((&diversified).into());
+    diversified.zeroize(); // Zeroize derived key after use
 
     cipher.decrypt(nonce, ciphertext).map_err(|_| {
         CerememoryError::ImportConflict(

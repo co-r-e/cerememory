@@ -7,8 +7,8 @@
 //! The HNSW graph lives entirely in memory and is rebuilt from the
 //! redb-backed vector store on startup or when crossing the threshold.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::RwLock;
 
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::prelude::DistCosine;
@@ -64,14 +64,13 @@ impl HnswVectorIndex {
 
     /// Whether the HNSW graph is active (built and available for search).
     pub fn is_active(&self) -> bool {
-        self.state.read().unwrap().is_some()
+        self.state.read().is_some()
     }
 
     /// Number of vectors in the HNSW graph, or 0 if not active.
     pub fn count(&self) -> usize {
         self.state
             .read()
-            .unwrap()
             .as_ref()
             .map_or(0, |s| s.uuid_to_dataid.len())
     }
@@ -84,7 +83,7 @@ impl HnswVectorIndex {
     /// Insert a single vector into the HNSW graph.
     /// No-op if the graph is not active.
     pub fn insert(&self, id: Uuid, embedding: &[f32]) -> Result<(), CerememoryError> {
-        let mut guard = self.state.write().unwrap();
+        let mut guard = self.state.write();
         let state = match guard.as_mut() {
             Some(s) => s,
             None => return Ok(()),
@@ -119,7 +118,7 @@ impl HnswVectorIndex {
     /// graph but will be filtered out in search results. A periodic rebuild
     /// cleans up removed entries.
     pub fn remove(&self, id: &Uuid) {
-        let mut guard = self.state.write().unwrap();
+        let mut guard = self.state.write();
         if let Some(state) = guard.as_mut() {
             if let Some(data_id) = state.uuid_to_dataid.remove(id) {
                 state.dataid_to_uuid.remove(&data_id);
@@ -138,7 +137,7 @@ impl HnswVectorIndex {
             return Ok(Vec::new());
         }
 
-        let guard = self.state.read().unwrap();
+        let guard = self.state.read();
         let state = match guard.as_ref() {
             Some(s) => s,
             None => return Ok(Vec::new()),
@@ -183,7 +182,7 @@ impl HnswVectorIndex {
     /// Called when crossing the activation threshold or on startup.
     pub fn rebuild(&self, entries: &[(Uuid, Vec<f32>)]) -> Result<(), CerememoryError> {
         if entries.is_empty() || entries.len() < self.threshold {
-            *self.state.write().unwrap() = None;
+            *self.state.write() = None;
             return Ok(());
         }
 
@@ -224,7 +223,7 @@ impl HnswVectorIndex {
 
         let next_id = entries.len();
 
-        *self.state.write().unwrap() = Some(HnswState {
+        *self.state.write() = Some(HnswState {
             hnsw,
             uuid_to_dataid,
             dataid_to_uuid,
@@ -239,7 +238,7 @@ impl HnswVectorIndex {
 
     /// Deactivate the HNSW index (free memory).
     pub fn deactivate(&self) {
-        *self.state.write().unwrap() = None;
+        *self.state.write() = None;
     }
 }
 

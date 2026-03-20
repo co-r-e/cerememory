@@ -4,8 +4,8 @@
 //! applies rule-based adjustments to keep the system performing optimally.
 //! All adjustments are capped at ±50% of the default value.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use cerememory_core::protocol::{EvolutionMetrics, ParameterAdjustment};
 use cerememory_core::types::StoreType;
@@ -174,7 +174,7 @@ impl EvolutionEngine {
 
     /// Get current (possibly adjusted) decay parameters for a store type.
     pub fn get_decay_defaults(&self, store_type: StoreType) -> StoreDecayDefaults {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         state
             .adjusted_params
             .get(&store_type)
@@ -184,7 +184,7 @@ impl EvolutionEngine {
 
     /// Observe fidelity scores from a decay tick for a specific store.
     pub fn observe_decay_tick(&self, store: StoreType, fidelity_scores: &[f64]) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let histogram = state
             .fidelity_histograms
             .entry(store)
@@ -198,7 +198,7 @@ impl EvolutionEngine {
     /// Observe recall hit rate for a specific store.
     /// hit_rate: fraction of recall results that had relevance > 0 (0.0-1.0).
     pub fn observe_recall(&self, store: StoreType, hit_rate: f64) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let rolling = state
             .recall_hit_rates
             .entry(store)
@@ -209,7 +209,7 @@ impl EvolutionEngine {
 
     /// Get current evolution metrics.
     pub fn get_metrics(&self) -> EvolutionMetrics {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         EvolutionMetrics {
             parameter_adjustments: state.adjustments.clone(),
             detected_patterns: state.detected_patterns.clone(),

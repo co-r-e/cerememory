@@ -299,10 +299,25 @@ async fn main() -> Result<()> {
 
         println!("Cerememory v{}", env!("CARGO_PKG_VERSION"));
 
+        // Print startup summary
+        let abs_data_dir = std::fs::canonicalize(&config.data_dir)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&config.data_dir));
+        println!("Data  {}", abs_data_dir.display());
+        println!("Config {}", cli.config.as_deref().unwrap_or("(defaults)"));
+        let llm_status = match config.llm.provider.as_str() {
+            "none" | "" => "disabled".to_string(),
+            provider => format!(
+                "{provider} ({})",
+                config.llm.model.as_deref().unwrap_or("default")
+            ),
+        };
+        println!("LLM   {llm_status}");
+
         // Optionally start gRPC server on a separate port.
+        let mut grpc_handle: Option<tokio::task::JoinHandle<()>> = None;
         if let Some(grpc_port) = config.grpc.port {
             let engine_grpc = Arc::clone(&engine);
-            let grpc_addr = format!("0.0.0.0:{grpc_port}");
+            let grpc_addr = format!("{}:{grpc_port}", config.http.bind_address);
             let grpc_keys = config.auth.api_key_strings();
             let grpc_cancel = cancel.clone();
 
@@ -324,7 +339,7 @@ async fn main() -> Result<()> {
             drop(listener);
             let tls_label = if tls.is_some() { " (TLS)" } else { "" };
             println!("gRPC listening on {grpc_addr}{tls_label}");
-            tokio::spawn(async move {
+            grpc_handle = Some(tokio::spawn(async move {
                 if let Err(e) = cerememory_transport_grpc::serve_with_tls(
                     engine_grpc,
                     &grpc_addr,
@@ -336,7 +351,7 @@ async fn main() -> Result<()> {
                 {
                     tracing::error!(error = %e, "gRPC server failed");
                 }
-            });
+            }));
         }
 
         let api_keys = config.auth.api_key_strings();
@@ -355,8 +370,11 @@ async fn main() -> Result<()> {
         };
         let app = cerememory_transport_http::router_with_config(Arc::clone(&engine), http_config);
 
-        let addr = format!("0.0.0.0:{}", config.http.port);
+        let addr = format!("{}:{}", config.http.bind_address, config.http.port);
         println!("HTTP  listening on {addr}");
+        if config.http.bind_address == "0.0.0.0" && !config.auth.enabled {
+            tracing::warn!("Server bound to 0.0.0.0 with authentication disabled — accessible from entire network");
+        }
         let http_cancel = cancel.clone();
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
@@ -365,6 +383,15 @@ async fn main() -> Result<()> {
             .with_graceful_shutdown(http_cancel.cancelled_owned())
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        // Await gRPC server shutdown
+        if let Some(handle) = grpc_handle {
+            match tokio::time::timeout(std::time::Duration::from_secs(30), handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "gRPC server task panicked"),
+                Err(_) => tracing::warn!("gRPC server shutdown timed out after 30 seconds"),
+            }
+        }
 
         // After HTTP server stops, clean up background tasks
         match tokio::time::timeout(
@@ -468,8 +495,12 @@ async fn main() -> Result<()> {
 
         Commands::Recall { query, limit, mode } => {
             let recall_mode = match mode.to_lowercase().as_str() {
+                "human" => RecallMode::Human,
                 "perfect" => RecallMode::Perfect,
-                _ => RecallMode::Human,
+                other => anyhow::bail!(
+                    "Invalid recall mode '{}'. Valid options: human, perfect",
+                    other
+                ),
             };
 
             let req = RecallQueryRequest {

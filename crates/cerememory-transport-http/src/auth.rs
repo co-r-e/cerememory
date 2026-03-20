@@ -106,7 +106,7 @@ where
             }
             None => Box::pin(async move {
                 Ok(unauthorized_response(
-                    "Missing Authorization header",
+                    "Missing Authorization header. Expected: Authorization: Bearer <api-key>",
                     request_id,
                 ))
             }),

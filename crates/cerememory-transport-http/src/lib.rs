@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use axum::{
     extract::{
         rejection::{JsonRejection, PathRejection},
-        FromRequest, FromRequestParts, Path, Request, State,
+        DefaultBodyLimit, FromRequest, FromRequestParts, Path, Request, State,
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -119,11 +119,16 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
     let auth_layer = ApiKeyAuthLayer::new(config.api_keys);
 
     // Build CORS layer
+    let expose_headers: Vec<axum::http::HeaderName> = vec![
+        "x-request-id".parse().unwrap(),
+        "retry-after".parse().unwrap(),
+    ];
     let cors = if config.cors_origins.is_empty() {
         CorsLayer::new()
             .allow_origin(Any)
             .allow_methods(Any)
             .allow_headers(Any)
+            .expose_headers(expose_headers)
     } else {
         let origins: Vec<_> = config
             .cors_origins
@@ -134,6 +139,7 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
             .allow_origin(origins)
             .allow_methods(Any)
             .allow_headers(Any)
+            .expose_headers(expose_headers)
     };
 
     let rate_limit = RateLimitLayer::new(config.rate_limit_rps, config.rate_limit_burst);
@@ -180,7 +186,8 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
         .route("/v1/introspect/evolution", get(introspect_evolution))
         .with_state(engine)
         .layer(auth_layer)
-        .layer(rate_limit);
+        .layer(rate_limit)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)); // 2 MB
 
     // Merge and apply global middleware (metrics, tracing, request-id, CORS)
     public_routes
@@ -199,15 +206,21 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn readiness(State(engine): State<AppState>) -> Response {
-    // Attempt to read stats as a readiness indicator.
-    // Returns 503 SERVICE_UNAVAILABLE on any engine error.
     match engine.introspect_stats().await {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ready"}))).into_response(),
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"status": "not_ready"})),
-        )
-            .into_response(),
+        Err(e) => {
+            // Sanitize: only expose error category, not internal details
+            let reason = match &e {
+                CerememoryError::Storage(_) => "storage unavailable",
+                CerememoryError::DecayEngineBusy { .. } => "decay engine busy",
+                _ => "engine check failed",
+            };
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"status": "not_ready", "reason": reason})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -266,7 +279,15 @@ impl IntoResponse for AppError {
 
         let mut cmp_error = CMPError::from(&self.error);
         cmp_error.request_id = self.request_id;
-        (status, Json(cmp_error)).into_response()
+        let retry_after = cmp_error.retry_after;
+        let mut response = (status, Json(cmp_error)).into_response();
+        // Add Retry-After HTTP header for 503 responses
+        if let Some(secs) = retry_after {
+            if let Ok(val) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                response.headers_mut().insert("retry-after", val);
+            }
+        }
+        response
     }
 }
 
@@ -480,12 +501,14 @@ async fn lifecycle_forget(
     State(engine): State<AppState>,
     MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<ForgetRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<ForgetResponse>, AppError> {
     let deleted = engine
         .lifecycle_forget(req)
         .await
         .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(serde_json::json!({ "records_deleted": deleted })))
+    Ok(Json(ForgetResponse {
+        records_deleted: deleted,
+    }))
 }
 
 // ─── Introspect handlers ─────────────────────────────────────────────

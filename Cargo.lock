@@ -501,7 +501,7 @@ checksum = "4f4c707c6a209cbe82d10abd08e1ea8995e9ea937d2550646e02798948992be0"
 
 [[package]]
 name = "cerememory-adapter-claude"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "backoff",
  "cerememory-core",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-adapter-gemini"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "backoff",
  "base64",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-adapter-openai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "backoff",
  "base64",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-archive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "cerememory-core",
@@ -566,11 +566,12 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
 name = "cerememory-association"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -583,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -609,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "cerememory-engine",
@@ -623,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chacha20poly1305",
  "chrono",
@@ -641,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-decay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -654,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-archive",
  "cerememory-association",
@@ -682,10 +683,11 @@ dependencies = [
 
 [[package]]
 name = "cerememory-evolution"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "chrono",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -695,13 +697,14 @@ dependencies = [
 
 [[package]]
 name = "cerememory-index"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "chrono",
  "criterion",
  "hnsw_rs",
  "ordered-float",
+ "parking_lot",
  "redb",
  "rmp-serde",
  "serde",
@@ -774,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-emotional"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -790,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-episodic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -806,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-procedural"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -822,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-semantic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -838,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-working"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -851,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-transport-grpc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cerememory-core",
  "cerememory-engine",
@@ -870,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-transport-http"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
@@ -894,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-transport-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cerememory-core",
@@ -5229,6 +5232,20 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zerotrie"

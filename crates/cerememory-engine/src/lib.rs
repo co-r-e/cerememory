@@ -173,7 +173,23 @@ impl CerememoryEngine {
         };
 
         let text_index = match &config.index_path {
-            Some(p) => TextIndex::open(p)?,
+            Some(p) => match TextIndex::open(p) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        path = %p,
+                        "Corrupted text index detected, recreating (data will be repopulated via rebuild_coordinator)"
+                    );
+                    // Attempt to remove corrupted index directory and recreate
+                    let _ = std::fs::remove_dir_all(p);
+                    TextIndex::open(p).map_err(|e2| {
+                        CerememoryError::Storage(format!(
+                            "Failed to recreate text index after corruption: {e2}"
+                        ))
+                    })?
+                }
+            },
             None => TextIndex::open_in_memory()?,
         };
 
@@ -235,29 +251,60 @@ impl CerememoryEngine {
             return; // Already running
         }
 
-        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let engine = Arc::clone(self);
 
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-            interval.tick().await; // skip first immediate tick
+            let mut backoff_secs = 1u64;
+            const MAX_BACKOFF_SECS: u64 = 60;
 
             loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let req = DecayTickRequest {
-                            header: None,
-                            tick_duration_seconds: Some(interval_secs as u32),
-                        };
-                        if let Err(e) = engine.lifecycle_decay_tick(req).await {
-                            warn!(error = %e, "Background decay tick failed");
+                let engine_ref = Arc::clone(&engine);
+                let mut rx_ref = rx.clone();
+
+                let result = tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+                    interval.tick().await; // skip first immediate tick
+
+                    loop {
+                        tokio::select! {
+                            _ = interval.tick() => {
+                                let req = DecayTickRequest {
+                                    header: None,
+                                    tick_duration_seconds: Some(interval_secs as u32),
+                                };
+                                if let Err(e) = engine_ref.lifecycle_decay_tick(req).await {
+                                    warn!(error = %e, "Background decay tick failed");
+                                }
+                            }
+                            _ = rx_ref.changed() => {
+                                if *rx_ref.borrow() {
+                                    info!("Background decay stopped");
+                                    return;
+                                }
+                            }
                         }
                     }
-                    _ = rx.changed() => {
-                        if *rx.borrow() {
-                            info!("Background decay stopped");
-                            return;
-                        }
+                })
+                .await;
+
+                // Check if we got a shutdown signal
+                if *rx.borrow() {
+                    return;
+                }
+
+                match result {
+                    Ok(()) => return, // Clean exit
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            backoff_secs,
+                            "Background decay task panicked, restarting"
+                        );
+                        metrics::counter!("cerememory_decay_panics_total").increment(1);
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
                     }
                 }
             }
@@ -462,6 +509,12 @@ impl CerememoryEngine {
                     "Recall image cue must not be empty".to_string(),
                 ));
             }
+            if image.len() > MAX_IMAGE_SIZE {
+                return Err(CerememoryError::ContentTooLarge {
+                    size: image.len(),
+                    limit: MAX_IMAGE_SIZE,
+                });
+            }
 
             if embedding.is_none() {
                 let provider = self.llm_provider.as_ref().ok_or_else(|| {
@@ -495,6 +548,12 @@ impl CerememoryEngine {
                 return Err(CerememoryError::Validation(
                     "Recall audio cue must not be empty".to_string(),
                 ));
+            }
+            if audio.len() > MAX_AUDIO_SIZE {
+                return Err(CerememoryError::ContentTooLarge {
+                    size: audio.len(),
+                    limit: MAX_AUDIO_SIZE,
+                });
             }
 
             let provider = self.llm_provider.as_ref().ok_or_else(|| {
@@ -818,6 +877,13 @@ impl CerememoryEngine {
         &self,
         req: EncodeBatchRequest,
     ) -> Result<EncodeBatchResponse, CerememoryError> {
+        const MAX_BATCH_SIZE: usize = 1000;
+        if req.records.len() > MAX_BATCH_SIZE {
+            return Err(CerememoryError::Validation(format!(
+                "Batch size {} exceeds maximum of {MAX_BATCH_SIZE}",
+                req.records.len()
+            )));
+        }
         let mut results = Vec::with_capacity(req.records.len());
         let mut total_inferred = 0u32;
         let mut prev_id: Option<Uuid> = None;

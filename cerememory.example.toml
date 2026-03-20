@@ -7,11 +7,9 @@ data_dir = "./data"
 
 [http]
 port = 8420
+bind_address = "127.0.0.1"  # localhost only. Change to "0.0.0.0" for network-wide access.
 cors_origins = []  # Empty = allow all origins
-# tls_cert_path = "/path/to/cert.pem"
-# tls_key_path = "/path/to/key.pem"
-# To generate a self-signed TLS cert for development:
-#   openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
+# For HTTP TLS, use a reverse proxy (nginx, caddy) or configure [grpc] TLS.
 
 [grpc]
 # port = 8421       # Uncomment to enable gRPC

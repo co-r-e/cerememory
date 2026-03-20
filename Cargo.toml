@@ -27,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Masato Okuwaki <masato@co-r-e.com>"]
 license = "MIT"
@@ -82,6 +82,7 @@ sha2 = "0.10"
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
 rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -104,6 +105,9 @@ base64 = "0.22"
 tonic-health = "0.14"
 tokio-util = { version = "0.7", features = ["rt"] }
 
+# Synchronization
+parking_lot = "0.12"
+
 # Metrics
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
@@ -119,22 +123,22 @@ criterion = "0.5"
 wiremock = "=0.6.2"
 
 # Internal crates
-cerememory-core = { version = "0.1.0", path = "crates/cerememory-core" }
-cerememory-store-episodic = { version = "0.1.0", path = "crates/cerememory-store-episodic" }
-cerememory-store-semantic = { version = "0.1.0", path = "crates/cerememory-store-semantic" }
-cerememory-store-procedural = { version = "0.1.0", path = "crates/cerememory-store-procedural" }
-cerememory-store-emotional = { version = "0.1.0", path = "crates/cerememory-store-emotional" }
-cerememory-store-working = { version = "0.1.0", path = "crates/cerememory-store-working" }
-cerememory-decay = { version = "0.1.0", path = "crates/cerememory-decay" }
-cerememory-association = { version = "0.1.0", path = "crates/cerememory-association" }
-cerememory-evolution = { version = "0.1.0", path = "crates/cerememory-evolution" }
-cerememory-index = { version = "0.1.0", path = "crates/cerememory-index" }
-cerememory-engine = { version = "0.1.0", path = "crates/cerememory-engine" }
-cerememory-archive = { version = "0.1.0", path = "crates/cerememory-archive" }
-cerememory-config = { version = "0.1.0", path = "crates/cerememory-config" }
-cerememory-transport-http = { version = "0.1.0", path = "crates/cerememory-transport-http" }
-cerememory-transport-grpc = { version = "0.1.0", path = "crates/cerememory-transport-grpc" }
-cerememory-transport-mcp = { version = "0.1.0", path = "crates/cerememory-transport-mcp" }
-cerememory-adapter-openai = { version = "0.1.0", path = "adapters/adapter-openai" }
-cerememory-adapter-claude = { version = "0.1.0", path = "adapters/adapter-claude" }
-cerememory-adapter-gemini = { version = "0.1.0", path = "adapters/adapter-gemini" }
+cerememory-core = { version = "0.2.0", path = "crates/cerememory-core" }
+cerememory-store-episodic = { version = "0.2.0", path = "crates/cerememory-store-episodic" }
+cerememory-store-semantic = { version = "0.2.0", path = "crates/cerememory-store-semantic" }
+cerememory-store-procedural = { version = "0.2.0", path = "crates/cerememory-store-procedural" }
+cerememory-store-emotional = { version = "0.2.0", path = "crates/cerememory-store-emotional" }
+cerememory-store-working = { version = "0.2.0", path = "crates/cerememory-store-working" }
+cerememory-decay = { version = "0.2.0", path = "crates/cerememory-decay" }
+cerememory-association = { version = "0.2.0", path = "crates/cerememory-association" }
+cerememory-evolution = { version = "0.2.0", path = "crates/cerememory-evolution" }
+cerememory-index = { version = "0.2.0", path = "crates/cerememory-index" }
+cerememory-engine = { version = "0.2.0", path = "crates/cerememory-engine" }
+cerememory-archive = { version = "0.2.0", path = "crates/cerememory-archive" }
+cerememory-config = { version = "0.2.0", path = "crates/cerememory-config" }
+cerememory-transport-http = { version = "0.2.0", path = "crates/cerememory-transport-http" }
+cerememory-transport-grpc = { version = "0.2.0", path = "crates/cerememory-transport-grpc" }
+cerememory-transport-mcp = { version = "0.2.0", path = "crates/cerememory-transport-mcp" }
+cerememory-adapter-openai = { version = "0.2.0", path = "adapters/adapter-openai" }
+cerememory-adapter-claude = { version = "0.2.0", path = "adapters/adapter-claude" }
+cerememory-adapter-gemini = { version = "0.2.0", path = "adapters/adapter-gemini" }

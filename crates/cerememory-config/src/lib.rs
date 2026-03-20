@@ -52,6 +52,9 @@ pub struct HttpConfig {
     /// Port for the HTTP server.
     pub port: u16,
 
+    /// Bind address (default: "127.0.0.1"). Use "0.0.0.0" for network-wide access.
+    pub bind_address: String,
+
     /// Allowed CORS origins (empty = allow all).
     pub cors_origins: Vec<String>,
 }
@@ -81,6 +84,7 @@ pub struct AuthConfig {
     pub enabled: bool,
 
     /// API keys for Bearer token authentication (raw strings in config).
+    #[serde(rename = "api_keys")]
     api_keys_raw: Vec<String>,
 }
 
@@ -121,6 +125,7 @@ pub struct LlmConfig {
     pub provider: String,
 
     /// API key for the LLM provider (raw string in config).
+    #[serde(rename = "api_key")]
     api_key_raw: Option<String>,
 
     /// Model name override.
@@ -206,6 +211,7 @@ impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             port: 8420,
+            bind_address: "127.0.0.1".to_string(),
             cors_origins: Vec::new(),
         }
     }
@@ -280,7 +286,7 @@ impl ServerConfig {
                 .collect();
         }
 
-        // Note: CEREMEMORY_LLM__API_KEY_RAW is handled by figment's env provider.
+        // Note: CEREMEMORY_LLM__API_KEY is handled by figment's env provider.
 
         Ok(config)
     }
@@ -335,6 +341,36 @@ impl ServerConfig {
             return Err(format!(
                 "rate_limit.burst must be > 0 (got {}). This controls burst capacity above the sustained rate.",
                 self.rate_limit.burst
+            ));
+        }
+
+        if self.http.bind_address.is_empty() {
+            return Err("http.bind_address must not be empty".to_string());
+        }
+        if self.http.bind_address != "localhost"
+            && self.http.bind_address.parse::<std::net::IpAddr>().is_err()
+        {
+            return Err(format!(
+                "Invalid http.bind_address '{}'. Must be a valid IP address (e.g., \"127.0.0.1\", \"0.0.0.0\") or \"localhost\".",
+                self.http.bind_address
+            ));
+        }
+
+        const VALID_LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
+        if !VALID_LOG_LEVELS.contains(&self.log.level.to_lowercase().as_str()) {
+            return Err(format!(
+                "Invalid log.level '{}'. Valid options: {}",
+                self.log.level,
+                VALID_LOG_LEVELS.join(", ")
+            ));
+        }
+
+        const VALID_LOG_FORMATS: &[&str] = &["pretty", "json"];
+        if !VALID_LOG_FORMATS.contains(&self.log.format.to_lowercase().as_str()) {
+            return Err(format!(
+                "Invalid log.format '{}'. Valid options: {}",
+                self.log.format,
+                VALID_LOG_FORMATS.join(", ")
             ));
         }
 
@@ -516,5 +552,57 @@ port = 9999
         let secrets = config.api_keys();
         assert_eq!(secrets.len(), 2);
         assert_eq!(secrets[0].expose_secret(), "key1");
+    }
+
+    #[test]
+    fn validate_catches_invalid_log_level() {
+        let mut config = ServerConfig::default();
+        config.log.level = "invalid".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_catches_invalid_log_format() {
+        let mut config = ServerConfig::default();
+        config.log.format = "yaml".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn toml_api_keys_field_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("cerememory.toml");
+        let mut f = std::fs::File::create(&toml_path).unwrap();
+        writeln!(
+            f,
+            r#"
+[auth]
+enabled = true
+api_keys = ["sk-test-key"]
+"#
+        )
+        .unwrap();
+
+        let config = ServerConfig::load(Some(toml_path.to_str().unwrap())).unwrap();
+        assert_eq!(config.auth.key_count(), 1);
+    }
+
+    #[test]
+    fn toml_llm_api_key_field_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("cerememory.toml");
+        let mut f = std::fs::File::create(&toml_path).unwrap();
+        writeln!(
+            f,
+            r#"
+[llm]
+provider = "openai"
+api_key = "sk-test-llm-key"
+"#
+        )
+        .unwrap();
+
+        let config = ServerConfig::load(Some(toml_path.to_str().unwrap())).unwrap();
+        assert_eq!(config.llm.api_key_exposed(), Some("sk-test-llm-key"));
     }
 }

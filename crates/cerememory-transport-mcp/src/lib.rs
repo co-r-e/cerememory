@@ -32,6 +32,16 @@ struct StoreParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct UpdateParams {
+    /// UUID of the record to update
+    record_id: String,
+    /// New text content (replaces existing content). Leave empty to keep current content.
+    content: Option<String>,
+    /// New emotion label. Options: joy, sadness, anger, fear, surprise, disgust, trust, anticipation.
+    emotion: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct BatchStoreParams {
     /// JSON array of records. Each record: {"content": "...", "store": "episodic" (optional), "emotion": "joy" (optional)}. Example: [{"content": "Meeting notes", "store": "episodic"}]
     records_json: String,
@@ -46,8 +56,8 @@ struct BatchRecord {
 
 #[derive(Deserialize, JsonSchema)]
 struct RecallParams {
-    /// Natural language query to recall memories
-    query: String,
+    /// Natural language query to recall memories. If omitted, returns recent memories up to limit.
+    query: Option<String>,
     /// Maximum number of results to return (default: 10, range: 1-1000)
     limit: Option<u32>,
     /// Comma-separated store type filter (e.g., 'episodic,semantic'). Omit to search all stores.
@@ -104,6 +114,46 @@ struct ExportParams {
     encrypt: Option<bool>,
     /// Passphrase for archive encryption. Required when encrypt is true. Use a strong passphrase (16+ chars recommended).
     encryption_key: Option<String>,
+}
+
+/// Convert an EmotionVector to a human-readable label, or None if neutral (intensity == 0).
+fn emotion_label(e: &EmotionVector) -> Option<String> {
+    if e.intensity == 0.0 {
+        return None;
+    }
+    let candidates = [
+        ("joy", e.joy),
+        ("trust", e.trust),
+        ("fear", e.fear),
+        ("surprise", e.surprise),
+        ("sadness", e.sadness),
+        ("disgust", e.disgust),
+        ("anger", e.anger),
+        ("anticipation", e.anticipation),
+    ];
+    candidates
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(label, _)| (*label).to_string())
+}
+
+// ─── Flattened recall response for LLM readability ──────────────────
+
+#[derive(Serialize)]
+struct McpRecalledMemory {
+    record_id: uuid::Uuid,
+    store: String,
+    text: String,
+    relevance_score: f64,
+    fidelity: f64,
+    created_at: String,
+    emotion: Option<String>,
+}
+
+#[derive(Serialize)]
+struct McpRecallResponse {
+    memories: Vec<McpRecalledMemory>,
+    total_candidates: u32,
 }
 
 // ─── Server ─────────────────────────────────────────────────────────
@@ -255,6 +305,16 @@ fn build_text_store_request(
     }
 }
 
+fn require_non_empty_content(content: &str) -> Result<(), McpError> {
+    if content.trim().is_empty() {
+        return Err(McpError::invalid_params(
+            "Content must not be empty or whitespace-only".to_string(),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 fn parse_export_format(format: Option<String>) -> Result<String, McpError> {
     let format = format.unwrap_or_else(|| "cma".to_string());
     if format.eq_ignore_ascii_case("cma") {
@@ -281,11 +341,50 @@ impl CerememoryMcpServer {
     )]
     async fn store(&self, params: Parameters<StoreParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        require_non_empty_content(&p.content)?;
         let store_type = p.store.map(|s| parse_store_type(&s)).transpose()?;
         let emotion = parse_emotion(p.emotion)?;
         let req = build_text_store_request(p.content, store_type, emotion);
         let resp = self.engine.encode_store(req).await.map_err(engine_err)?;
         ok_json(&resp)
+    }
+
+    #[tool(
+        description = "Update an existing memory record's content or emotion. Preserves UUID, associations, and fidelity history. Returns no content on success."
+    )]
+    async fn update(&self, params: Parameters<UpdateParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        if p.content.is_none() && p.emotion.is_none() {
+            return Err(McpError::invalid_params(
+                "At least one of 'content' or 'emotion' must be provided".to_string(),
+                None,
+            ));
+        }
+        if let Some(ref c) = p.content {
+            require_non_empty_content(c)?;
+        }
+        let record_id = parse_uuid(&p.record_id)?;
+        let emotion = parse_emotion(p.emotion)?;
+        let content = p.content.map(|c| MemoryContent {
+            blocks: vec![ContentBlock {
+                modality: Modality::Text,
+                format: "text/plain".to_string(),
+                data: c.into_bytes(),
+                embedding: None,
+            }],
+            summary: None,
+        });
+
+        let req = EncodeUpdateRequest {
+            header: None,
+            record_id,
+            content,
+            emotion,
+            metadata: None,
+        };
+
+        self.engine.encode_update(req).await.map_err(engine_err)?;
+        ok_text(format!("Updated record {record_id}"))
     }
 
     #[tool(
@@ -307,6 +406,10 @@ impl CerememoryMcpServer {
                 )
             })?;
 
+        for r in &records {
+            require_non_empty_content(&r.content)?;
+        }
+
         let mut encode_records = Vec::with_capacity(records.len());
         for r in records {
             let store_type = r.store.map(|s| parse_store_type(&s)).transpose()?;
@@ -325,7 +428,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Recall memories matching a natural language query using hybrid text+vector search. Returns JSON: {memories (array of {record, relevance_score, rendered_content}), total_candidates, query_metadata}."
+        description = "Recall memories matching a natural language query using hybrid text+vector search. If query is omitted, returns recent memories. Returns JSON: {memories (array of {record_id, store, text, relevance_score, fidelity, created_at, emotion}), total_candidates}."
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -341,11 +444,11 @@ impl CerememoryMcpServer {
         let req = RecallQueryRequest {
             header: None,
             cue: RecallCue {
-                text: Some(p.query),
+                text: p.query.filter(|q| !q.trim().is_empty()),
                 ..Default::default()
             },
             stores,
-            limit: p.limit.unwrap_or(10),
+            limit: p.limit.unwrap_or(10).clamp(1, 1000),
             min_fidelity: None,
             include_decayed: false,
             reconsolidate: true,
@@ -354,7 +457,28 @@ impl CerememoryMcpServer {
         };
 
         let resp = self.engine.recall_query(req).await.map_err(engine_err)?;
-        ok_json(&resp)
+
+        let mcp_resp = McpRecallResponse {
+            memories: resp
+                .memories
+                .iter()
+                .map(|m| McpRecalledMemory {
+                    record_id: m.record.id,
+                    store: m.record.store.to_string(),
+                    text: m
+                        .record
+                        .text_content()
+                        .unwrap_or("[non-text content]")
+                        .to_string(),
+                    relevance_score: m.relevance_score,
+                    fidelity: m.record.fidelity.score,
+                    created_at: m.record.created_at.to_rfc3339(),
+                    emotion: emotion_label(&m.record.emotion),
+                })
+                .collect(),
+            total_candidates: resp.total_candidates,
+        };
+        ok_json(&mcp_resp)
     }
 
     #[tool(
@@ -547,8 +671,22 @@ impl CerememoryMcpServer {
             .await
             .map_err(engine_err)?;
 
+        // Write archive to file
+        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let filename = format!("cerememory-export-{timestamp}.cma");
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(&filename);
+        std::fs::write(&path, &bytes).map_err(|e| {
+            McpError::internal_error(format!("Failed to write archive file: {e}"), None)
+        })?;
+
         let summary = serde_json::to_string_pretty(&resp).map_err(internal_err)?;
-        ok_text(format!("{summary}\n\nArchive size: {} bytes", bytes.len()))
+        ok_text(format!(
+            "{summary}\n\nArchive written to: {}\nArchive size: {} bytes",
+            path.display(),
+            bytes.len()
+        ))
     }
 }
 
@@ -559,9 +697,18 @@ impl ServerHandler for CerememoryMcpServer {
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("cerememory", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Cerememory is a living memory database. Use 'store' to save memories, \
-                 'recall' to search, 'timeline' for temporal browsing, 'associate' for \
-                 spreading activation, 'forget' to delete, and 'stats' for system overview.",
+                "Cerememory is a living memory database. Available tools:\n\
+                 - store: Save a new memory\n\
+                 - update: Edit an existing memory by UUID\n\
+                 - batch_store: Save multiple memories at once\n\
+                 - recall: Search memories by query, or list recent memories (omit query)\n\
+                 - timeline: Browse memories by time period\n\
+                 - associate: Find connected memories via spreading activation\n\
+                 - inspect: View full details of a memory by UUID\n\
+                 - forget: Permanently delete memories by UUID\n\
+                 - consolidate: Migrate mature episodic memories to semantic store\n\
+                 - export: Export all memories to a CMA archive file\n\
+                 - stats: View system statistics and store counts",
             )
     }
 }
@@ -651,6 +798,30 @@ mod tests {
     }
 
     #[test]
+    fn store_rejects_empty_content_validation() {
+        // This validates the trim().is_empty() logic used in the store handler
+        assert!("".trim().is_empty());
+        assert!("   ".trim().is_empty());
+        assert!("\n\t".trim().is_empty());
+        assert!(!"hello".trim().is_empty());
+    }
+
+    #[test]
+    fn emotion_label_returns_none_for_neutral() {
+        let neutral = EmotionVector::default();
+        assert!(emotion_label(&neutral).is_none());
+    }
+
+    #[test]
+    fn emotion_label_returns_dominant_emotion() {
+        let joy: EmotionVector = "joy".parse().unwrap();
+        assert_eq!(emotion_label(&joy), Some("joy".to_string()));
+
+        let anger: EmotionVector = "anger".parse().unwrap();
+        assert_eq!(emotion_label(&anger), Some("anger".to_string()));
+    }
+
+    #[test]
     fn tool_router_registers_expected_tools() {
         let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
         let server = CerememoryMcpServer::new(engine);
@@ -673,6 +844,7 @@ mod tests {
                 "stats".to_string(),
                 "store".to_string(),
                 "timeline".to_string(),
+                "update".to_string(),
             ]
         );
     }

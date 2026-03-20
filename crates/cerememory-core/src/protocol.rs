@@ -429,6 +429,12 @@ pub struct ForgetRequest {
     pub confirm: bool,
 }
 
+/// lifecycle.forget response (CMP Spec §5.4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgetResponse {
+    pub records_deleted: u32,
+}
+
 /// lifecycle.export request (CMP Spec §5.5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportRequest {
