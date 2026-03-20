@@ -1001,6 +1001,9 @@ impl CerememoryEngine {
             .chain(vec_scores.keys())
             .copied()
             .collect();
+        let mut scanned_ids = all_ids.clone();
+        let mut total_records_scanned = scanned_ids.len() as u32;
+        let mut fidelity_filtered: u32 = 0;
 
         for id in all_ids {
             if !seen_ids.insert(id) {
@@ -1013,6 +1016,7 @@ impl CerememoryEngine {
                 }
                 if let Some(min_f) = req.min_fidelity {
                     if record.fidelity.score < min_f && !req.include_decayed {
+                        fidelity_filtered += 1;
                         continue;
                     }
                 }
@@ -1044,11 +1048,15 @@ impl CerememoryEngine {
                 .query_temporal_range(temporal.start, temporal.end)
                 .await?;
             for record in results {
+                if scanned_ids.insert(record.id) {
+                    total_records_scanned += 1;
+                }
                 if !seen_ids.insert(record.id) {
                     continue;
                 }
                 if let Some(min_f) = req.min_fidelity {
                     if record.fidelity.score < min_f && !req.include_decayed {
+                        fidelity_filtered += 1;
                         continue;
                     }
                 }
@@ -1154,6 +1162,11 @@ impl CerememoryEngine {
             memories,
             activation_trace: None,
             total_candidates,
+            query_metadata: Some(QueryMetadata {
+                total_records_scanned,
+                stores_searched: stores,
+                fidelity_filtered,
+            }),
         })
     }
 
@@ -2421,6 +2434,47 @@ mod tests {
 
         let resp = engine.recall_query(query).await.unwrap();
         assert!(!resp.memories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recall_query_metadata_counts_temporal_only_searches() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(text_store_req(
+                "Temporal-only query metadata should count scanned records",
+                Some(StoreType::Episodic),
+            ))
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        let resp = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    temporal: Some(TemporalRange {
+                        start: now - chrono::Duration::minutes(1),
+                        end: now + chrono::Duration::minutes(1),
+                    }),
+                    ..Default::default()
+                },
+                stores: None,
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        let metadata = resp
+            .query_metadata
+            .expect("query metadata should be present");
+        assert_eq!(metadata.total_records_scanned, 1);
+        assert_eq!(resp.memories.len(), 1);
     }
 
     #[tokio::test]

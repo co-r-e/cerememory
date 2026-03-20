@@ -288,15 +288,24 @@ impl ServerConfig {
     /// Validate configuration values.
     pub fn validate(&self) -> Result<(), String> {
         if self.http.port == 0 {
-            return Err("HTTP port must be non-zero".to_string());
+            return Err(
+                "HTTP port must be non-zero. Set http.port in config or CEREMEMORY_HTTP__PORT env var."
+                    .to_string(),
+            );
         }
 
         if let Some(grpc_port) = self.grpc.port {
             if grpc_port == 0 {
-                return Err("gRPC port must be non-zero".to_string());
+                return Err(
+                    "gRPC port must be non-zero. Set grpc.port in config or CEREMEMORY_GRPC__PORT env var."
+                        .to_string(),
+                );
             }
             if grpc_port == self.http.port {
-                return Err("gRPC port must differ from HTTP port".to_string());
+                return Err(format!(
+                    "gRPC port ({}) and HTTP port ({}) must be different.",
+                    grpc_port, self.http.port
+                ));
             }
         }
 
@@ -309,15 +318,24 @@ impl ServerConfig {
         }
 
         if self.auth.enabled && self.auth.api_keys_raw.is_empty() {
-            return Err("Auth is enabled but no API keys are configured".to_string());
+            return Err(
+                "Auth is enabled but no API keys are configured. Add keys to [auth].api_keys or set CEREMEMORY_AUTH_API_KEYS env var."
+                    .to_string(),
+            );
         }
 
         if self.rate_limit.requests_per_second == 0 {
-            return Err("rate_limit.requests_per_second must be > 0".to_string());
+            return Err(format!(
+                "rate_limit.requests_per_second must be > 0 (got {}). This controls the sustained request rate per IP.",
+                self.rate_limit.requests_per_second
+            ));
         }
 
         if self.rate_limit.burst == 0 {
-            return Err("rate_limit.burst must be > 0".to_string());
+            return Err(format!(
+                "rate_limit.burst must be > 0 (got {}). This controls burst capacity above the sustained rate.",
+                self.rate_limit.burst
+            ));
         }
 
         Ok(())

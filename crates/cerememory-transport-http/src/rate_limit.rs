@@ -20,10 +20,21 @@ use cerememory_core::protocol::{CMPError, CMPErrorCode};
 
 type KeyedLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
 
+struct CleanupGuard {
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 /// Tower layer for per-IP rate limiting.
 #[derive(Clone)]
 pub struct RateLimitLayer {
     limiter: Arc<KeyedLimiter>,
+    cleanup: Arc<CleanupGuard>,
 }
 
 impl RateLimitLayer {
@@ -37,17 +48,29 @@ impl RateLimitLayer {
                 .allow_burst(NonZeroU32::new(burst).unwrap_or(NonZeroU32::MIN));
         let limiter = Arc::new(RateLimiter::keyed(quota));
 
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cleanup = Arc::new(CleanupGuard {
+            cancel: cancel.clone(),
+        });
+
         // Periodic cleanup of stale IP entries
         let limiter_bg = Arc::clone(&limiter);
+        let cancel_bg = cancel.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
-                interval.tick().await;
-                limiter_bg.retain_recent();
+                tokio::select! {
+                    _ = interval.tick() => {
+                        limiter_bg.retain_recent();
+                    }
+                    _ = cancel_bg.cancelled() => {
+                        break;
+                    }
+                }
             }
         });
 
-        Self { limiter }
+        Self { limiter, cleanup }
     }
 }
 
@@ -58,6 +81,7 @@ impl<S> Layer<S> for RateLimitLayer {
         RateLimitService {
             inner,
             limiter: Arc::clone(&self.limiter),
+            _cleanup: Arc::clone(&self.cleanup),
         }
     }
 }
@@ -67,6 +91,7 @@ impl<S> Layer<S> for RateLimitLayer {
 pub struct RateLimitService<S> {
     inner: S,
     limiter: Arc<KeyedLimiter>,
+    _cleanup: Arc<CleanupGuard>,
 }
 
 /// Extract client IP from the request.
@@ -116,6 +141,7 @@ where
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let ip = extract_client_ip(&req);
+        let request_id = crate::request_id_from_request(&req);
 
         match self.limiter.check_key(&ip) {
             Ok(_) => {
@@ -130,11 +156,11 @@ where
                     let mut cmp_error =
                         CMPError::new(CMPErrorCode::RateLimited, "Rate limit exceeded");
                     cmp_error.retry_after = Some(secs as u32);
+                    cmp_error.request_id = request_id;
                     let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(cmp_error)).into_response();
-                    resp.headers_mut().insert(
-                        "retry-after",
-                        axum::http::HeaderValue::from_str(&secs.to_string()).unwrap(),
-                    );
+                    if let Ok(val) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                        resp.headers_mut().insert("retry-after", val);
+                    }
                     Ok(resp)
                 })
             }

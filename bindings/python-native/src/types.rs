@@ -6,7 +6,8 @@
 
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
+use pyo3::IntoPyObjectExt;
 
 use cerememory_core::error::CerememoryError;
 
@@ -55,30 +56,30 @@ pub fn to_py_err(err: CerememoryError) -> PyErr {
 pub fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<PyObject> {
     match val {
         serde_json::Value::Null => Ok(py.None()),
-        serde_json::Value::Bool(b) => Ok(b.to_object(py)),
+        serde_json::Value::Bool(b) => Ok((*b).into_py_any(py)?),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(i.to_object(py))
+                Ok(i.into_py_any(py)?)
             } else if let Some(u) = n.as_u64() {
-                Ok(u.to_object(py))
+                Ok(u.into_py_any(py)?)
             } else {
-                Ok(n.as_f64().unwrap_or(0.0).to_object(py))
+                Ok(n.as_f64().unwrap_or(0.0).into_py_any(py)?)
             }
         }
-        serde_json::Value::String(s) => Ok(s.to_object(py)),
+        serde_json::Value::String(s) => Ok(s.into_py_any(py)?),
         serde_json::Value::Array(arr) => {
             let items = arr
                 .iter()
                 .map(|v| json_value_to_py(py, v))
                 .collect::<PyResult<Vec<_>>>()?;
-            Ok(items.to_object(py))
+            Ok(PyList::new(py, &items)?.into_any().unbind())
         }
         serde_json::Value::Object(map) => {
-            let dict = PyDict::new_bound(py);
+            let dict = PyDict::new(py);
             for (k, v) in map {
                 dict.set_item(k, json_value_to_py(py, v)?)?;
             }
-            Ok(dict.unbind().into_any())
+            Ok(dict.into_any().unbind())
         }
     }
 }
@@ -290,12 +291,12 @@ impl PyEncodeStoreResponse {
 
     /// Return as a Python dict.
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         dict.set_item("record_id", &self.record_id)?;
         dict.set_item("store", &self.store)?;
         dict.set_item("initial_fidelity", self.initial_fidelity)?;
         dict.set_item("associations_created", self.associations_created)?;
-        Ok(dict.unbind().into_any())
+        Ok(dict.into_any().unbind())
     }
 
     fn __repr__(&self) -> String {

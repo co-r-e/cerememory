@@ -1,5 +1,6 @@
 //! Cerememory CLI — command-line interface for the living memory database.
 
+use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -129,7 +130,12 @@ enum Commands {
 fn parse_store_type(s: &str) -> Result<StoreType> {
     s.to_lowercase()
         .parse::<StoreType>()
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Invalid store type '{}'. Valid values: episodic, semantic, procedural, emotional, working",
+                s
+            )
+        })
 }
 
 fn parse_embedding(s: &str) -> Result<Vec<f32>> {
@@ -239,6 +245,22 @@ async fn main() -> Result<()> {
     let config = load_config(&cli)?;
     init_logging(&config);
 
+    // Install global panic handler to capture panics in structured logs
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        tracing::error!(location = %location, payload = %payload, "Panic occurred");
+    }));
+
     // Serve uses its own engine lifecycle with background decay + graceful shutdown
     if let Commands::Serve { .. } = &cli.command {
         let engine = Arc::new(create_engine_from_config(&config)?);
@@ -254,12 +276,17 @@ async fn main() -> Result<()> {
             let ctrl_c = tokio::signal::ctrl_c();
             #[cfg(unix)]
             {
-                let mut sigterm =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                        .expect("Failed to register SIGTERM handler");
-                tokio::select! {
-                    _ = ctrl_c => {},
-                    _ = sigterm.recv() => {},
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(mut sigterm) => {
+                        tokio::select! {
+                            _ = ctrl_c => {},
+                            _ = sigterm.recv() => {},
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to register SIGTERM handler, using ctrl-c only");
+                        let _ = ctrl_c.await;
+                    }
                 }
             }
             #[cfg(not(unix))]
@@ -340,7 +367,17 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // After HTTP server stops, clean up background tasks
-        engine.stop_background_decay().await;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            engine.stop_background_decay(),
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(_) => {
+                tracing::warn!("Background decay shutdown timed out after 30 seconds");
+            }
+        }
         tracing::info!("Shutdown complete");
         return Ok(());
     }
@@ -510,6 +547,28 @@ async fn main() -> Result<()> {
             cascade,
             confirm,
         } => {
+            let confirmed = if confirm {
+                true
+            } else if std::io::stdin().is_terminal() {
+                eprintln!(
+                    "Warning: This will permanently delete record {record_id}. This cannot be undone."
+                );
+                eprint!("Are you sure? [y/N] ");
+                std::io::stderr().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                input.trim().eq_ignore_ascii_case("y")
+            } else {
+                anyhow::bail!(
+                    "Forget requires confirmation. Use --confirm flag in non-interactive mode."
+                );
+            };
+
+            if !confirmed {
+                println!("Aborted.");
+                return Ok(());
+            }
+
             let deleted = engine
                 .lifecycle_forget(ForgetRequest {
                     header: None,
@@ -517,7 +576,7 @@ async fn main() -> Result<()> {
                     store: None,
                     temporal_range: None,
                     cascade,
-                    confirm,
+                    confirm: true,
                 })
                 .await?;
 

@@ -9,6 +9,17 @@ use uuid::Uuid;
 
 use crate::types::*;
 
+// ─── Client-facing error messages (sanitized, no internal details) ───
+
+/// Opaque client-facing message for storage errors.
+pub const STORAGE_ERROR_MESSAGE: &str = "An internal storage error occurred";
+/// Opaque client-facing message for serialization errors.
+pub const SERIALIZATION_ERROR_MESSAGE: &str = "An internal data processing error occurred";
+/// Opaque client-facing message for export errors.
+pub const EXPORT_ERROR_MESSAGE: &str = "An internal error occurred during export";
+/// Opaque client-facing message for generic internal errors.
+pub const INTERNAL_ERROR_MESSAGE: &str = "An internal error occurred";
+
 // ─── Protocol Versioning (CMP Spec §8) ───────────────────────────────
 
 /// Protocol version header included in all CMP messages.
@@ -204,6 +215,14 @@ pub struct ActivationNode {
     pub edge_type: AssociationType,
 }
 
+/// Metadata about a recall query execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryMetadata {
+    pub total_records_scanned: u32,
+    pub stores_searched: Vec<StoreType>,
+    pub fidelity_filtered: u32,
+}
+
 /// recall.query response (CMP Spec §4.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecallQueryResponse {
@@ -211,6 +230,8 @@ pub struct RecallQueryResponse {
     #[serde(default)]
     pub activation_trace: Option<ActivationTrace>,
     pub total_candidates: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_metadata: Option<QueryMetadata>,
 }
 
 /// recall.associate request (CMP Spec §4.2).
@@ -591,6 +612,8 @@ pub struct CMPError {
     pub details: Option<serde_json::Value>,
     #[serde(default)]
     pub retry_after: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<Uuid>,
 }
 
 impl CMPError {
@@ -600,6 +623,7 @@ impl CMPError {
             message: message.into(),
             details: None,
             retry_after: None,
+            request_id: None,
         }
     }
 }
@@ -636,15 +660,16 @@ impl From<&crate::error::CerememoryError> for CMPError {
                 CMPErrorCode::ConsolidationInProgress,
                 "Consolidation in progress",
             ),
-            CerememoryError::ExportFailed(msg) => {
-                CMPError::new(CMPErrorCode::ExportFailed, msg.clone())
+            CerememoryError::ExportFailed(_msg) => {
+                CMPError::new(CMPErrorCode::ExportFailed, EXPORT_ERROR_MESSAGE)
             }
             CerememoryError::ImportConflict(msg) => {
                 CMPError::new(CMPErrorCode::ImportConflict, msg.clone())
             }
-            CerememoryError::ForgetUnconfirmed => {
-                CMPError::new(CMPErrorCode::ForgetUnconfirmed, "Confirm required")
-            }
+            CerememoryError::ForgetUnconfirmed => CMPError::new(
+                CMPErrorCode::ForgetUnconfirmed,
+                "Forget requires explicit confirmation. Set 'confirm: true' to proceed.",
+            ),
             CerememoryError::VersionMismatch { expected, got } => CMPError::new(
                 CMPErrorCode::VersionMismatch,
                 format!("Expected {expected}, got {got}"),
@@ -652,14 +677,14 @@ impl From<&crate::error::CerememoryError> for CMPError {
             CerememoryError::Validation(msg) => {
                 CMPError::new(CMPErrorCode::ValidationError, msg.clone())
             }
-            CerememoryError::Storage(msg) => {
-                CMPError::new(CMPErrorCode::InternalError, format!("Storage: {msg}"))
+            CerememoryError::Storage(_msg) => {
+                CMPError::new(CMPErrorCode::InternalError, STORAGE_ERROR_MESSAGE)
             }
-            CerememoryError::Serialization(msg) => {
-                CMPError::new(CMPErrorCode::InternalError, format!("Serialization: {msg}"))
+            CerememoryError::Serialization(_msg) => {
+                CMPError::new(CMPErrorCode::InternalError, SERIALIZATION_ERROR_MESSAGE)
             }
-            CerememoryError::Internal(msg) => {
-                CMPError::new(CMPErrorCode::InternalError, msg.clone())
+            CerememoryError::Internal(_msg) => {
+                CMPError::new(CMPErrorCode::InternalError, INTERNAL_ERROR_MESSAGE)
             }
             CerememoryError::Unauthorized(msg) => {
                 CMPError::new(CMPErrorCode::Unauthorized, msg.clone())

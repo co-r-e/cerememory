@@ -16,7 +16,7 @@
 //! | GET    | /v1/introspect/stats        | introspect.stats        |
 //! | GET    | /v1/introspect/record/{id}  | introspect.record       |
 
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{
@@ -24,7 +24,7 @@ use axum::{
         rejection::{JsonRejection, PathRejection},
         FromRequest, FromRequestParts, Path, Request, State,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
     Json, Router,
@@ -33,7 +33,9 @@ use cerememory_core::error::CerememoryError;
 use cerememory_core::protocol::*;
 use cerememory_engine::CerememoryEngine;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::request_id::{
+    MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
+};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -74,6 +76,29 @@ impl Default for HttpMiddlewareConfig {
 
 /// Shared application state.
 type AppState = Arc<CerememoryEngine>;
+
+pub(crate) fn request_id_from_headers(headers: &HeaderMap) -> Option<Uuid> {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+pub(crate) fn request_id_from_extensions(extensions: &axum::http::Extensions) -> Option<Uuid> {
+    extensions
+        .get::<RequestId>()
+        .and_then(|request_id| request_id.header_value().to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+pub(crate) fn request_id_from_request<B>(req: &Request<B>) -> Option<Uuid> {
+    request_id_from_extensions(req.extensions()).or_else(|| request_id_from_headers(req.headers()))
+}
+
+pub(crate) fn request_id_from_parts(parts: &axum::http::request::Parts) -> Option<Uuid> {
+    request_id_from_extensions(&parts.extensions)
+        .or_else(|| request_id_from_headers(&parts.headers))
+}
 
 /// Create the Axum router with all CMP endpoints.
 ///
@@ -189,18 +214,27 @@ async fn readiness(State(engine): State<AppState>) -> Response {
 // ─── Error mapping ───────────────────────────────────────────────────
 
 /// Map CerememoryError to HTTP status + CMPError JSON.
-struct AppError(CerememoryError);
+struct AppError {
+    error: CerememoryError,
+    request_id: Option<Uuid>,
+}
+
+impl AppError {
+    fn new(error: CerememoryError, request_id: Option<Uuid>) -> Self {
+        Self { error, request_id }
+    }
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let status = match &self.0 {
+        let status = match &self.error {
             CerememoryError::RecordNotFound(_) => StatusCode::NOT_FOUND,
             CerememoryError::StoreInvalid(_) => StatusCode::BAD_REQUEST,
             CerememoryError::ContentTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             CerememoryError::ModalityUnsupported(_) => StatusCode::BAD_REQUEST,
-            CerememoryError::WorkingMemoryFull => StatusCode::TOO_MANY_REQUESTS,
+            CerememoryError::WorkingMemoryFull => StatusCode::SERVICE_UNAVAILABLE,
             CerememoryError::DecayEngineBusy { .. } => StatusCode::SERVICE_UNAVAILABLE,
-            CerememoryError::ConsolidationInProgress => StatusCode::CONFLICT,
+            CerememoryError::ConsolidationInProgress => StatusCode::SERVICE_UNAVAILABLE,
             CerememoryError::ExportFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             CerememoryError::ImportConflict(_) => StatusCode::CONFLICT,
             CerememoryError::ForgetUnconfirmed => StatusCode::BAD_REQUEST,
@@ -213,14 +247,32 @@ impl IntoResponse for AppError {
             CerememoryError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         };
 
-        let cmp_error = CMPError::from(&self.0);
+        // Log server-side errors that return opaque messages to the client
+        match &self.error {
+            CerememoryError::Storage(msg) => {
+                tracing::warn!(error = %msg, "Storage error");
+            }
+            CerememoryError::Serialization(msg) => {
+                tracing::warn!(error = %msg, "Serialization error");
+            }
+            CerememoryError::ExportFailed(msg) => {
+                tracing::warn!(error = %msg, "Export failed");
+            }
+            CerememoryError::Internal(msg) => {
+                tracing::warn!(error = %msg, "Internal error");
+            }
+            _ => {}
+        }
+
+        let mut cmp_error = CMPError::from(&self.error);
+        cmp_error.request_id = self.request_id;
         (status, Json(cmp_error)).into_response()
     }
 }
 
 impl From<CerememoryError> for AppError {
     fn from(err: CerememoryError) -> Self {
-        Self(err)
+        Self::new(err, None)
     }
 }
 
@@ -239,9 +291,13 @@ where
     type Rejection = AppError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let request_id = request_id_from_request(&req);
         match axum::Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(AppJson(value)),
-            Err(rejection) => Err(AppError(CerememoryError::Validation(rejection.body_text()))),
+            Err(rejection) => Err(AppError::new(
+                CerememoryError::Validation(rejection.body_text()),
+                request_id,
+            )),
         }
     }
 }
@@ -262,10 +318,31 @@ where
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
+        let request_id = request_id_from_parts(parts);
         match axum::extract::Path::<T>::from_request_parts(parts, state).await {
             Ok(Path(value)) => Ok(AppPath(value)),
-            Err(rejection) => Err(AppError(CerememoryError::Validation(rejection.body_text()))),
+            Err(rejection) => Err(AppError::new(
+                CerememoryError::Validation(rejection.body_text()),
+                request_id,
+            )),
         }
+    }
+}
+
+struct MaybeRequestId(Option<Uuid>);
+
+#[async_trait]
+impl<S> FromRequestParts<S> for MaybeRequestId
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(request_id_from_parts(parts)))
     }
 }
 
@@ -273,27 +350,39 @@ where
 
 async fn encode_store(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<EncodeStoreRequest>,
 ) -> Result<Json<EncodeStoreResponse>, AppError> {
-    let resp = engine.encode_store(req).await?;
+    let resp = engine
+        .encode_store(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
 async fn encode_batch(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<EncodeBatchRequest>,
 ) -> Result<Json<EncodeBatchResponse>, AppError> {
-    let resp = engine.encode_batch(req).await?;
+    let resp = engine
+        .encode_batch(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
 async fn encode_update(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppPath(record_id): AppPath<Uuid>,
     AppJson(mut req): AppJson<EncodeUpdateRequest>,
 ) -> Result<StatusCode, AppError> {
     req.record_id = record_id;
-    engine.encode_update(req).await?;
+    engine
+        .encode_update(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -301,35 +390,51 @@ async fn encode_update(
 
 async fn recall_query(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<RecallQueryRequest>,
 ) -> Result<Json<RecallQueryResponse>, AppError> {
-    let resp = engine.recall_query(req).await?;
+    let resp = engine
+        .recall_query(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
 async fn recall_associate(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppPath(record_id): AppPath<Uuid>,
     AppJson(mut req): AppJson<RecallAssociateRequest>,
 ) -> Result<Json<RecallAssociateResponse>, AppError> {
     req.record_id = record_id;
-    let resp = engine.recall_associate(req).await?;
+    let resp = engine
+        .recall_associate(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
 async fn recall_timeline(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<RecallTimelineRequest>,
 ) -> Result<Json<RecallTimelineResponse>, AppError> {
-    let resp = engine.recall_timeline(req).await?;
+    let resp = engine
+        .recall_timeline(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
 async fn recall_graph(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<RecallGraphRequest>,
 ) -> Result<Json<RecallGraphResponse>, AppError> {
-    let resp = engine.recall_graph(req).await?;
+    let resp = engine
+        .recall_graph(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
@@ -337,60 +442,91 @@ async fn recall_graph(
 
 async fn lifecycle_consolidate(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<ConsolidateRequest>,
 ) -> Result<Json<ConsolidateResponse>, AppError> {
-    let resp = engine.lifecycle_consolidate(req).await?;
+    let resp = engine
+        .lifecycle_consolidate(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
 async fn lifecycle_decay_tick(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<DecayTickRequest>,
 ) -> Result<Json<DecayTickResponse>, AppError> {
-    let resp = engine.lifecycle_decay_tick(req).await?;
+    let resp = engine
+        .lifecycle_decay_tick(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
 async fn lifecycle_set_mode(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<SetModeRequest>,
 ) -> Result<StatusCode, AppError> {
-    engine.lifecycle_set_mode(req).await?;
+    engine
+        .lifecycle_set_mode(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn lifecycle_forget(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<ForgetRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let deleted = engine.lifecycle_forget(req).await?;
+    let deleted = engine
+        .lifecycle_forget(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(serde_json::json!({ "records_deleted": deleted })))
 }
 
 // ─── Introspect handlers ─────────────────────────────────────────────
 
-async fn introspect_stats(State(engine): State<AppState>) -> Result<Json<StatsResponse>, AppError> {
-    let stats = engine.introspect_stats().await?;
+async fn introspect_stats(
+    State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
+) -> Result<Json<StatsResponse>, AppError> {
+    let stats = engine
+        .introspect_stats()
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(stats))
 }
 
 async fn introspect_decay_forecast(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppJson(req): AppJson<DecayForecastRequest>,
 ) -> Result<Json<DecayForecastResponse>, AppError> {
-    let resp = engine.introspect_decay_forecast(req).await?;
+    let resp = engine
+        .introspect_decay_forecast(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
 async fn introspect_evolution(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
 ) -> Result<Json<EvolutionMetrics>, AppError> {
-    let resp = engine.introspect_evolution().await?;
+    let resp = engine
+        .introspect_evolution()
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(resp))
 }
 
 async fn introspect_record(
     State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
     AppPath(record_id): AppPath<Uuid>,
 ) -> Result<Json<cerememory_core::types::MemoryRecord>, AppError> {
     let record = engine
@@ -401,7 +537,8 @@ async fn introspect_record(
             include_associations: false,
             include_versions: false,
         })
-        .await?;
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
     Ok(Json(record))
 }
 
@@ -588,6 +725,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let json = body_json(resp).await;
         assert_eq!(json["code"], "VALIDATION_ERROR");
+        assert!(json["request_id"].is_string());
     }
 
     #[tokio::test]
@@ -608,6 +746,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let json = body_json(resp).await;
         assert_eq!(json["code"], "VALIDATION_ERROR");
+        assert!(json["request_id"].is_string());
     }
 
     // ─── Health endpoint tests ───
@@ -693,6 +832,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_response_includes_request_id() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let app = router(engine, vec!["test-api-key".to_string()]);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let json = body_json(resp).await;
+        assert_eq!(json["code"], "UNAUTHORIZED");
+        assert!(json["request_id"].is_string());
     }
 
     // ─── Metrics tests ───
@@ -883,6 +1043,7 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["code"], "RATE_LIMITED");
         assert!(json["retry_after"].is_number());
+        assert!(json["request_id"].is_string());
     }
 
     #[tokio::test]

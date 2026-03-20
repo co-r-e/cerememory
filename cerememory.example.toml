@@ -8,15 +8,24 @@ data_dir = "./data"
 [http]
 port = 8420
 cors_origins = []  # Empty = allow all origins
+# tls_cert_path = "/path/to/cert.pem"
+# tls_key_path = "/path/to/key.pem"
+# To generate a self-signed TLS cert for development:
+#   openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
 
 [grpc]
 # port = 8421       # Uncomment to enable gRPC
 # tls_cert_path = "/path/to/cert.pem"
 # tls_key_path = "/path/to/key.pem"
+# Generate gRPC TLS cert:
+#   openssl req -x509 -newkey rsa:4096 -keyout grpc-key.pem -out grpc-cert.pem -days 365 -nodes
 
 [auth]
 enabled = false
 api_keys = []  # ["sk-key1", "sk-key2"]
+# Security recommendation: prefer setting keys via environment variable
+# to avoid committing secrets to version control:
+#   export CEREMEMORY_AUTH_API_KEYS="sk-key1,sk-key2"
 
 [llm]
 provider = "none"  # "openai", "claude", "gemini", or "none"
@@ -25,11 +34,13 @@ provider = "none"  # "openai", "claude", "gemini", or "none"
 # base_url = "https://api.openai.com"
 
 [decay]
-background_interval_secs = 3600
+background_interval_secs = 3600  # How often the decay engine runs (in seconds).
+# Lower values = more frequent fidelity updates, higher CPU usage.
 
 [rate_limit]
-requests_per_second = 100
-burst = 50
+requests_per_second = 100  # Sustained request rate per IP address
+burst = 50                 # Burst capacity above the sustained rate.
+# burst should be <= requests_per_second for predictable behavior.
 
 [log]
 level = "info"    # trace, debug, info, warn, error

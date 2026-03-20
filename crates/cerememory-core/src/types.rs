@@ -152,33 +152,30 @@ impl std::str::FromStr for EmotionVector {
         let t = s.trim();
 
         // Plutchik primary emotions + common aliases (case-insensitive, no allocation)
-        let (field_setter, valence): (fn(&mut Self), f64) =
-            if t.eq_ignore_ascii_case("joy")
-                || t.eq_ignore_ascii_case("happy")
-                || t.eq_ignore_ascii_case("happiness")
-            {
-                (|e: &mut Self| e.joy = 1.0, 1.0)
-            } else if t.eq_ignore_ascii_case("trust") {
-                (|e| e.trust = 1.0, 0.7)
-            } else if t.eq_ignore_ascii_case("fear") {
-                (|e| e.fear = 1.0, -0.8)
-            } else if t.eq_ignore_ascii_case("surprise") {
-                (|e| e.surprise = 1.0, 0.0)
-            } else if t.eq_ignore_ascii_case("sadness") || t.eq_ignore_ascii_case("sad") {
-                (|e| e.sadness = 1.0, -1.0)
-            } else if t.eq_ignore_ascii_case("disgust") {
-                (|e| e.disgust = 1.0, -0.9)
-            } else if t.eq_ignore_ascii_case("anger") || t.eq_ignore_ascii_case("angry") {
-                (|e| e.anger = 1.0, -0.9)
-            } else if t.eq_ignore_ascii_case("anticipation")
-                || t.eq_ignore_ascii_case("anticipatory")
-            {
-                (|e| e.anticipation = 1.0, 0.4)
-            } else {
-                return Err(crate::error::CerememoryError::Validation(format!(
+        let (field_setter, valence): (fn(&mut Self), f64) = if t.eq_ignore_ascii_case("joy")
+            || t.eq_ignore_ascii_case("happy")
+            || t.eq_ignore_ascii_case("happiness")
+        {
+            (|e: &mut Self| e.joy = 1.0, 1.0)
+        } else if t.eq_ignore_ascii_case("trust") {
+            (|e| e.trust = 1.0, 0.7)
+        } else if t.eq_ignore_ascii_case("fear") {
+            (|e| e.fear = 1.0, -0.8)
+        } else if t.eq_ignore_ascii_case("surprise") {
+            (|e| e.surprise = 1.0, 0.0)
+        } else if t.eq_ignore_ascii_case("sadness") || t.eq_ignore_ascii_case("sad") {
+            (|e| e.sadness = 1.0, -1.0)
+        } else if t.eq_ignore_ascii_case("disgust") {
+            (|e| e.disgust = 1.0, -0.9)
+        } else if t.eq_ignore_ascii_case("anger") || t.eq_ignore_ascii_case("angry") {
+            (|e| e.anger = 1.0, -0.9)
+        } else if t.eq_ignore_ascii_case("anticipation") || t.eq_ignore_ascii_case("anticipatory") {
+            (|e| e.anticipation = 1.0, 0.4)
+        } else {
+            return Err(crate::error::CerememoryError::Validation(format!(
                     "Invalid emotion label: {t}. Use one of: joy, trust, fear, surprise, sadness, disgust, anger, anticipation"
                 )));
-            };
+        };
 
         let mut ev = Self {
             intensity: 1.0,

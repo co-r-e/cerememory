@@ -14,6 +14,7 @@ use rmcp::{tool, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use cerememory_core::error::CerememoryError;
 use cerememory_core::protocol::*;
 use cerememory_core::types::*;
 use cerememory_engine::CerememoryEngine;
@@ -22,17 +23,17 @@ use cerememory_engine::CerememoryEngine;
 
 #[derive(Deserialize, JsonSchema)]
 struct StoreParams {
-    /// Text content to store as a memory
+    /// Text content to store as a memory (UTF-8, max 1 MB)
     content: String,
-    /// Target store: episodic, semantic, procedural, emotional, working (default: auto-route)
+    /// Target memory store. Options: 'episodic' (events/experiences), 'semantic' (facts/knowledge), 'procedural' (skills/how-to), 'emotional' (feelings/reactions), 'working' (temporary scratch, not persisted). Omit for auto-routing based on content analysis.
     store: Option<String>,
-    /// Emotional valence label (e.g., "joy", "sadness")
+    /// Emotional valence label. Options: joy, sadness, anger, fear, surprise, disgust, trust, anticipation (aliases: happy, sad, angry, anticipatory). Affects emotional memory routing.
     emotion: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct BatchStoreParams {
-    /// JSON array of store records, each with "content", optional "store", optional "emotion"
+    /// JSON array of records. Each record: {"content": "...", "store": "episodic" (optional), "emotion": "joy" (optional)}. Example: [{"content": "Meeting notes", "store": "episodic"}]
     records_json: String,
 }
 
@@ -47,9 +48,9 @@ struct BatchRecord {
 struct RecallParams {
     /// Natural language query to recall memories
     query: String,
-    /// Maximum number of results (default: 10)
+    /// Maximum number of results to return (default: 10, range: 1-1000)
     limit: Option<u32>,
-    /// Comma-separated store filters (e.g., "episodic,semantic")
+    /// Comma-separated store type filter (e.g., 'episodic,semantic'). Omit to search all stores.
     stores: Option<String>,
 }
 
@@ -75,9 +76,9 @@ struct AssociateParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct ForgetParams {
-    /// Comma-separated UUIDs of records to delete
+    /// Comma-separated UUIDs of records to permanently delete. This operation is irreversible.
     record_ids: String,
-    /// Also delete associated records (default: false)
+    /// Also delete records associated with the target records (default: false)
     cascade: Option<bool>,
 }
 
@@ -99,9 +100,9 @@ struct InspectParams {
 struct ExportParams {
     /// Export format (default: "cma")
     format: Option<String>,
-    /// Encrypt the export (default: false)
+    /// Encrypt the archive with ChaCha20-Poly1305 AEAD (default: false). Requires encryption_key.
     encrypt: Option<bool>,
-    /// Encryption key required when `encrypt` is true
+    /// Passphrase for archive encryption. Required when encrypt is true. Use a strong passphrase (16+ chars recommended).
     encryption_key: Option<String>,
 }
 
@@ -119,17 +120,76 @@ fn parse_store_type(s: &str) -> Result<StoreType, McpError> {
     s.trim()
         .to_lowercase()
         .parse::<StoreType>()
-        .map_err(|e| McpError::invalid_params(format!("Invalid store type: {e}"), None))
+        .map_err(|_| {
+            McpError::invalid_params(
+                format!(
+                    "Invalid store type '{}'. Valid values: episodic, semantic, procedural, emotional, working",
+                    s.trim()
+                ),
+                None,
+            )
+        })
 }
 
 fn parse_uuid(s: &str) -> Result<uuid::Uuid, McpError> {
-    s.trim()
-        .parse::<uuid::Uuid>()
-        .map_err(|e| McpError::invalid_params(format!("Invalid UUID: {e}"), None))
+    s.trim().parse::<uuid::Uuid>().map_err(|_| {
+        McpError::invalid_params(
+            format!(
+                "Invalid UUID '{}'. Expected format: 550e8400-e29b-41d4-a716-446655440000",
+                s.trim()
+            ),
+            None,
+        )
+    })
 }
 
-fn engine_err(e: impl std::fmt::Display) -> McpError {
+fn internal_err(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
+}
+
+fn engine_err(err: CerememoryError) -> McpError {
+    match err {
+        CerememoryError::RecordNotFound(id) => {
+            McpError::invalid_params(format!("Record not found: {id}"), None)
+        }
+        CerememoryError::StoreInvalid(store) => {
+            McpError::invalid_params(format!("Invalid store type '{store}'"), None)
+        }
+        CerememoryError::ContentTooLarge { size, limit } => McpError::invalid_params(
+            format!("Content too large: {size} bytes exceeds limit of {limit} bytes"),
+            None,
+        ),
+        CerememoryError::ModalityUnsupported(modality) => {
+            McpError::invalid_params(format!("Unsupported modality: {modality}"), None)
+        }
+        CerememoryError::ImportConflict(message) | CerememoryError::Validation(message) => {
+            McpError::invalid_params(message, None)
+        }
+        CerememoryError::VersionMismatch { expected, got } => McpError::invalid_params(
+            format!("Protocol version mismatch: expected {expected}, got {got}"),
+            None,
+        ),
+        CerememoryError::ForgetUnconfirmed => {
+            McpError::invalid_params("Forget requires explicit confirmation".to_string(), None)
+        }
+        CerememoryError::Storage(message) => {
+            tracing::warn!(error = %message, "Storage error");
+            McpError::internal_error(STORAGE_ERROR_MESSAGE.to_string(), None)
+        }
+        CerememoryError::Serialization(message) => {
+            tracing::warn!(error = %message, "Serialization error");
+            McpError::internal_error(SERIALIZATION_ERROR_MESSAGE.to_string(), None)
+        }
+        CerememoryError::ExportFailed(message) => {
+            tracing::warn!(error = %message, "Export failed");
+            McpError::internal_error(EXPORT_ERROR_MESSAGE.to_string(), None)
+        }
+        CerememoryError::Internal(message) => {
+            tracing::warn!(error = %message, "Internal error");
+            McpError::internal_error(INTERNAL_ERROR_MESSAGE.to_string(), None)
+        }
+        other => McpError::internal_error(other.to_string(), None),
+    }
 }
 
 fn ok_text(text: String) -> Result<CallToolResult, McpError> {
@@ -137,7 +197,7 @@ fn ok_text(text: String) -> Result<CallToolResult, McpError> {
 }
 
 fn ok_json<T: Serialize>(val: &T) -> Result<CallToolResult, McpError> {
-    let text = serde_json::to_string_pretty(val).map_err(engine_err)?;
+    let text = serde_json::to_string_pretty(val).map_err(internal_err)?;
     ok_text(text)
 }
 
@@ -217,7 +277,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Store a new memory record. Returns the record ID, store type, and initial fidelity."
+        description = "Store a new memory record. Returns JSON: {record_id, store, initial_fidelity, associations_created}."
     )]
     async fn store(&self, params: Parameters<StoreParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -229,14 +289,23 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Store multiple memory records in a batch. Accepts a JSON array string of records."
+        description = "Store multiple memory records in a batch with automatic cross-record association. Accepts a JSON array string. Returns JSON: {results (array of {record_id, store, initial_fidelity, associations_created}), associations_inferred}."
     )]
     async fn batch_store(
         &self,
         params: Parameters<BatchStoreParams>,
     ) -> Result<CallToolResult, McpError> {
-        let records: Vec<BatchRecord> = serde_json::from_str(&params.0.records_json)
-            .map_err(|e| McpError::invalid_params(format!("Invalid records_json: {e}"), None))?;
+        let records: Vec<BatchRecord> =
+            serde_json::from_str(&params.0.records_json).map_err(|e| {
+                McpError::invalid_params(
+                    format!(
+                        "Failed to parse records_json. Expected JSON array of objects with \
+                         'content' (required), 'store' (optional), 'emotion' (optional). \
+                         Parse error: {e}"
+                    ),
+                    None,
+                )
+            })?;
 
         let mut encode_records = Vec::with_capacity(records.len());
         for r in records {
@@ -256,7 +325,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Recall memories matching a natural language query. Returns ranked results with relevance scores."
+        description = "Recall memories matching a natural language query using hybrid text+vector search. Returns JSON: {memories (array of {record, relevance_score, rendered_content}), total_candidates, query_metadata}."
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -289,7 +358,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Retrieve memories along a timeline. Filter by start/end time and granularity."
+        description = "Retrieve memories bucketed by time period. Defaults to last 7 days at hour granularity. Returns JSON with temporal buckets."
     )]
     async fn timeline(
         &self,
@@ -350,7 +419,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Find memories associated with a given record through spreading activation."
+        description = "Find memories connected to a given record through spreading activation network. Returns associated records with activation scores."
     )]
     async fn associate(
         &self,
@@ -376,7 +445,9 @@ impl CerememoryMcpServer {
         ok_json(&resp)
     }
 
-    #[tool(description = "Permanently delete memory records. Provide comma-separated UUIDs.")]
+    #[tool(
+        description = "Permanently and irreversibly delete memory records by UUID. Returns JSON: {records_deleted}."
+    )]
     async fn forget(&self, params: Parameters<ForgetParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let ids: Vec<uuid::Uuid> = p
@@ -399,10 +470,12 @@ impl CerememoryMcpServer {
             .lifecycle_forget(req)
             .await
             .map_err(engine_err)?;
-        ok_text(format!("Deleted {deleted} record(s)"))
+        ok_json(&serde_json::json!({"records_deleted": deleted}))
     }
 
-    #[tool(description = "Consolidate memories (migrate episodic to semantic, merge duplicates).")]
+    #[tool(
+        description = "Consolidate memories: migrate mature episodic memories to semantic store, merge duplicates. Returns consolidation report."
+    )]
     async fn consolidate(
         &self,
         params: Parameters<ConsolidateParams>,
@@ -433,7 +506,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Inspect a specific memory record by UUID. Returns full details including history."
+        description = "Inspect a specific memory record by UUID. Returns full record details including fidelity state, emotion vector, access history, and associations."
     )]
     async fn inspect(&self, params: Parameters<InspectParams>) -> Result<CallToolResult, McpError> {
         let record_id = parse_uuid(&params.0.record_id)?;
@@ -455,7 +528,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Export all memory records as a CMA archive. Returns metadata and archive size."
+        description = "Export all memory records as a CMA archive file. Optionally encrypted with ChaCha20-Poly1305. Returns metadata and archive size."
     )]
     async fn export(&self, params: Parameters<ExportParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -474,7 +547,7 @@ impl CerememoryMcpServer {
             .await
             .map_err(engine_err)?;
 
-        let summary = serde_json::to_string_pretty(&resp).map_err(engine_err)?;
+        let summary = serde_json::to_string_pretty(&resp).map_err(internal_err)?;
         ok_text(format!("{summary}\n\nArchive size: {} bytes", bytes.len()))
     }
 }
@@ -569,6 +642,12 @@ mod tests {
     #[test]
     fn parse_uuid_invalid() {
         assert!(parse_uuid("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn engine_err_sanitizes_storage_details() {
+        let err = engine_err(CerememoryError::Storage("disk path leaked".to_string()));
+        assert_eq!(err.message, STORAGE_ERROR_MESSAGE);
     }
 
     #[test]

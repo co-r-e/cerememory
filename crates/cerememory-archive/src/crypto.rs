@@ -4,9 +4,11 @@
 //! generates a random 16-byte salt for key diversification, producing the
 //! format: `salt (16 bytes) || nonce (12 bytes) || ciphertext+tag`.
 //!
-//! The salt-based key diversification uses an HKDF-like two-round SHA-256
-//! construction, which is significantly stronger than plain SHA-256 hashing.
+//! Key derivation uses Argon2id (memory-hard KDF) for passphrase-based keys,
+//! and the salt-based key diversification uses an HKDF-like two-round SHA-256
+//! construction for per-encryption key uniqueness.
 
+use argon2::{Algorithm, Argon2, Params, Version};
 use cerememory_core::error::CerememoryError;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -14,18 +16,20 @@ use chacha20poly1305::{
 };
 use sha2::{Digest, Sha256};
 
-/// Derive a 32-byte encryption key from a passphrase using SHA-256.
+/// Derive a 32-byte encryption key from a passphrase using Argon2id.
 ///
-/// Uses a fixed domain-separation prefix to produce a deterministic key
-/// from any passphrase string. The resulting key is further diversified
-/// with a per-encryption random salt inside [`encrypt()`].
+/// Uses Argon2id with 64 MiB memory, 3 iterations, and 1 lane for
+/// memory-hard key derivation. A fixed domain-separated salt ensures
+/// deterministic output for a given passphrase. The resulting key is
+/// further diversified with a per-encryption random salt inside [`encrypt()`].
 pub fn derive_key(passphrase: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"cerememory-archive-key-v1:");
-    hasher.update(passphrase.as_bytes());
-    let result = hasher.finalize();
+    let params = Params::new(65536, 3, 1, Some(32)).expect("valid Argon2 params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let salt = b"cerememory-archive-v2";
     let mut key = [0u8; 32];
-    key.copy_from_slice(&result);
+    argon2
+        .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+        .expect("Argon2 hash failed");
     key
 }
 

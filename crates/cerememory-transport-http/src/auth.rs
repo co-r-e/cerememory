@@ -80,6 +80,8 @@ where
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
+        let request_id = crate::request_id_from_request(&req);
+
         // If no keys configured, skip auth
         if self.state.api_keys.is_empty() {
             let mut inner = self.inner.clone();
@@ -99,14 +101,22 @@ where
                 let mut inner = self.inner.clone();
                 Box::pin(async move { inner.call(req).await })
             }
-            Some(_) => Box::pin(async { Ok(unauthorized_response("Invalid API key")) }),
-            None => Box::pin(async { Ok(unauthorized_response("Missing Authorization header")) }),
+            Some(_) => {
+                Box::pin(async move { Ok(unauthorized_response("Invalid API key", request_id)) })
+            }
+            None => Box::pin(async move {
+                Ok(unauthorized_response(
+                    "Missing Authorization header",
+                    request_id,
+                ))
+            }),
         }
     }
 }
 
-fn unauthorized_response(message: &str) -> Response {
-    let cmp_error = CMPError::new(CMPErrorCode::Unauthorized, message);
+fn unauthorized_response(message: &str, request_id: Option<uuid::Uuid>) -> Response {
+    let mut cmp_error = CMPError::new(CMPErrorCode::Unauthorized, message);
+    cmp_error.request_id = request_id;
     (StatusCode::UNAUTHORIZED, Json(cmp_error)).into_response()
 }
 

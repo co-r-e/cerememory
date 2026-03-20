@@ -12,7 +12,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use cerememory_core::error::CerememoryError;
-use cerememory_core::protocol;
+use cerememory_core::protocol::{
+    self, EXPORT_ERROR_MESSAGE, INTERNAL_ERROR_MESSAGE, SERIALIZATION_ERROR_MESSAGE,
+    STORAGE_ERROR_MESSAGE,
+};
 use cerememory_engine::CerememoryEngine;
 
 use crate::proto;
@@ -45,12 +48,24 @@ fn to_status(err: CerememoryError) -> Status {
         CerememoryError::VersionMismatch { .. } => Status::failed_precondition(err.to_string()),
         CerememoryError::WorkingMemoryFull => Status::resource_exhausted(err.to_string()),
         CerememoryError::DecayEngineBusy { .. } => Status::unavailable(err.to_string()),
-        CerememoryError::ConsolidationInProgress => Status::already_exists(err.to_string()),
+        CerememoryError::ConsolidationInProgress => Status::unavailable(err.to_string()),
         CerememoryError::ImportConflict(_) => Status::already_exists(err.to_string()),
-        CerememoryError::ExportFailed(_)
-        | CerememoryError::Storage(_)
-        | CerememoryError::Serialization(_)
-        | CerememoryError::Internal(_) => Status::internal(err.to_string()),
+        CerememoryError::Storage(ref msg) => {
+            tracing::warn!(error = %msg, "Storage error");
+            Status::internal(STORAGE_ERROR_MESSAGE)
+        }
+        CerememoryError::Serialization(ref msg) => {
+            tracing::warn!(error = %msg, "Serialization error");
+            Status::internal(SERIALIZATION_ERROR_MESSAGE)
+        }
+        CerememoryError::ExportFailed(ref msg) => {
+            tracing::warn!(error = %msg, "Export failed");
+            Status::internal(EXPORT_ERROR_MESSAGE)
+        }
+        CerememoryError::Internal(ref msg) => {
+            tracing::warn!(error = %msg, "Internal error");
+            Status::internal(INTERNAL_ERROR_MESSAGE)
+        }
         CerememoryError::Unauthorized(_) => Status::unauthenticated(err.to_string()),
         CerememoryError::RateLimited { .. } => Status::resource_exhausted(err.to_string()),
     }
@@ -66,8 +81,10 @@ fn from_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Status> 
 /// Serialize a value to JSON bytes.
 #[allow(clippy::result_large_err)]
 fn to_json<T: serde::Serialize>(val: &T) -> Result<Vec<u8>, Status> {
-    serde_json::to_vec(val)
-        .map_err(|e| Status::internal(format!("Failed to serialize response: {e}")))
+    serde_json::to_vec(val).map_err(|e| {
+        tracing::warn!(error = %e, "Failed to serialize gRPC response");
+        Status::internal(SERIALIZATION_ERROR_MESSAGE)
+    })
 }
 
 // ─── Service Implementation ──────────────────────────────────────────
@@ -730,6 +747,22 @@ mod tests {
 
         let err = resp.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn grpc_storage_error_status_is_sanitized() {
+        let status = to_status(CerememoryError::Storage("database path leaked".to_string()));
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), STORAGE_ERROR_MESSAGE);
+    }
+
+    #[test]
+    fn grpc_serialization_error_status_is_sanitized() {
+        let status = to_status(CerememoryError::Serialization(
+            "serde detail leaked".to_string(),
+        ));
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), SERIALIZATION_ERROR_MESSAGE);
     }
 
     #[tokio::test]
