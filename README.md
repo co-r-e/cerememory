@@ -9,6 +9,9 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/co-r-e/cerememory/releases">
+    <img src="https://img.shields.io/github/v/release/co-r-e/cerememory?label=version" alt="Version">
+  </a>
   <a href="https://github.com/co-r-e/cerememory/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
   </a>
@@ -37,6 +40,93 @@ Cerememory is an open-source memory architecture inspired by the human brain's m
 **It is LLM-agnostic.** A standardized protocol (the Cerememory Protocol, or CMP) allows any LLM to read from and write to the memory layer. Switch from one model to another; your memory persists.
 
 **It belongs to the user.** Memory data is local-first, fully exportable, and designed for user-controlled deployment. No vendor lock-in. No corporate surveillance of your cognitive history.
+
+---
+
+## Quick Start
+
+### Claude Code (MCP) — Recommended
+
+Cerememory integrates directly with [Claude Code](https://claude.com/claude-code) as an MCP server:
+
+```bash
+# Build the binary
+cargo build -p cerememory-cli --release
+
+# Add to Claude Code's MCP config (~/.claude/claude_desktop_config.json)
+{
+  "mcpServers": {
+    "cerememory": {
+      "command": "/path/to/cerememory",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Once connected, Claude Code can use 11 memory tools:
+
+| Tool | Description |
+|------|-------------|
+| `store` | Save a new memory |
+| `update` | Edit an existing memory by UUID |
+| `batch_store` | Save multiple memories at once |
+| `recall` | Search memories by query (or list recent if omitted) |
+| `timeline` | Browse memories by time period |
+| `associate` | Find connected memories via spreading activation |
+| `inspect` | View full details of a memory by UUID |
+| `forget` | Permanently delete memories by UUID |
+| `consolidate` | Migrate mature episodic memories to semantic store |
+| `export` | Export all memories to a CMA archive file |
+| `stats` | View system statistics and store counts |
+
+### HTTP Server
+
+```bash
+# Start the server (binds to 127.0.0.1:8420 by default)
+cargo run -p cerememory-cli -- serve
+
+# Or with custom options
+cargo run -p cerememory-cli -- serve --port 9000
+```
+
+Or run the published container:
+
+```bash
+docker run --rm -p 8420:8420 ghcr.io/co-r-e/cerememory:latest
+```
+
+### Python SDK
+
+```bash
+pip install cerememory
+```
+
+```python
+from cerememory import Client
+
+client = Client("http://localhost:8420")
+record_id = client.store("Had coffee with Alice at the park", store="episodic")
+results = client.recall("Alice", limit=5)
+client.forget(record_id, confirm=True)
+```
+
+### TypeScript SDK
+
+```bash
+npm install @cerememory/sdk
+```
+
+```typescript
+import { CerememoryClient } from "@cerememory/sdk";
+
+const client = new CerememoryClient("http://localhost:8420");
+const recordId = await client.store("Had coffee with Alice at the park", {
+  store: "episodic",
+});
+const results = await client.recall("Alice", { limit: 5 });
+await client.forget(recordId, { confirm: true });
+```
 
 ---
 
@@ -116,7 +206,63 @@ Recall supports two modes:
 - **Human mode**: Returns memories with fidelity-weighted noise applied (realistic)
 - **Perfect mode**: Returns original data with no degradation
 
+Three transport bindings are available:
+
+| Transport | Protocol | Use Case |
+|-----------|----------|----------|
+| **MCP** (stdio) | Model Context Protocol | Claude Code, MCP-compatible LLM tools |
+| **HTTP/REST** | JSON over HTTP | SDKs, web apps, microservices |
+| **gRPC** | Protobuf over HTTP/2 | High-throughput, low-latency integrations |
+
 See the [CMP Specification](docs/cmp-spec-v1.pdf) for the complete protocol definition.
+
+---
+
+## Configuration
+
+Copy the example and adjust:
+
+```bash
+cp cerememory.example.toml cerememory.toml
+```
+
+Key settings:
+
+```toml
+data_dir = "./data"
+
+[http]
+port = 8420
+bind_address = "127.0.0.1"  # localhost only. "0.0.0.0" for network access.
+
+[auth]
+enabled = false
+api_keys = []  # ["sk-key1", "sk-key2"]
+
+[llm]
+provider = "none"  # "openai", "claude", "gemini"
+# api_key = "sk-..."
+
+[log]
+level = "info"    # trace, debug, info, warn, error
+format = "pretty" # pretty, json
+```
+
+All settings can be overridden via environment variables with the `CEREMEMORY_` prefix (e.g., `CEREMEMORY_HTTP__PORT=9000`).
+
+---
+
+## Security
+
+Cerememory is designed with security as a default:
+
+- **Localhost-only by default**: HTTP and gRPC bind to `127.0.0.1`. Network access requires explicit `bind_address = "0.0.0.0"` configuration, which triggers a warning if auth is disabled.
+- **Bearer token authentication**: Optional API key auth with constant-time comparison. Keys are wrapped in `SecretString` at runtime to prevent accidental logging.
+- **Encrypted exports**: CMA archives support ChaCha20-Poly1305 AEAD encryption with Argon2id key derivation. Derived keys are zeroized after use.
+- **Request size limits**: 2 MB body limit on HTTP API routes. Batch operations capped at 1000 records. Image/audio recall cues validated against size limits.
+- **Sanitized error responses**: Internal storage paths and details are never exposed to clients. 503 responses include `Retry-After` headers.
+
+For HTTP TLS, use a reverse proxy (nginx, caddy) in front of the HTTP server. gRPC supports native TLS via cert/key configuration.
 
 ---
 
@@ -130,8 +276,10 @@ See the [CMP Specification](docs/cmp-spec-v1.pdf) for the complete protocol defi
 | Episodic Store | redb | ACID transactions, zero-copy reads |
 | Vector Search | hnsw_rs | Lightweight embedded HNSW index |
 | Full-Text Search | Tantivy | Rust-native Lucene equivalent |
+| Synchronization | parking_lot | Poison-free RwLock/Mutex (no panics on lock contention) |
 | Internal Serialization | MessagePack | Compact binary, schema-less |
 | Archive Format | SQLite (CMA) | Universal, inspectable, single-file |
+| Archive Encryption | ChaCha20-Poly1305 + Argon2id | AEAD with memory-hard KDF, key zeroization via `zeroize` |
 | Python SDK | httpx + Pydantic | Typed HTTP client for Python applications |
 | TypeScript SDK | TypeScript + fetch | Zero-dependency HTTP client for Node.js and browser runtimes |
 | Python Native Binding | PyO3 | Direct native integration without HTTP |
@@ -159,6 +307,7 @@ cerememory/
     cerememory-engine/            # Orchestrator
     cerememory-transport-http/    # HTTP/REST binding
     cerememory-transport-grpc/    # gRPC binding
+    cerememory-transport-mcp/     # MCP (Model Context Protocol) binding
     cerememory-archive/           # CMA export/import
     cerememory-cli/               # CLI tool + `cerememory` binary
     cerememory-config/            # Configuration management
@@ -193,54 +342,7 @@ cerememory/
 | **Phase 9: Native Bindings** | Done | PyO3 (Python) and napi-rs (TypeScript) native bindings |
 | **Phase 10: Integrations** | Done | LLM adapter integration tests |
 | **Phase 11: Encryption** | Done | Encrypted CMA export/import |
-
----
-
-## Quick Start
-
-The Python and TypeScript SDKs talk to the Cerememory HTTP server. Start a local server first:
-
-```bash
-cargo run -p cerememory-cli -- serve --port 8420
-```
-
-Or run the published container:
-
-```bash
-docker run --rm -p 8420:8420 ghcr.io/co-r-e/cerememory:latest
-```
-
-### Python
-
-```bash
-pip install cerememory
-```
-
-```python
-from cerememory import Client
-
-client = Client("http://localhost:8420")
-record_id = client.store("Had coffee with Alice at the park", store="episodic")
-results = client.recall("Alice", limit=5)
-client.forget(record_id, confirm=True)
-```
-
-### TypeScript
-
-```bash
-npm install @cerememory/sdk
-```
-
-```typescript
-import { CerememoryClient } from "@cerememory/sdk";
-
-const client = new CerememoryClient("http://localhost:8420");
-const recordId = await client.store("Had coffee with Alice at the park", {
-  store: "episodic",
-});
-const results = await client.recall("Alice", { limit: 5 });
-await client.forget(recordId, { confirm: true });
-```
+| **Phase 12: Best Practices** | Done | MCP UX overhaul, security hardening, reliability improvements |
 
 ---
 
