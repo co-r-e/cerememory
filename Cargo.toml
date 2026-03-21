@@ -97,7 +97,7 @@ subtle = "2"
 governor = "0.10"
 
 # LLM HTTP client
-reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "multipart"] }
 backoff = { version = "0.4", features = ["tokio"] }
 base64 = "0.22"
 
@@ -120,7 +120,7 @@ napi-build = "2"
 # Testing
 tempfile = "3"
 criterion = "0.5"
-wiremock = "=0.6.2"
+wiremock = "0.6"
 
 # Internal crates
 cerememory-core = { version = "0.2.0", path = "crates/cerememory-core" }
