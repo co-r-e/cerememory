@@ -70,7 +70,7 @@ pub fn encrypt(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, CerememoryEr
 
     // Generate random salt for per-encryption key diversification
     let mut salt = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
 
     let mut diversified = diversify_key(key, &salt);
     let cipher = ChaCha20Poly1305::new((&diversified).into());
@@ -78,7 +78,7 @@ pub fn encrypt(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, CerememoryEr
 
     // Generate random 12-byte nonce
     let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ciphertext = cipher
