@@ -74,7 +74,7 @@ impl PyCerememoryEngine {
             associations: None,
         };
 
-        py.allow_threads(|| {
+        py.detach(|| {
             let runtime = self.runtime()?;
             runtime
                 .block_on(self.engine.encode_store(req))
@@ -236,7 +236,7 @@ impl PyCerememoryEngine {
             recall_mode: mode,
         };
 
-        let resp = py.allow_threads(|| {
+        let resp = py.detach(|| {
             let runtime = self.runtime()?;
             runtime
                 .block_on(self.engine.recall_query(req))
@@ -273,7 +273,7 @@ impl PyCerememoryEngine {
             include_versions: false,
         };
 
-        let record = py.allow_threads(|| {
+        let record = py.detach(|| {
             let runtime = self.runtime()?;
             runtime
                 .block_on(self.engine.introspect_record(req))
@@ -315,7 +315,7 @@ impl PyCerememoryEngine {
             confirm,
         };
 
-        let deleted = py.allow_threads(|| {
+        let deleted = py.detach(|| {
             let runtime = self.runtime()?;
             runtime
                 .block_on(self.engine.lifecycle_forget(req))
@@ -330,7 +330,7 @@ impl PyCerememoryEngine {
     /// Returns:
     ///     StatsResponse with total records, per-store counts, fidelity, etc.
     fn stats(&self, py: Python<'_>) -> PyResult<PyStatsResponse> {
-        let resp = py.allow_threads(|| {
+        let resp = py.detach(|| {
             let runtime = self.runtime()?;
             runtime
                 .block_on(self.engine.introspect_stats())

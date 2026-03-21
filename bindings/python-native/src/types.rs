@@ -4,10 +4,10 @@
 //! getter properties to Python. This approach avoids duplicating every field
 //! as a PyO3 struct member and keeps the bridge layer thin.
 
+use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use pyo3::IntoPyObjectExt;
 
 use cerememory_core::error::CerememoryError;
 
@@ -43,7 +43,7 @@ pub fn to_py_err(err: CerememoryError) -> PyErr {
     }
 }
 
-// ─── serde_json::Value → PyObject helpers ──────────────────────────────
+// ─── serde_json::Value → Py<PyAny> helpers ──────────────────────────────
 
 /// Convert a `serde_json::Value` into a Python object.
 ///
@@ -53,7 +53,7 @@ pub fn to_py_err(err: CerememoryError) -> PyErr {
 /// - string → str
 /// - array  → list
 /// - object → dict
-pub fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<PyObject> {
+pub fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match val {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(b) => Ok((*b).into_py_any(py)?),
@@ -89,7 +89,7 @@ pub fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<PyO
 /// A memory record returned from the engine.
 ///
 /// Wraps the serialized JSON representation and exposes typed properties.
-#[pyclass(name = "MemoryRecord")]
+#[pyclass(name = "MemoryRecord", from_py_object)]
 #[derive(Clone)]
 pub struct PyMemoryRecord {
     inner: serde_json::Value,
@@ -159,7 +159,7 @@ impl PyMemoryRecord {
 
     /// Fidelity state as a Python dict.
     #[getter]
-    fn fidelity(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn fidelity(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self
             .inner
             .get("fidelity")
@@ -170,7 +170,7 @@ impl PyMemoryRecord {
 
     /// Emotion vector as a Python dict.
     #[getter]
-    fn emotion(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn emotion(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self
             .inner
             .get("emotion")
@@ -181,7 +181,7 @@ impl PyMemoryRecord {
 
     /// Content object as a Python dict.
     #[getter]
-    fn content(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn content(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self
             .inner
             .get("content")
@@ -192,7 +192,7 @@ impl PyMemoryRecord {
 
     /// Associations list as Python list of dicts.
     #[getter]
-    fn associations(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn associations(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self
             .inner
             .get("associations")
@@ -203,7 +203,7 @@ impl PyMemoryRecord {
 
     /// Metadata dict.
     #[getter]
-    fn metadata(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn metadata(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self
             .inner
             .get("metadata")
@@ -240,7 +240,7 @@ impl PyMemoryRecord {
     }
 
     /// Return the full record as a Python dict.
-    fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         json_value_to_py(py, &self.inner)
     }
 
@@ -254,7 +254,7 @@ impl PyMemoryRecord {
 // ─── PyEncodeStoreResponse ─────────────────────────────────────────────
 
 /// Response from an encode/store operation.
-#[pyclass(name = "EncodeStoreResponse")]
+#[pyclass(name = "EncodeStoreResponse", from_py_object)]
 #[derive(Clone)]
 pub struct PyEncodeStoreResponse {
     pub record_id: String,
@@ -290,7 +290,7 @@ impl PyEncodeStoreResponse {
     }
 
     /// Return as a Python dict.
-    fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         dict.set_item("record_id", &self.record_id)?;
         dict.set_item("store", &self.store)?;
@@ -310,7 +310,7 @@ impl PyEncodeStoreResponse {
 // ─── PyRecallQueryResponse ─────────────────────────────────────────────
 
 /// Response from a recall/query operation.
-#[pyclass(name = "RecallQueryResponse")]
+#[pyclass(name = "RecallQueryResponse", from_py_object)]
 #[derive(Clone)]
 pub struct PyRecallQueryResponse {
     inner: serde_json::Value,
@@ -326,7 +326,7 @@ impl PyRecallQueryResponse {
 impl PyRecallQueryResponse {
     /// The recalled memories as a list of dicts.
     #[getter]
-    fn memories(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn memories(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self
             .inner
             .get("memories")
@@ -345,7 +345,7 @@ impl PyRecallQueryResponse {
     }
 
     /// Return the full response as a Python dict.
-    fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         json_value_to_py(py, &self.inner)
     }
 
@@ -364,7 +364,7 @@ impl PyRecallQueryResponse {
 // ─── PyStatsResponse ───────────────────────────────────────────────────
 
 /// Response from an introspect/stats operation.
-#[pyclass(name = "StatsResponse")]
+#[pyclass(name = "StatsResponse", from_py_object)]
 #[derive(Clone)]
 pub struct PyStatsResponse {
     inner: serde_json::Value,
@@ -389,7 +389,7 @@ impl PyStatsResponse {
 
     /// Record counts per store as a Python dict.
     #[getter]
-    fn records_by_store(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn records_by_store(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self
             .inner
             .get("records_by_store")
@@ -418,7 +418,7 @@ impl PyStatsResponse {
 
     /// Average fidelity per store as a Python dict.
     #[getter]
-    fn avg_fidelity_by_store(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn avg_fidelity_by_store(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self
             .inner
             .get("avg_fidelity_by_store")
@@ -437,7 +437,7 @@ impl PyStatsResponse {
     }
 
     /// Return the full response as a Python dict.
-    fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         json_value_to_py(py, &self.inner)
     }
 
