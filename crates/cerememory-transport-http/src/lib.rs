@@ -6,7 +6,7 @@
 //! |--------|-----------------------------|-------------------------|
 //! | POST   | /v1/encode                  | encode.store            |
 //! | POST   | /v1/encode/batch            | encode.batch            |
-//! | PATCH  | /v1/encode/:record_id      | encode.update           |
+//! | PATCH  | /v1/encode/{record_id}     | encode.update           |
 //! | POST   | /v1/recall/query            | recall.query            |
 //! | POST   | /v1/recall/associate/{id}   | recall.associate        |
 //! | POST   | /v1/lifecycle/consolidate   | lifecycle.consolidate   |
@@ -18,7 +18,6 @@
 
 use std::{convert::Infallible, sync::Arc};
 
-use async_trait::async_trait;
 use axum::{
     extract::{
         rejection::{JsonRejection, PathRejection},
@@ -165,10 +164,10 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
         // Encode
         .route("/v1/encode", post(encode_store))
         .route("/v1/encode/batch", post(encode_batch))
-        .route("/v1/encode/:record_id", patch(encode_update))
+        .route("/v1/encode/{record_id}", patch(encode_update))
         // Recall
         .route("/v1/recall/query", post(recall_query))
-        .route("/v1/recall/associate/:record_id", post(recall_associate))
+        .route("/v1/recall/associate/{record_id}", post(recall_associate))
         .route("/v1/recall/timeline", post(recall_timeline))
         .route("/v1/recall/graph", post(recall_graph))
         // Lifecycle
@@ -178,7 +177,7 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
         .route("/v1/lifecycle/forget", delete(lifecycle_forget))
         // Introspect
         .route("/v1/introspect/stats", get(introspect_stats))
-        .route("/v1/introspect/record/:record_id", get(introspect_record))
+        .route("/v1/introspect/record/{record_id}", get(introspect_record))
         .route(
             "/v1/introspect/decay-forecast",
             post(introspect_decay_forecast),
@@ -302,7 +301,6 @@ impl From<CerememoryError> for AppError {
 /// JSON extractor that converts deserialization errors to CMPError.
 struct AppJson<T>(T);
 
-#[async_trait]
 impl<S, T> FromRequest<S> for AppJson<T>
 where
     axum::Json<T>: FromRequest<S, Rejection = JsonRejection>,
@@ -326,7 +324,6 @@ where
 /// Path extractor that converts parse errors to CMPError.
 struct AppPath<T>(T);
 
-#[async_trait]
 impl<S, T> FromRequestParts<S> for AppPath<T>
 where
     axum::extract::Path<T>: FromRequestParts<S, Rejection = PathRejection>,
@@ -352,7 +349,6 @@ where
 
 struct MaybeRequestId(Option<Uuid>);
 
-#[async_trait]
 impl<S> FromRequestParts<S> for MaybeRequestId
 where
     S: Send + Sync,

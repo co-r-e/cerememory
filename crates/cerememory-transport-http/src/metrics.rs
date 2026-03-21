@@ -1,7 +1,7 @@
 //! Prometheus metrics middleware and endpoint.
 //!
 //! Records HTTP request duration and count per method/path/status.
-//! Path labels use the route template (e.g., `/v1/encode/:record_id`)
+//! Path labels use the route template (e.g., `/v1/encode/{record_id}`)
 //! to avoid unbounded cardinality from dynamic path segments.
 
 use axum::{body::Body, extract::MatchedPath, http::Request, response::Response};

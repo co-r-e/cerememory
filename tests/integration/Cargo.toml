@@ -44,7 +44,7 @@ tokio = { version = "1", features = ["full", "test-util"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v7"] }
 tower = { version = "0.5", features = ["util"] }
-axum = { version = "0.7", features = ["json"] }
+axum = { version = "0.8", features = ["json"] }
 http-body-util = "0.1"
 tempfile = "3"
 tonic = "0.14"

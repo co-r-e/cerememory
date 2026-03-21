@@ -57,7 +57,7 @@ redb = "2"
 tantivy = "0.25"
 
 # Networking
-axum = "0.7"
+axum = "0.8"
 tonic = { version = "0.14", features = ["tls-ring"] }
 prost = "0.14"
 tonic-prost = "0.14"
@@ -94,7 +94,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 # HTTP middleware
 tower-http = { version = "0.6", features = ["auth", "cors", "trace", "request-id", "util"] }
 subtle = "2"
-governor = "0.7"
+governor = "0.10"
 
 # LLM HTTP client
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], default-features = false }
