@@ -565,7 +565,7 @@ async fn grpc_tls_server_starts_with_self_signed_cert() {
     // Generate self-signed cert for localhost
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
     let cert_pem = cert.cert.pem().into_bytes();
-    let key_pem = cert.key_pair.serialize_pem().into_bytes();
+    let key_pem = cert.signing_key.serialize_pem().into_bytes();
 
     let engine = in_memory_engine();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();

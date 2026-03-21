@@ -53,7 +53,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tokio-util = { version = "0.7", features = ["rt"] }
 metrics-exporter-prometheus = "0.16"
-rcgen = "0.13"
+rcgen = "0.14"
 rustls = { version = "0.23", features = ["ring"] }
 cerememory-adapter-openai = { path = "../../adapters/adapter-openai" }
 cerememory-adapter-claude = { path = "../../adapters/adapter-claude" }
