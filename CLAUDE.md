@@ -7,7 +7,9 @@ All code, comments, documentation, commit messages, and PR descriptions **must b
 ## Build & Test
 
 ```bash
-cargo test --workspace          # Run all tests
+scripts/test-rust-cool.sh -p cerememory-engine --lib  # Preferred during iteration
+scripts/test-rust-cool.sh -p cerememory-integration-tests --test phase3
+scripts/test-rust-workspace-cool.sh                   # Run the full suite before handoff
 cargo clippy --workspace --tests -- -D warnings  # Lint
 cargo fmt --all -- --check      # Format check
 ```

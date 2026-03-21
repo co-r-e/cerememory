@@ -16,7 +16,7 @@ Thank you for your interest in Cerememory. This project aims to build an open st
 1. Fork the repository
 2. Create a feature branch from `main` (`git checkout -b feature/your-feature`)
 3. Make your changes
-4. Ensure all tests pass (`cargo test --workspace`)
+4. Run the relevant low-CPU targeted test command while iterating, then run the full workspace sweep before opening a PR
 5. Ensure code is formatted (`cargo fmt --all`)
 6. Ensure clippy passes (`cargo clippy --workspace -- -D warnings`)
 7. Write or update tests for your changes
@@ -100,7 +100,12 @@ cargo build --workspace
 ### Test
 
 ```bash
-cargo test --workspace
+# Routine development: prefer a targeted suite
+scripts/test-rust-cool.sh -p cerememory-engine --lib
+scripts/test-rust-cool.sh -p cerememory-integration-tests --test phase3
+
+# Before opening a PR: run the full workspace sweep
+scripts/test-rust-workspace-cool.sh
 ```
 
 ### Format and Lint
