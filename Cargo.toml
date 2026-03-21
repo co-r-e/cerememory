@@ -113,8 +113,8 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 
 # Node.js native bindings
-napi = { version = "2", features = ["async", "serde-json"] }
-napi-derive = "2"
+napi = { version = "3", features = ["async", "serde-json"] }
+napi-derive = "3"
 napi-build = "2"
 
 # Testing
