@@ -115,6 +115,7 @@ async fn emotional_store_persistence() {
                     ..Default::default()
                 }),
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -348,6 +349,7 @@ async fn grpc_encode_recall_cycle() {
         store: Some(StoreType::Episodic),
         emotion: None,
         context: None,
+        metadata: None,
         associations: None,
     };
 
