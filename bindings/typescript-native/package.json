@@ -2,8 +2,14 @@
   "name": "@cerememory/native",
   "version": "0.1.0",
   "description": "Native Node.js bindings for Cerememory memory engine",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
   "napi": {
     "name": "cerememory-native",
     "triples": {}

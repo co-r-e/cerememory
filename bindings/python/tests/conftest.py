@@ -93,6 +93,7 @@ def make_recall_query_response(
     record_id: UUID = SAMPLE_RECORD_ID,
     text: str = "Hello, world!",
     total_candidates: int = 1,
+    query_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record = make_memory_record_json(record_id=record_id, text=text)
     return {
@@ -105,6 +106,7 @@ def make_recall_query_response(
             }
         ],
         "activation_trace": None,
+        "query_metadata": query_metadata,
         "total_candidates": total_candidates,
     }
 
@@ -129,12 +131,15 @@ def make_cmp_error(
     message: str = "Record not found",
     details: Any = None,
     retry_after: Any = None,
+    request_id: Any = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {"code": code, "message": message}
     if details is not None:
         result["details"] = details
     if retry_after is not None:
         result["retry_after"] = retry_after
+    if request_id is not None:
+        result["request_id"] = request_id
     return result
 
 

@@ -70,6 +70,7 @@ export type {
   RecalledMemory,
   ActivationNode,
   ActivationTrace,
+  QueryMetadata,
   RecallQueryResponse,
   RecallAssociateRequest,
   RecallAssociateResponse,

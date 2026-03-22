@@ -63,9 +63,15 @@ impl CerememoryEngine {
     /// @param text - The text content to store.
     /// @param store - Optional store type: "episodic", "semantic",
     ///   "procedural", "emotional", or "working". Auto-routed if omitted.
+    /// @param metadata - Optional JSON metadata to attach to the record.
     /// @returns The UUID of the newly created record.
     #[napi]
-    pub fn store(&self, text: String, store: Option<String>) -> napi::Result<String> {
+    pub fn store(
+        &self,
+        text: String,
+        store: Option<String>,
+        metadata: Option<serde_json::Value>,
+    ) -> napi::Result<String> {
         let store_type = match store {
             Some(ref s) => Some(parse_store_type(s)?),
             None => None,
@@ -85,6 +91,7 @@ impl CerememoryEngine {
             store: store_type,
             emotion: None,
             context: None,
+            metadata,
             associations: None,
         };
 
@@ -100,10 +107,18 @@ impl CerememoryEngine {
     ///
     /// @param query - The text cue for memory retrieval.
     /// @param limit - Maximum number of memories to return (default: 10).
+    /// @param reconsolidate - Whether to reconsolidate recalled memories.
+    /// @param activation_depth - Activation depth for spreading activation.
     /// @returns JSON object with `memories`, `total_candidates`, and
     ///   optional `activation_trace`.
     #[napi]
-    pub fn recall(&self, query: String, limit: Option<u32>) -> napi::Result<serde_json::Value> {
+    pub fn recall(
+        &self,
+        query: String,
+        limit: Option<u32>,
+        reconsolidate: Option<bool>,
+        activation_depth: Option<u32>,
+    ) -> napi::Result<serde_json::Value> {
         let req = RecallQueryRequest {
             header: None,
             cue: RecallCue {
@@ -114,8 +129,8 @@ impl CerememoryEngine {
             limit: limit.unwrap_or(10),
             min_fidelity: None,
             include_decayed: false,
-            reconsolidate: true,
-            activation_depth: 2,
+            reconsolidate: reconsolidate.unwrap_or(true),
+            activation_depth: activation_depth.unwrap_or(2),
             recall_mode: RecallMode::Human,
         };
 

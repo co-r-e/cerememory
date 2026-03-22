@@ -13,7 +13,7 @@ Usage::
     print(results.memories)
 """
 
-from cerememory_native.cerememory_native import (
+from .cerememory_native import (
     PyCerememoryEngine as Engine,
     PyMemoryRecord as MemoryRecord,
     PyEncodeStoreResponse as EncodeStoreResponse,

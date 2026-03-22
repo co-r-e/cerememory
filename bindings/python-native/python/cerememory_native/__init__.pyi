@@ -51,6 +51,8 @@ class RecallQueryResponse:
     @property
     def memories(self) -> list[dict[str, Any]]: ...
     @property
+    def query_metadata(self) -> dict[str, Any] | None: ...
+    @property
     def total_candidates(self) -> int: ...
     def to_dict(self) -> dict[str, Any]: ...
 
@@ -84,11 +86,19 @@ class Engine:
     """
 
     def __init__(self, config: Optional[dict[str, Any]] = None) -> None: ...
-    def store(self, text: str, store: Optional[str] = None) -> str:
+    def store(
+        self,
+        text: str,
+        store: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> str:
         """Store a text memory. Returns the record UUID string."""
         ...
     def store_full(
-        self, text: str, store: Optional[str] = None
+        self,
+        text: str,
+        store: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> EncodeStoreResponse:
         """Store a text memory. Returns full EncodeStoreResponse."""
         ...
@@ -99,6 +109,8 @@ class Engine:
         stores: Optional[list[str]] = None,
         min_fidelity: Optional[float] = None,
         recall_mode: Optional[str] = None,
+        reconsolidate: bool = True,
+        activation_depth: int = 2,
     ) -> RecallQueryResponse:
         """Recall memories matching a text query."""
         ...

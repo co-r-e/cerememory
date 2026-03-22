@@ -223,6 +223,7 @@ class EncodeStoreRequest(BaseModel):
     store: StoreType | None = None
     emotion: EmotionVector | None = None
     context: EncodeContext | None = None
+    metadata: dict[str, Any] | None = None
     associations: list[ManualAssociation] | None = None
 
 
@@ -344,11 +345,20 @@ class ActivationTrace(BaseModel):
     activations: list[ActivationNode]
 
 
+class QueryMetadata(BaseModel):
+    """Metadata about a recall query execution."""
+
+    total_records_scanned: int
+    stores_searched: list[StoreType]
+    fidelity_filtered: int
+
+
 class RecallQueryResponse(BaseModel):
     """Response from ``POST /v1/recall/query``."""
 
     memories: list[RecalledMemory]
     activation_trace: ActivationTrace | None = None
+    query_metadata: QueryMetadata | None = None
     total_candidates: int
 
 

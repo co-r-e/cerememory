@@ -31,6 +31,7 @@ use axum::{
 use cerememory_core::error::CerememoryError;
 use cerememory_core::protocol::*;
 use cerememory_engine::CerememoryEngine;
+use tower_http::cors::AllowOrigin;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{
     MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
@@ -51,8 +52,20 @@ pub use rate_limit::RateLimitLayer;
 pub struct HttpMiddlewareConfig {
     /// API keys for Bearer token authentication.
     pub api_keys: Vec<String>,
-    /// Allowed CORS origins (empty = allow all).
+
+    /// Whether the API key layer should be active.
+    /// When false, configured keys are ignored.
+    pub auth_enabled: bool,
+
+    /// Allowed CORS origins (empty = emit no CORS headers).
     pub cors_origins: Vec<String>,
+
+    /// Trusted proxy CIDRs for forwarded client IP extraction.
+    pub trusted_proxy_cidrs: Vec<String>,
+
+    /// Whether to expose `/metrics`.
+    pub metrics_enabled: bool,
+
     /// Rate limit: requests per second.
     pub rate_limit_rps: u64,
     /// Rate limit: burst size.
@@ -65,7 +78,10 @@ impl Default for HttpMiddlewareConfig {
     fn default() -> Self {
         Self {
             api_keys: Vec::new(),
+            auth_enabled: true,
             cors_origins: Vec::new(),
+            trusted_proxy_cidrs: Vec::new(),
+            metrics_enabled: false,
             rate_limit_rps: 100,
             rate_limit_burst: 50,
             prometheus_handle: None,
@@ -108,6 +124,7 @@ pub fn router(engine: Arc<CerememoryEngine>, api_keys: Vec<String>) -> Router {
         engine,
         HttpMiddlewareConfig {
             api_keys,
+            auth_enabled: true,
             ..Default::default()
         },
     )
@@ -115,7 +132,12 @@ pub fn router(engine: Arc<CerememoryEngine>, api_keys: Vec<String>) -> Router {
 
 /// Create the Axum router with full middleware configuration.
 pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareConfig) -> Router {
-    let auth_layer = ApiKeyAuthLayer::new(config.api_keys);
+    let effective_api_keys = if config.auth_enabled {
+        config.api_keys
+    } else {
+        Vec::new()
+    };
+    let auth_layer = ApiKeyAuthLayer::new(effective_api_keys);
 
     // Build CORS layer
     let expose_headers: Vec<axum::http::HeaderName> = vec![
@@ -123,41 +145,66 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
         "retry-after".parse().unwrap(),
     ];
     let cors = if config.cors_origins.is_empty() {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-            .expose_headers(expose_headers)
+        None
     } else {
-        let origins: Vec<_> = config
+        let origins: Vec<axum::http::HeaderValue> = config
             .cors_origins
             .iter()
             .filter_map(|o| o.parse().ok())
             .collect();
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods(Any)
-            .allow_headers(Any)
-            .expose_headers(expose_headers)
+        if origins.is_empty() {
+            None
+        } else if origins
+            .iter()
+            .any(|origin: &axum::http::HeaderValue| origin.as_bytes() == b"*")
+        {
+            Some(
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::any())
+                    .allow_methods(Any)
+                    .allow_headers(Any)
+                    .expose_headers(expose_headers),
+            )
+        } else {
+            Some(
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::list(origins))
+                    .allow_methods(Any)
+                    .allow_headers(Any)
+                    .expose_headers(expose_headers),
+            )
+        }
     };
 
-    let rate_limit = RateLimitLayer::new(config.rate_limit_rps, config.rate_limit_burst);
+    let rate_limit = RateLimitLayer::new(
+        config.rate_limit_rps,
+        config.rate_limit_burst,
+        config.trusted_proxy_cidrs,
+    );
 
-    // Public routes — no auth, no rate limit (health + metrics)
-    let mut public_routes = Router::new()
+    // Public routes — no auth, no rate limit
+    let public_routes = Router::new()
         .route("/health", get(health))
         .route("/readiness", get(readiness))
         .with_state(Arc::clone(&engine));
 
-    if let Some(handle) = config.prometheus_handle {
-        public_routes = public_routes.route(
-            "/metrics",
-            get(move || {
-                let h = handle.clone();
-                async move { h.render() }
-            }),
-        );
-    }
+    let metrics_routes = if config.metrics_enabled {
+        config.prometheus_handle.map(|handle| {
+            Router::new()
+                .route(
+                    "/metrics",
+                    get(move || {
+                        let h = handle.clone();
+                        async move { h.render() }
+                    }),
+                )
+                .with_state(Arc::clone(&engine))
+                .layer(rate_limit.clone())
+                .layer(auth_layer.clone())
+        })
+    } else {
+        None
+    };
 
     // API routes — behind auth + middleware stack
     let api_routes = Router::new()
@@ -189,9 +236,20 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)); // 2 MB
 
     // Merge and apply global middleware (metrics, tracing, request-id, CORS)
-    public_routes
-        .merge(api_routes)
-        .layer(cors)
+    let merged = public_routes.merge(api_routes);
+    let merged = if let Some(metrics_routes) = metrics_routes {
+        merged.merge(metrics_routes)
+    } else {
+        merged
+    };
+
+    let merged = if let Some(cors) = cors {
+        merged.layer(cors)
+    } else {
+        merged
+    };
+
+    merged
         .layer(MetricsLayer)
         .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::x_request_id())
@@ -874,6 +932,54 @@ mod tests {
         assert!(json["request_id"].is_string());
     }
 
+    #[tokio::test]
+    async fn auth_disabled_ignores_configured_keys() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                api_keys: vec!["secret".to_string()],
+                auth_enabled: false,
+                ..Default::default()
+            },
+        );
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/introspect/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cors_disabled_emits_no_cors_headers() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                cors_origins: vec![],
+                ..Default::default()
+            },
+        );
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!resp.headers().contains_key("access-control-allow-origin"));
+    }
+
     // ─── Metrics tests ───
 
     #[tokio::test]
@@ -885,12 +991,14 @@ mod tests {
         let app = router_with_config(
             engine,
             HttpMiddlewareConfig {
+                metrics_enabled: true,
                 prometheus_handle: Some(handle),
                 ..Default::default()
             },
         );
 
         let resp = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/metrics")
@@ -903,7 +1011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_endpoint_bypasses_auth() {
+    async fn metrics_endpoint_requires_auth_when_enabled() {
         let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
         let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
             .build_recorder()
@@ -912,16 +1020,30 @@ mod tests {
             engine,
             HttpMiddlewareConfig {
                 api_keys: vec!["secret".to_string()],
+                metrics_enabled: true,
                 prometheus_handle: Some(handle),
                 ..Default::default()
             },
         );
 
-        // /metrics should not require auth
         let resp = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .header("Authorization", "Bearer secret")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -931,11 +1053,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_endpoint_rate_limited_when_enabled() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .build_recorder()
+            .handle();
+        let app = router_with_config(
+            engine,
+            HttpMiddlewareConfig {
+                api_keys: vec!["secret".to_string()],
+                metrics_enabled: true,
+                rate_limit_rps: 1,
+                rate_limit_burst: 1,
+                prometheus_handle: Some(handle),
+                ..Default::default()
+            },
+        );
+
+        let req = || {
+            axum::http::Request::builder()
+                .uri("/metrics")
+                .header("Authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(req()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app.oneshot(req()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
     async fn metrics_not_available_when_handle_absent() {
         let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
         let app = router_with_config(
             engine,
             HttpMiddlewareConfig {
+                metrics_enabled: true,
                 prometheus_handle: None,
                 ..Default::default()
             },

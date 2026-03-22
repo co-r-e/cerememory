@@ -28,10 +28,12 @@ from cerememory.types import (
     MemoryRecord,
     Modality,
     ReadinessResponse,
+    QueryMetadata,
     RecallCue,
     RecallGraphResponse,
     RecallMode,
     RecallQueryRequest,
+    RecallQueryResponse,
     SetModeRequest,
     StatsResponse,
     StoreType,
@@ -272,10 +274,12 @@ class TestEncodeRequests:
             ),
             store=StoreType.SEMANTIC,
             emotion=EmotionVector(joy=0.5),
+            metadata={"topic": "demo"},
         )
         dumped = req.model_dump(mode="json", exclude_none=True)
         assert dumped["store"] == "semantic"
         assert dumped["emotion"]["joy"] == 0.5
+        assert dumped["metadata"]["topic"] == "demo"
 
     def test_encode_store_response(self):
         data = {
@@ -316,6 +320,25 @@ class TestRecallRequests:
         cue = RecallCue(embedding=[0.1, 0.2, 0.3])
         dumped = cue.model_dump(mode="json", exclude_none=True)
         assert dumped["embedding"] == [0.1, 0.2, 0.3]
+
+    def test_recall_query_response_query_metadata(self):
+        data = {
+            "memories": [],
+            "activation_trace": None,
+            "query_metadata": {
+                "total_records_scanned": 7,
+                "stores_searched": ["episodic", "semantic"],
+                "fidelity_filtered": 2,
+            },
+            "total_candidates": 0,
+        }
+        resp = RecallQueryResponse.model_validate(data)
+        assert isinstance(resp.query_metadata, QueryMetadata)
+        assert resp.query_metadata.total_records_scanned == 7
+        assert resp.query_metadata.stores_searched == [
+            StoreType.EPISODIC,
+            StoreType.SEMANTIC,
+        ]
 
 
 class TestLifecycleRequests:

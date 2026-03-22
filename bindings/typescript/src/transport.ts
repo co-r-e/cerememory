@@ -25,8 +25,11 @@ export interface TransportConfig {
   /** Request timeout in milliseconds. Default: 30000 (30s). */
   timeoutMs?: number;
 
-  /** Maximum number of retries for retryable errors. Default: 3. */
+  /** Maximum number of retries for retryable errors. Default: 0 (opt-in). */
   maxRetries?: number;
+
+  /** When true, retries may also apply to mutating requests. Default: false. */
+  retryMutatingRequests?: boolean;
 
   /** Base delay for exponential backoff in milliseconds. Default: 500. */
   retryBaseDelayMs?: number;
@@ -42,7 +45,7 @@ export interface TransportConfig {
 }
 
 /** HTTP method type. */
-type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+type HttpMethod = "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /** Result of a transport request. */
 export interface TransportResponse<T> {
@@ -57,6 +60,7 @@ interface ResolvedConfig {
   apiKey: string | undefined;
   timeoutMs: number;
   maxRetries: number;
+  retryMutatingRequests: boolean;
   retryBaseDelayMs: number;
   fetchFn: typeof globalThis.fetch;
   headers: Record<string, string>;
@@ -73,7 +77,8 @@ function resolveConfig(config: TransportConfig): ResolvedConfig {
     baseUrl,
     apiKey: config.apiKey,
     timeoutMs: config.timeoutMs ?? 30_000,
-    maxRetries: config.maxRetries ?? 3,
+    maxRetries: config.maxRetries ?? 0,
+    retryMutatingRequests: config.retryMutatingRequests ?? false,
     retryBaseDelayMs: config.retryBaseDelayMs ?? 500,
     fetchFn: config.fetch ?? globalThis.fetch,
     headers: config.headers ?? {},
@@ -86,6 +91,13 @@ function resolveConfig(config: TransportConfig): ResolvedConfig {
  */
 function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
+}
+
+function canRetryMethod(
+  method: HttpMethod,
+  retryMutatingRequests: boolean,
+): boolean {
+  return method === "GET" || method === "HEAD" || retryMutatingRequests;
 }
 
 /**
@@ -198,7 +210,11 @@ export class Transport {
         const error = await this.parseErrorResponse(response);
 
         // Check if retryable and we have attempts remaining
-        if (isRetryableStatus(response.status) && attempt < maxAttempts - 1) {
+        if (
+          isRetryableStatus(response.status) &&
+          canRetryMethod(method, this.config.retryMutatingRequests) &&
+          attempt < maxAttempts - 1
+        ) {
           lastError = error;
           const delay = this.getRetryDelay(error, attempt);
           await sleep(delay);
@@ -210,7 +226,11 @@ export class Transport {
       } catch (err) {
         // If it's already a CerememoryError, check retryability
         if (err instanceof CerememoryError) {
-          if (err.isRetryable && attempt < maxAttempts - 1) {
+          if (
+            err.isRetryable &&
+            canRetryMethod(method, this.config.retryMutatingRequests) &&
+            attempt < maxAttempts - 1
+          ) {
             lastError = err;
             const delay = this.getRetryDelay(err, attempt);
             await sleep(delay);
@@ -222,7 +242,10 @@ export class Transport {
         // Network/timeout errors
         const wrappedError = this.wrapFetchError(err);
 
-        if (attempt < maxAttempts - 1) {
+        if (
+          canRetryMethod(method, this.config.retryMutatingRequests) &&
+          attempt < maxAttempts - 1
+        ) {
           lastError = wrappedError;
           await sleep(retryDelay(attempt, this.config.retryBaseDelayMs));
           continue;

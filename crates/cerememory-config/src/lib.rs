@@ -55,8 +55,14 @@ pub struct HttpConfig {
     /// Bind address (default: "127.0.0.1"). Use "0.0.0.0" for network-wide access.
     pub bind_address: String,
 
-    /// Allowed CORS origins (empty = allow all).
+    /// Allowed CORS origins (empty = emit no CORS headers).
     pub cors_origins: Vec<String>,
+
+    /// Trusted proxy CIDRs for forwarded client IP extraction.
+    pub trusted_proxy_cidrs: Vec<String>,
+
+    /// Enable Prometheus metrics endpoint.
+    pub metrics_enabled: bool,
 }
 
 /// gRPC server settings.
@@ -213,6 +219,8 @@ impl Default for HttpConfig {
             port: 8420,
             bind_address: "127.0.0.1".to_string(),
             cors_origins: Vec::new(),
+            trusted_proxy_cidrs: Vec::new(),
+            metrics_enabled: false,
         }
     }
 }
@@ -279,11 +287,14 @@ impl ServerConfig {
         // Special handling: CEREMEMORY_AUTH_API_KEYS as comma-separated string
         // (figment's env provider can't deserialize Vec<String> from a single env var)
         if let Ok(keys_str) = std::env::var("CEREMEMORY_AUTH_API_KEYS") {
-            config.auth.api_keys_raw = keys_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            config.auth.api_keys_raw = keys_str.split(',').map(|s| s.trim().to_string()).collect();
+        }
+
+        if let Ok(cidrs_str) = std::env::var("CEREMEMORY_HTTP__TRUSTED_PROXY_CIDRS")
+            .or_else(|_| std::env::var("CEREMEMORY_HTTP_TRUSTED_PROXY_CIDRS"))
+        {
+            config.http.trusted_proxy_cidrs =
+                cidrs_str.split(',').map(|s| s.trim().to_string()).collect();
         }
 
         // Note: CEREMEMORY_LLM__API_KEY is handled by figment's env provider.
@@ -323,11 +334,31 @@ impl ServerConfig {
             _ => {}
         }
 
+        if self
+            .auth
+            .api_keys_raw
+            .iter()
+            .any(|key| key.trim().is_empty())
+        {
+            return Err(
+                "auth.api_keys must not contain blank values. Remove empty entries or whitespace-only keys.".to_string(),
+            );
+        }
+
         if self.auth.enabled && self.auth.api_keys_raw.is_empty() {
             return Err(
                 "Auth is enabled but no API keys are configured. Add keys to [auth].api_keys or set CEREMEMORY_AUTH_API_KEYS env var."
                     .to_string(),
             );
+        }
+
+        for (idx, cidr) in self.http.trusted_proxy_cidrs.iter().enumerate() {
+            validate_cidr(cidr).map_err(|msg| {
+                format!(
+                    "Invalid http.trusted_proxy_cidrs[{}] '{}': {}",
+                    idx, cidr, msg
+                )
+            })?;
         }
 
         if self.rate_limit.requests_per_second == 0 {
@@ -393,6 +424,31 @@ impl ServerConfig {
     }
 }
 
+fn validate_cidr(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("must not be blank".to_string());
+    }
+
+    let (addr, prefix) = value
+        .split_once('/')
+        .ok_or_else(|| "must be in CIDR form like 10.0.0.0/8".to_string())?;
+
+    let prefix: u8 = prefix
+        .parse()
+        .map_err(|_| "prefix length must be a valid integer".to_string())?;
+
+    match addr
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| "network address must be a valid IP address".to_string())?
+    {
+        std::net::IpAddr::V4(_) if prefix <= 32 => Ok(()),
+        std::net::IpAddr::V6(_) if prefix <= 128 => Ok(()),
+        std::net::IpAddr::V4(_) => Err("IPv4 prefix length must be <= 32".to_string()),
+        std::net::IpAddr::V6(_) => Err("IPv6 prefix length must be <= 128".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +462,9 @@ mod tests {
         assert_eq!(config.http.port, 8420);
         assert_eq!(config.data_dir, "./data");
         assert!(!config.auth.enabled);
+        assert!(config.http.cors_origins.is_empty());
+        assert!(config.http.trusted_proxy_cidrs.is_empty());
+        assert!(!config.http.metrics_enabled);
     }
 
     #[test]
@@ -517,6 +576,20 @@ port = 9999
     fn validate_catches_auth_no_keys() {
         let mut config = ServerConfig::default();
         config.auth.enabled = true;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_blank_api_keys() {
+        let mut config = ServerConfig::default();
+        config.auth.api_keys_raw = vec!["   ".to_string()];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_invalid_trusted_proxy_cidr() {
+        let mut config = ServerConfig::default();
+        config.http.trusted_proxy_cidrs = vec!["not-a-cidr".to_string()];
         assert!(config.validate().is_err());
     }
 

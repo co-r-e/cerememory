@@ -1,6 +1,7 @@
 //! Cerememory CLI — command-line interface for the living memory database.
 
 use std::io::{IsTerminal, Write};
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -43,6 +44,35 @@ enum Commands {
         /// gRPC port (disabled if not specified)
         #[arg(long)]
         grpc_port: Option<u16>,
+    },
+
+    /// Consolidate episodic memory into semantic memory.
+    Consolidate {
+        /// Consolidation strategy: incremental, full, or selective.
+        #[arg(long, default_value = "incremental")]
+        strategy: String,
+
+        /// Minimum record age in hours before consolidation.
+        #[arg(long, default_value_t = 0)]
+        min_age_hours: u32,
+
+        /// Minimum access count before consolidation.
+        #[arg(long, default_value_t = 0)]
+        min_access_count: u32,
+
+        /// Preview the work without mutating state.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Change the recall mode used by stateful operations.
+    SetMode {
+        /// Recall mode: human or perfect.
+        mode: String,
+
+        /// Optional comma-separated store filter.
+        #[arg(long)]
+        scope: Option<String>,
     },
 
     /// Store a new memory record
@@ -108,6 +138,26 @@ enum Commands {
         /// Output file path
         #[arg(long, default_value = "./backup.cma")]
         output: String,
+
+        /// Archive format.
+        #[arg(long, default_value = "cma")]
+        format: String,
+
+        /// Comma-separated store filter.
+        #[arg(long)]
+        stores: Option<String>,
+
+        /// Encrypt the exported archive.
+        #[arg(long)]
+        encrypt: bool,
+
+        /// Passphrase for archive encryption.
+        #[arg(long)]
+        encryption_key: Option<String>,
+
+        /// Read the archive encryption passphrase from stdin.
+        #[arg(long)]
+        encryption_key_stdin: bool,
     },
 
     /// Health check (for Docker HEALTHCHECK / K8s liveness probe)
@@ -121,6 +171,18 @@ enum Commands {
     Import {
         /// Path to the CMA archive file
         path: String,
+
+        /// Decryption passphrase for encrypted archives.
+        #[arg(long)]
+        decryption_key: Option<String>,
+
+        /// Read the archive decryption passphrase from stdin.
+        #[arg(long)]
+        decryption_key_stdin: bool,
+
+        /// Conflict resolution: keep_existing, keep_imported, keep_newer.
+        #[arg(long, default_value = "keep_newer")]
+        conflict_resolution: String,
     },
 
     /// Start the MCP (Model Context Protocol) server on stdio
@@ -142,6 +204,65 @@ fn parse_embedding(s: &str) -> Result<Vec<f32>> {
     s.split(',')
         .map(|v| v.trim().parse::<f32>().context("Invalid embedding value"))
         .collect()
+}
+
+fn parse_store_list(value: &str) -> Result<Vec<StoreType>> {
+    value
+        .split(',')
+        .map(|item| {
+            item.trim().parse::<StoreType>().map_err(|_| {
+                anyhow::anyhow!(
+                    "Invalid store type '{}'. Valid values: episodic, semantic, procedural, emotional, working",
+                    item.trim()
+                )
+            })
+        })
+        .collect()
+}
+
+fn parse_consolidation_strategy(value: &str) -> Result<ConsolidationStrategy> {
+    match value.trim().to_lowercase().as_str() {
+        "incremental" => Ok(ConsolidationStrategy::Incremental),
+        "full" => Ok(ConsolidationStrategy::Full),
+        "selective" => Ok(ConsolidationStrategy::Selective),
+        other => anyhow::bail!(
+            "Invalid consolidation strategy '{}'. Valid options: incremental, full, selective",
+            other
+        ),
+    }
+}
+
+fn parse_conflict_resolution(value: &str) -> Result<ConflictResolution> {
+    match value.trim().to_lowercase().as_str() {
+        "keep_existing" => Ok(ConflictResolution::KeepExisting),
+        "keep_imported" => Ok(ConflictResolution::KeepImported),
+        "keep_newer" => Ok(ConflictResolution::KeepNewer),
+        other => anyhow::bail!(
+            "Invalid conflict resolution '{}'. Valid options: keep_existing, keep_imported, keep_newer",
+            other
+        ),
+    }
+}
+
+fn read_secret_from_stdin(label: &str) -> Result<String> {
+    if std::io::stdin().is_terminal() {
+        eprint!("{label}: ");
+        std::io::stderr().flush()?;
+    }
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let secret = input.trim().to_string();
+    if secret.is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+    Ok(secret)
+}
+
+fn bind_address_is_loopback(bind_address: &str) -> bool {
+    bind_address
+        .to_socket_addrs()
+        .map(|addrs| addrs.into_iter().all(|addr| addr.ip().is_loopback()))
+        .unwrap_or(false)
 }
 
 fn load_config(cli: &Cli) -> Result<ServerConfig> {
@@ -319,6 +440,7 @@ async fn main() -> Result<()> {
             let engine_grpc = Arc::clone(&engine);
             let grpc_addr = format!("{}:{grpc_port}", config.http.bind_address);
             let grpc_keys = config.auth.api_key_strings();
+            let grpc_auth_enabled = config.auth.enabled;
             let grpc_cancel = cancel.clone();
 
             // Load TLS config if paths are provided
@@ -332,6 +454,14 @@ async fn main() -> Result<()> {
                 _ => None,
             };
 
+            let grpc_tls_required =
+                grpc_auth_enabled || !bind_address_is_loopback(&config.http.bind_address);
+            if grpc_tls_required && tls.is_none() {
+                anyhow::bail!(
+                    "gRPC TLS is required when auth is enabled or the bind address is not loopback"
+                );
+            }
+
             // Verify the gRPC port is bindable before starting
             let listener = tokio::net::TcpListener::bind(&grpc_addr)
                 .await
@@ -343,6 +473,7 @@ async fn main() -> Result<()> {
                 if let Err(e) = cerememory_transport_grpc::serve_with_tls(
                     engine_grpc,
                     &grpc_addr,
+                    grpc_auth_enabled,
                     grpc_keys,
                     tls,
                     grpc_cancel.cancelled_owned(),
@@ -360,13 +491,20 @@ async fn main() -> Result<()> {
         }
 
         // Initialize Prometheus metrics and build router with full middleware config
-        let prom_handle = cerememory_transport_http::install_prometheus_recorder();
+        let prom_handle = if config.http.metrics_enabled {
+            Some(cerememory_transport_http::install_prometheus_recorder())
+        } else {
+            None
+        };
         let http_config = cerememory_transport_http::HttpMiddlewareConfig {
             api_keys,
+            auth_enabled: config.auth.enabled,
             cors_origins: config.http.cors_origins.clone(),
+            trusted_proxy_cidrs: config.http.trusted_proxy_cidrs.clone(),
+            metrics_enabled: config.http.metrics_enabled,
             rate_limit_rps: config.rate_limit.requests_per_second,
             rate_limit_burst: config.rate_limit.burst,
-            prometheus_handle: Some(prom_handle),
+            prometheus_handle: prom_handle,
         };
         let app = cerememory_transport_http::router_with_config(Arc::clone(&engine), http_config);
 
@@ -440,13 +578,17 @@ async fn main() -> Result<()> {
 
     let engine = create_engine_from_config(&config)?;
 
-    // Only rebuild coordinator/indexes for commands that need up-to-date index state
+    // Only rebuild coordinator/indexes for commands that need up-to-date index state.
     let needs_rebuild = matches!(
-        cli.command,
+        &cli.command,
         Commands::Store { .. }
             | Commands::Recall { .. }
+            | Commands::Consolidate { .. }
+            | Commands::SetMode { .. }
             | Commands::Import { .. }
             | Commands::DecayTick { .. }
+            | Commands::Forget { .. }
+            | Commands::Export { .. }
     );
     if needs_rebuild {
         engine.rebuild_coordinator().await?;
@@ -454,6 +596,50 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Serve { .. } => unreachable!(),
+
+        Commands::Consolidate {
+            strategy,
+            min_age_hours,
+            min_access_count,
+            dry_run,
+        } => {
+            let req = ConsolidateRequest {
+                header: None,
+                strategy: parse_consolidation_strategy(&strategy)?,
+                min_age_hours,
+                min_access_count,
+                dry_run,
+            };
+            let resp = engine.lifecycle_consolidate(req).await?;
+            println!(
+                "Consolidated: processed={}, migrated={}, compressed={}, pruned={}, semantic_nodes_created={}",
+                resp.records_processed,
+                resp.records_migrated,
+                resp.records_compressed,
+                resp.records_pruned,
+                resp.semantic_nodes_created
+            );
+        }
+
+        Commands::SetMode { mode, scope } => {
+            let mode = match mode.to_lowercase().as_str() {
+                "human" => RecallMode::Human,
+                "perfect" => RecallMode::Perfect,
+                other => anyhow::bail!(
+                    "Invalid recall mode '{}'. Valid options: human, perfect",
+                    other
+                ),
+            };
+            let scope = scope.as_deref().map(parse_store_list).transpose()?;
+            engine
+                .lifecycle_set_mode(SetModeRequest {
+                    header: None,
+                    mode,
+                    scope,
+                })
+                .await?;
+            println!("Recall mode updated to {mode:?}");
+        }
 
         Commands::Store {
             text,
@@ -477,6 +663,7 @@ async fn main() -> Result<()> {
                 store: Some(store_type),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             };
 
@@ -614,21 +801,76 @@ async fn main() -> Result<()> {
             println!("Deleted {deleted} record(s)");
         }
 
-        Commands::Export { output } => {
-            let records = engine.collect_all_records().await?;
-            let bytes = cerememory_archive::export_to_bytes(&records)?;
+        Commands::Export {
+            output,
+            format,
+            stores,
+            encrypt,
+            encryption_key,
+            encryption_key_stdin,
+        } => {
+            if encryption_key.is_some() && encryption_key_stdin {
+                anyhow::bail!(
+                    "Use either --encryption-key or --encryption-key-stdin, not both."
+                );
+            }
+            let encryption_key = if encryption_key_stdin {
+                Some(read_secret_from_stdin("Export encryption passphrase")?)
+            } else {
+                encryption_key
+            };
+            let stores = stores.as_deref().map(parse_store_list).transpose()?;
+            let req = ExportRequest {
+                header: None,
+                format,
+                stores,
+                encrypt,
+                encryption_key,
+            };
+            let (bytes, resp) = engine.lifecycle_export(req).await?;
 
             std::fs::write(&output, &bytes).context("Failed to write archive file")?;
             println!(
-                "Exported {} records to {output} ({} bytes)",
-                records.len(),
-                bytes.len()
+                "Exported {} records to {output} ({} bytes, archive_id={}, checksum={})",
+                resp.record_count,
+                bytes.len(),
+                resp.archive_id,
+                resp.checksum
             );
         }
 
-        Commands::Import { path } => {
+        Commands::Import {
+            path,
+            decryption_key,
+            decryption_key_stdin,
+            conflict_resolution,
+        } => {
+            if decryption_key.is_some() && decryption_key_stdin {
+                anyhow::bail!(
+                    "Use either --decryption-key or --decryption-key-stdin, not both."
+                );
+            }
+            let decryption_key = if decryption_key_stdin {
+                Some(read_secret_from_stdin("Import decryption passphrase")?)
+            } else {
+                decryption_key
+            };
             let bytes = std::fs::read(&path).context("Failed to read archive file")?;
-            let imported = engine.import_records(&bytes).await?;
+            let archive_id = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("cli-import")
+                .to_string();
+            let imported = engine
+                .lifecycle_import(ImportRequest {
+                    header: None,
+                    archive_id,
+                    strategy: ImportStrategy::Merge,
+                    conflict_resolution: parse_conflict_resolution(&conflict_resolution)?,
+                    decryption_key,
+                    archive_data: Some(bytes),
+                })
+                .await?;
             println!("Imported {imported} records from {path}");
         }
 

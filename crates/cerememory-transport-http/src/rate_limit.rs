@@ -6,12 +6,13 @@
 
 use axum::{
     body::Body,
+    extract::ConnectInfo,
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use governor::{clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota, RateLimiter};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use tower::{Layer, Service};
@@ -19,6 +20,59 @@ use tower::{Layer, Service};
 use cerememory_core::protocol::{CMPError, CMPErrorCode};
 
 type KeyedLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
+
+#[derive(Clone, Debug)]
+enum TrustedProxyCidr {
+    V4 { network: u32, prefix: u8 },
+    V6 { network: u128, prefix: u8 },
+}
+
+impl TrustedProxyCidr {
+    fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        let (addr, prefix) = value.split_once('/')?;
+        let prefix: u8 = prefix.parse().ok()?;
+        match addr.parse::<IpAddr>().ok()? {
+            IpAddr::V4(ip) if prefix <= 32 => Some(Self::V4 {
+                network: u32::from(ip) & ipv4_mask(prefix),
+                prefix,
+            }),
+            IpAddr::V6(ip) if prefix <= 128 => Some(Self::V6 {
+                network: u128::from(ip) & ipv6_mask(prefix),
+                prefix,
+            }),
+            _ => None,
+        }
+    }
+
+    fn contains(&self, ip: IpAddr) -> bool {
+        match (self, ip) {
+            (Self::V4 { network, prefix }, IpAddr::V4(ip)) => {
+                (u32::from(ip) & ipv4_mask(*prefix)) == *network
+            }
+            (Self::V6 { network, prefix }, IpAddr::V6(ip)) => {
+                (u128::from(ip) & ipv6_mask(*prefix)) == *network
+            }
+            _ => false,
+        }
+    }
+}
+
+fn ipv4_mask(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - u32::from(prefix))
+    }
+}
+
+fn ipv6_mask(prefix: u8) -> u128 {
+    if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - u32::from(prefix))
+    }
+}
 
 struct CleanupGuard {
     cancel: tokio_util::sync::CancellationToken,
@@ -35,6 +89,7 @@ impl Drop for CleanupGuard {
 pub struct RateLimitLayer {
     limiter: Arc<KeyedLimiter>,
     cleanup: Arc<CleanupGuard>,
+    trusted_proxy_cidrs: Arc<Vec<TrustedProxyCidr>>,
 }
 
 impl RateLimitLayer {
@@ -42,11 +97,17 @@ impl RateLimitLayer {
     ///
     /// Spawns a background task that shrinks the internal DashMap every 60 seconds
     /// to evict stale entries and prevent unbounded memory growth.
-    pub fn new(per_second: u64, burst: u32) -> Self {
+    pub fn new(per_second: u64, burst: u32, trusted_proxy_cidrs: Vec<String>) -> Self {
         let quota =
             Quota::per_second(NonZeroU32::new(per_second as u32).unwrap_or(NonZeroU32::MIN))
                 .allow_burst(NonZeroU32::new(burst).unwrap_or(NonZeroU32::MIN));
         let limiter = Arc::new(RateLimiter::keyed(quota));
+        let trusted_proxy_cidrs = Arc::new(
+            trusted_proxy_cidrs
+                .iter()
+                .filter_map(|cidr| TrustedProxyCidr::parse(cidr))
+                .collect(),
+        );
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let cleanup = Arc::new(CleanupGuard {
@@ -70,7 +131,11 @@ impl RateLimitLayer {
             }
         });
 
-        Self { limiter, cleanup }
+        Self {
+            limiter,
+            cleanup,
+            trusted_proxy_cidrs,
+        }
     }
 }
 
@@ -82,6 +147,7 @@ impl<S> Layer<S> for RateLimitLayer {
             inner,
             limiter: Arc::clone(&self.limiter),
             _cleanup: Arc::clone(&self.cleanup),
+            trusted_proxy_cidrs: Arc::clone(&self.trusted_proxy_cidrs),
         }
     }
 }
@@ -92,34 +158,50 @@ pub struct RateLimitService<S> {
     inner: S,
     limiter: Arc<KeyedLimiter>,
     _cleanup: Arc<CleanupGuard>,
+    trusted_proxy_cidrs: Arc<Vec<TrustedProxyCidr>>,
 }
 
 /// Extract client IP from the request.
 ///
 /// Priority: `X-Forwarded-For` first entry → `X-Real-IP` → fallback `127.0.0.1`.
-fn extract_client_ip(req: &Request<Body>) -> IpAddr {
-    // Try X-Forwarded-For (first IP in the chain)
-    if let Some(xff) = req.headers().get("x-forwarded-for") {
-        if let Ok(value) = xff.to_str() {
-            if let Some(first) = value.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
+fn extract_client_ip(req: &Request<Body>, trusted_proxy_cidrs: &[TrustedProxyCidr]) -> IpAddr {
+    let peer_addr = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    let peer_ip = peer_addr.map(|addr| addr.ip());
+    let peer_is_trusted = peer_ip
+        .map(|ip| trusted_proxy_cidrs.iter().any(|cidr| cidr.contains(ip)))
+        .unwrap_or(false);
+
+    let should_trust_forwarded = match peer_addr {
+        Some(_) => peer_is_trusted,
+        None => trusted_proxy_cidrs.is_empty(),
+    };
+
+    if should_trust_forwarded {
+        // Try X-Forwarded-For (first IP in the chain)
+        if let Some(xff) = req.headers().get("x-forwarded-for") {
+            if let Ok(value) = xff.to_str() {
+                if let Some(first) = value.split(',').next() {
+                    if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                        return ip;
+                    }
+                }
+            }
+        }
+
+        // Try X-Real-IP
+        if let Some(xri) = req.headers().get("x-real-ip") {
+            if let Ok(value) = xri.to_str() {
+                if let Ok(ip) = value.trim().parse::<IpAddr>() {
                     return ip;
                 }
             }
         }
     }
 
-    // Try X-Real-IP
-    if let Some(xri) = req.headers().get("x-real-ip") {
-        if let Ok(value) = xri.to_str() {
-            if let Ok(ip) = value.trim().parse::<IpAddr>() {
-                return ip;
-            }
-        }
-    }
-
-    // Fallback — treat as single client
-    IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    peer_ip.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
 impl<S> Service<Request<Body>> for RateLimitService<S>
@@ -140,7 +222,7 @@ where
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
-        let ip = extract_client_ip(&req);
+        let ip = extract_client_ip(&req, &self.trusted_proxy_cidrs);
         let request_id = crate::request_id_from_request(&req);
 
         match self.limiter.check_key(&ip) {
@@ -179,7 +261,7 @@ mod tests {
     fn test_app(rps: u64, burst: u32) -> Router {
         Router::new()
             .route("/test", get(|| async { "ok" }))
-            .layer(RateLimitLayer::new(rps, burst))
+            .layer(RateLimitLayer::new(rps, burst, vec![]))
     }
 
     #[tokio::test]
@@ -308,5 +390,32 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["code"], "RATE_LIMITED");
         assert!(json["retry_after"].is_number());
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_uses_forwarded_client_ip() {
+        let app = Router::new()
+            .route("/test", get(|| async { "ok" }))
+            .layer(RateLimitLayer::new(1, 1, vec!["10.0.0.0/8".to_string()]));
+
+        let mut req1 = Request::builder()
+            .uri("/test")
+            .header("X-Forwarded-For", "192.168.1.10")
+            .body(Body::empty())
+            .unwrap();
+        req1.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 1, 2, 3], 12345))));
+        let resp = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut req2 = Request::builder()
+            .uri("/test")
+            .header("X-Forwarded-For", "192.168.1.11")
+            .body(Body::empty())
+            .unwrap();
+        req2.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 1, 2, 3], 12346))));
+        let resp = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

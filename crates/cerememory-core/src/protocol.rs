@@ -85,6 +85,8 @@ pub struct EncodeStoreRequest {
     #[serde(default)]
     pub context: Option<EncodeContext>,
     #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
     pub associations: Option<Vec<ManualAssociation>>,
 }
 

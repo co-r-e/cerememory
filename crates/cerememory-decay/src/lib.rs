@@ -126,12 +126,28 @@ impl PowerLawDecayEngine {
 
 impl DecayEngine for PowerLawDecayEngine {
     fn compute_tick(&self, records: &[DecayInput], tick_duration_secs: f64) -> DecayTickResult {
-        // Use wall-clock time plus simulated duration for testing/manual tick control
-        let now_secs = Utc::now().timestamp() as f64 + tick_duration_secs;
+        // Advance each record by whichever is larger:
+        // - actual wall-clock time since the baseline
+        // - the explicit tick duration
+        //
+        // This preserves decay for very old records while avoiding the previous
+        // double-counting of "wall clock elapsed + tick duration".
+        let wall_clock_now = Utc::now().timestamp() as f64;
+        let effective_now = records
+            .iter()
+            .map(|input| {
+                let baseline = input
+                    .last_accessed_at
+                    .timestamp()
+                    .max(input.fidelity.last_decay_tick.timestamp()) as f64;
+                wall_clock_now.max(baseline + tick_duration_secs)
+            })
+            .collect::<Vec<_>>();
 
         let updates: Vec<DecayOutput> = records
             .par_iter()
-            .map(|input| self.compute_single(input, now_secs))
+            .zip(effective_now.into_par_iter())
+            .map(|(input, effective_now)| self.compute_single(input, effective_now))
             .collect();
 
         let records_updated = updates.len() as u32;
@@ -215,6 +231,28 @@ mod tests {
             "After 1 hour with default params, fidelity should be well below 0.5, got {f}"
         );
         assert!(f > 0.0, "Fidelity should still be positive, got {f}");
+    }
+
+    #[test]
+    fn tick_uses_explicit_duration_without_double_counting() {
+        let engine = PowerLawDecayEngine::with_defaults();
+        let now = Utc::now();
+        let input = make_input(default_fidelity(), default_emotion(), now);
+
+        let result = engine.compute_tick(&[input.clone()], 3600.0);
+        let expected = math::compute_fidelity(
+            input.fidelity.score,
+            3600.0,
+            input.fidelity.stability,
+            input.fidelity.decay_rate,
+            math::compute_emotion_mod(input.emotion.intensity),
+        );
+
+        let actual = result.updates[0].new_fidelity.score;
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "tick should apply exactly the requested duration: actual={actual}, expected={expected}"
+        );
     }
 
     // ── Test 3: Emotional modulation slows decay ─────────────────────────

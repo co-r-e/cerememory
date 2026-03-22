@@ -4,7 +4,8 @@
 //! to synchronous Python calls via `runtime.block_on()`.
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyAnyMethods, PyDict, PyList, PyTuple};
+use pyo3::{exceptions::PyTypeError, exceptions::PyValueError, Bound};
 
 use cerememory_core::protocol::{
     EncodeStoreRequest, EncodeStoreResponse, ForgetRequest, RecallCue, RecallQueryRequest,
@@ -45,12 +46,62 @@ impl PyCerememoryEngine {
         })
     }
 
+    fn py_value_to_json(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+        if value.is_none() {
+            return Ok(serde_json::Value::Null);
+        }
+        if let Ok(v) = value.extract::<bool>() {
+            return Ok(serde_json::Value::Bool(v));
+        }
+        if let Ok(v) = value.extract::<i64>() {
+            return Ok(serde_json::Value::Number(v.into()));
+        }
+        if let Ok(v) = value.extract::<u64>() {
+            return Ok(serde_json::Value::Number(v.into()));
+        }
+        if let Ok(v) = value.extract::<f64>() {
+            return serde_json::Number::from_f64(v)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| PyValueError::new_err("metadata contains a non-finite number"));
+        }
+        if let Ok(v) = value.extract::<String>() {
+            return Ok(serde_json::Value::String(v));
+        }
+        if let Ok(dict) = value.cast::<PyDict>() {
+            let mut map = serde_json::Map::with_capacity(dict.len());
+            for (key, item) in dict.iter() {
+                let key = key.extract::<String>()?;
+                map.insert(key, Self::py_value_to_json(&item)?);
+            }
+            return Ok(serde_json::Value::Object(map));
+        }
+        if let Ok(list) = value.cast::<PyList>() {
+            let mut items = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                items.push(Self::py_value_to_json(&item)?);
+            }
+            return Ok(serde_json::Value::Array(items));
+        }
+        if let Ok(tuple) = value.cast::<PyTuple>() {
+            let mut items = Vec::with_capacity(tuple.len());
+            for item in tuple.iter() {
+                items.push(Self::py_value_to_json(&item)?);
+            }
+            return Ok(serde_json::Value::Array(items));
+        }
+
+        Err(PyTypeError::new_err(
+            "metadata must be JSON-serializable (dict, list, string, number, bool, or null)",
+        ))
+    }
+
     /// Shared helper for `store` and `store_full` — builds the request and executes it.
     fn execute_store(
         &self,
         py: Python<'_>,
         text: &str,
         store: Option<&str>,
+        metadata: Option<serde_json::Value>,
     ) -> PyResult<EncodeStoreResponse> {
         let store_type = match store {
             Some(s) => Some(parse_store_type(s)?),
@@ -71,6 +122,7 @@ impl PyCerememoryEngine {
             store: store_type,
             emotion: None,
             context: None,
+            metadata,
             associations: None,
         };
 
@@ -140,15 +192,23 @@ impl PyCerememoryEngine {
     ///     text: The text content to store.
     ///     store: Optional store name ("episodic", "semantic", "procedural",
     ///            "emotional", "working"). If omitted, the engine auto-routes.
+    ///     metadata: Optional JSON-serializable metadata to attach to the record.
     ///
     /// Returns:
     ///     The UUID of the newly created record.
     ///
     /// Raises:
     ///     ValueError: If the store name is invalid or content is too large.
-    #[pyo3(signature = (text, store=None))]
-    fn store(&self, py: Python<'_>, text: &str, store: Option<&str>) -> PyResult<String> {
-        let resp = self.execute_store(py, text, store)?;
+    #[pyo3(signature = (text, store=None, metadata=None))]
+    fn store(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        store: Option<&str>,
+        metadata: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<String> {
+        let metadata = metadata.as_ref().map(Self::py_value_to_json).transpose()?;
+        let resp = self.execute_store(py, text, store, metadata)?;
         Ok(resp.record_id.to_string())
     }
 
@@ -163,14 +223,16 @@ impl PyCerememoryEngine {
     ///
     /// Returns:
     ///     EncodeStoreResponse with full details.
-    #[pyo3(signature = (text, store=None))]
+    #[pyo3(signature = (text, store=None, metadata=None))]
     fn store_full(
         &self,
         py: Python<'_>,
         text: &str,
         store: Option<&str>,
+        metadata: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyEncodeStoreResponse> {
-        let resp = self.execute_store(py, text, store)?;
+        let metadata = metadata.as_ref().map(Self::py_value_to_json).transpose()?;
+        let resp = self.execute_store(py, text, store, metadata)?;
         Ok(PyEncodeStoreResponse {
             record_id: resp.record_id.to_string(),
             store: resp.store.to_string(),
@@ -187,10 +249,12 @@ impl PyCerememoryEngine {
     ///     stores: Optional list of store names to search.
     ///     min_fidelity: Optional minimum fidelity threshold.
     ///     recall_mode: "human" (default) or "perfect".
+    ///     reconsolidate: Whether to reconsolidate recalled memories.
+    ///     activation_depth: Activation depth for spreading activation.
     ///
     /// Returns:
     ///     RecallQueryResponse containing matched memories.
-    #[pyo3(signature = (query, limit=10, stores=None, min_fidelity=None, recall_mode=None))]
+    #[pyo3(signature = (query, limit=10, stores=None, min_fidelity=None, recall_mode=None, reconsolidate=true, activation_depth=2))]
     fn recall(
         &self,
         py: Python<'_>,
@@ -199,6 +263,8 @@ impl PyCerememoryEngine {
         stores: Option<Vec<String>>,
         min_fidelity: Option<f64>,
         recall_mode: Option<&str>,
+        reconsolidate: bool,
+        activation_depth: u32,
     ) -> PyResult<PyRecallQueryResponse> {
         let store_types = match stores {
             Some(names) => {
@@ -231,8 +297,8 @@ impl PyCerememoryEngine {
             limit,
             min_fidelity,
             include_decayed: false,
-            reconsolidate: true,
-            activation_depth: 2,
+            reconsolidate,
+            activation_depth,
             recall_mode: mode,
         };
 

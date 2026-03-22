@@ -2,7 +2,7 @@
 
 Each CMP error code has a corresponding exception class. The transport layer
 maps HTTP error responses to these exceptions, preserving the original error
-code, message, details, and retry_after hint from the server.
+code, message, details, retry_after hint, and request_id from the server.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ class CerememoryError(Exception):
         message: Human-readable error description from the server.
         details: Optional structured details from the server.
         retry_after: Optional seconds to wait before retrying.
+        request_id: Optional request correlation ID from the server.
         status_code: The HTTP status code that was returned.
     """
 
@@ -30,6 +31,7 @@ class CerememoryError(Exception):
         code: str | None = None,
         details: Any | None = None,
         retry_after: int | None = None,
+        request_id: str | None = None,
         status_code: int | None = None,
     ) -> None:
         super().__init__(message)
@@ -38,6 +40,7 @@ class CerememoryError(Exception):
         self.message = message
         self.details = details
         self.retry_after = retry_after
+        self.request_id = request_id
         self.status_code = status_code
 
 
@@ -196,6 +199,7 @@ def error_from_code(
     *,
     details: Any | None = None,
     retry_after: int | None = None,
+    request_id: str | None = None,
     status_code: int | None = None,
 ) -> CerememoryError:
     """Create the appropriate exception subclass from a CMP error code."""
@@ -205,5 +209,6 @@ def error_from_code(
         code=code,
         details=details,
         retry_after=retry_after,
+        request_id=request_id,
         status_code=status_code,
     )

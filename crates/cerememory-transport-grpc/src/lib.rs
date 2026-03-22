@@ -7,6 +7,8 @@
 use std::sync::Arc;
 
 use cerememory_engine::CerememoryEngine;
+use std::io;
+use std::net::SocketAddr;
 use tonic::transport::{Identity, ServerTlsConfig};
 
 pub mod auth;
@@ -35,23 +37,41 @@ pub struct TlsConfig {
 pub async fn serve(
     engine: Arc<CerememoryEngine>,
     addr: &str,
+    auth_enabled: bool,
     api_keys: Vec<String>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    serve_with_tls(engine, addr, api_keys, None, shutdown_signal).await
+    serve_with_tls(engine, addr, auth_enabled, api_keys, None, shutdown_signal).await
 }
 
 /// Start the gRPC server with optional TLS.
 pub async fn serve_with_tls(
     engine: Arc<CerememoryEngine>,
     addr: &str,
+    auth_enabled: bool,
     api_keys: Vec<String>,
     tls: Option<TlsConfig>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = addr.parse()?;
+    let resolved_addrs: Vec<SocketAddr> = tokio::net::lookup_host(addr).await?.collect();
+    let addr = *resolved_addrs.first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "gRPC address resolved to no socket addresses",
+        )
+    })?;
+
+    let requires_tls = auth_enabled || resolved_addrs.iter().any(|addr| !addr.ip().is_loopback());
+    if requires_tls && tls.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "gRPC TLS is required when auth is enabled or the bind address is not loopback",
+        )
+        .into());
+    }
+
     let svc = CerememoryGrpcService::new(engine);
-    let interceptor = GrpcAuthInterceptor::new(api_keys);
+    let interceptor = GrpcAuthInterceptor::new(if auth_enabled { api_keys } else { Vec::new() });
 
     // gRPC health service
     let (health_reporter, health_service) = tonic_health::server::health_reporter();

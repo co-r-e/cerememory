@@ -51,7 +51,8 @@ class SyncCerememoryClient:
         base_url: The base URL of the Cerememory server (e.g. ``"http://localhost:8420"``).
         api_key: Optional Bearer token for authentication.
         timeout: Request timeout in seconds (default 30).
-        max_retries: Number of retries on transient errors (default 3).
+        max_retries: Number of retries on transient errors (default 0).
+        retry_mutating_requests: Whether retries may also apply to mutating requests.
         headers: Additional headers to include in every request.
         http_client: Optional pre-configured ``httpx.Client`` instance.
 
@@ -69,7 +70,8 @@ class SyncCerememoryClient:
         *,
         api_key: str | None = None,
         timeout: float = 30.0,
-        max_retries: int = 3,
+        max_retries: int = 0,
+        retry_mutating_requests: bool = False,
         headers: dict[str, str] | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
@@ -78,6 +80,7 @@ class SyncCerememoryClient:
             api_key=api_key,
             timeout=timeout,
             max_retries=max_retries,
+            retry_mutating_requests=retry_mutating_requests,
             headers=headers,
             http_client=http_client,
         )

@@ -18,7 +18,9 @@ use uuid::Uuid;
 
 use cerememory_core::error::CerememoryError;
 use cerememory_core::traits::Store;
-use cerememory_core::types::{EmotionVector, FidelityState, MemoryContent, MemoryRecord};
+use cerememory_core::types::{
+    Association, EmotionVector, FidelityState, MemoryContent, MemoryRecord,
+};
 
 // ---------------------------------------------------------------------------
 // Table definitions
@@ -128,14 +130,15 @@ impl ProceduralStore {
                 .map_err(storage_err)?;
             let records_table = txn.open_table(PROCEDURAL_RECORDS).map_err(storage_err)?;
 
-            // Scan buckets [0, threshold_bucket).
-            // The threshold bucket itself is *excluded* because we want < threshold.
+            // Scan buckets [0, threshold_bucket + 1) and then exact-filter.
+            // Because the index uses rounded buckets, values just below the
+            // threshold can live in the threshold bucket.
             let threshold_bucket = fidelity_bucket(threshold);
 
-            // Build range end key: threshold_bucket ++ all-zero UUID
+            // Build range end key: (threshold_bucket + 1) ++ all-zero UUID.
             let end_key = {
                 let mut buf = [0u8; 17];
-                buf[0] = threshold_bucket;
+                buf[0] = threshold_bucket.saturating_add(1);
                 buf
             };
 
@@ -424,6 +427,42 @@ impl Store for ProceduralStore {
                 if let Some(m) = metadata {
                     record.metadata = m;
                 }
+                record.updated_at = Utc::now();
+                record.version += 1;
+
+                let packed = rmp_serde::to_vec(&record)
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+                records
+                    .insert(id.as_bytes().as_slice(), packed.as_slice())
+                    .map_err(storage_err)?;
+            }
+            txn.commit().map_err(storage_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
+    }
+
+    async fn replace_associations(
+        &self,
+        id: &Uuid,
+        associations: Vec<Association>,
+    ) -> Result<(), CerememoryError> {
+        let db = self.db.clone();
+        let id = *id;
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write().map_err(storage_err)?;
+            {
+                let mut records = txn.open_table(PROCEDURAL_RECORDS).map_err(storage_err)?;
+                let guard = records
+                    .get(id.as_bytes().as_slice())
+                    .map_err(storage_err)?
+                    .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
+                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
+                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                drop(guard);
+
+                record.associations = associations;
                 record.updated_at = Utc::now();
                 record.version += 1;
 

@@ -32,7 +32,7 @@ _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 # Default configuration.
 DEFAULT_TIMEOUT = 30.0
-DEFAULT_MAX_RETRIES = 3
+DEFAULT_MAX_RETRIES = 0
 DEFAULT_BACKOFF_BASE = 0.5
 DEFAULT_BACKOFF_MAX = 30.0
 DEFAULT_BACKOFF_FACTOR = 2.0
@@ -65,11 +65,13 @@ def _parse_cmp_error(response: httpx.Response) -> CerememoryError:
         message = body.get("message", response.text)
         details = body.get("details")
         retry_after = body.get("retry_after")
+        request_id = body.get("request_id")
         return error_from_code(
             code,
             message,
             details=details,
             retry_after=retry_after,
+            request_id=request_id,
             status_code=status,
         )
     except Exception:
@@ -111,6 +113,7 @@ class SyncTransport:
         api_key: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_mutating_requests: bool = False,
         headers: dict[str, str] | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
@@ -118,6 +121,7 @@ class SyncTransport:
         self._api_key = api_key
         self._timeout = timeout
         self._max_retries = max_retries
+        self._retry_mutating_requests = retry_mutating_requests
         self._default_headers = _build_headers(api_key, headers)
 
         if http_client is not None:
@@ -150,6 +154,7 @@ class SyncTransport:
             CerememoryError: On any non-2xx final response or transport error.
         """
         last_error: Exception | None = None
+        allow_retry = method in {"GET", "HEAD"} or self._retry_mutating_requests
 
         for attempt in range(self._max_retries + 1):
             try:
@@ -163,7 +168,7 @@ class SyncTransport:
                 last_error = CerememoryConnectionError(
                     f"Failed to connect to {self._base_url}: {exc}"
                 )
-                if attempt < self._max_retries:
+                if allow_retry and attempt < self._max_retries:
                     time.sleep(_compute_backoff(attempt))
                     continue
                 raise last_error from exc
@@ -171,7 +176,7 @@ class SyncTransport:
                 last_error = CerememoryTimeoutError(
                     f"Request timed out after {self._timeout}s: {exc}"
                 )
-                if attempt < self._max_retries:
+                if allow_retry and attempt < self._max_retries:
                     time.sleep(_compute_backoff(attempt))
                     continue
                 raise last_error from exc
@@ -184,6 +189,7 @@ class SyncTransport:
 
             if (
                 response.status_code in _RETRYABLE_STATUS_CODES
+                and allow_retry
                 and attempt < self._max_retries
             ):
                 wait = _compute_backoff(attempt, error.retry_after)
@@ -225,6 +231,7 @@ class AsyncTransport:
         api_key: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_mutating_requests: bool = False,
         headers: dict[str, str] | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -232,6 +239,7 @@ class AsyncTransport:
         self._api_key = api_key
         self._timeout = timeout
         self._max_retries = max_retries
+        self._retry_mutating_requests = retry_mutating_requests
         self._default_headers = _build_headers(api_key, headers)
 
         if http_client is not None:
@@ -266,6 +274,7 @@ class AsyncTransport:
         import asyncio
 
         last_error: Exception | None = None
+        allow_retry = method in {"GET", "HEAD"} or self._retry_mutating_requests
 
         for attempt in range(self._max_retries + 1):
             try:
@@ -279,7 +288,7 @@ class AsyncTransport:
                 last_error = CerememoryConnectionError(
                     f"Failed to connect to {self._base_url}: {exc}"
                 )
-                if attempt < self._max_retries:
+                if allow_retry and attempt < self._max_retries:
                     await asyncio.sleep(_compute_backoff(attempt))
                     continue
                 raise last_error from exc
@@ -287,7 +296,7 @@ class AsyncTransport:
                 last_error = CerememoryTimeoutError(
                     f"Request timed out after {self._timeout}s: {exc}"
                 )
-                if attempt < self._max_retries:
+                if allow_retry and attempt < self._max_retries:
                     await asyncio.sleep(_compute_backoff(attempt))
                     continue
                 raise last_error from exc
@@ -299,6 +308,7 @@ class AsyncTransport:
 
             if (
                 response.status_code in _RETRYABLE_STATUS_CODES
+                and allow_retry
                 and attempt < self._max_retries
             ):
                 wait = _compute_backoff(attempt, error.retry_after)

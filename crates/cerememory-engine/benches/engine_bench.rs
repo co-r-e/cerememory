@@ -25,6 +25,7 @@ fn make_store_request(i: usize) -> EncodeStoreRequest {
         store: Some(StoreType::Episodic),
         emotion: None,
         context: None,
+        metadata: None,
         associations: None,
     }
 }

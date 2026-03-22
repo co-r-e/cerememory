@@ -85,7 +85,8 @@ class Client:
         base_url: Base URL of the Cerememory server.
         api_key: Optional Bearer token for authentication.
         timeout: Request timeout in seconds (default 30).
-        max_retries: Number of retries on transient errors (default 3).
+        max_retries: Number of retries on transient errors (default 0).
+        retry_mutating_requests: Whether retries may also apply to mutating requests.
         headers: Additional headers to include in every request.
         http_client: Optional pre-configured ``httpx.Client`` instance.
     """
@@ -96,7 +97,8 @@ class Client:
         *,
         api_key: str | None = None,
         timeout: float = 30.0,
-        max_retries: int = 3,
+        max_retries: int = 0,
+        retry_mutating_requests: bool = False,
         headers: dict[str, str] | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
@@ -105,6 +107,7 @@ class Client:
             api_key=api_key,
             timeout=timeout,
             max_retries=max_retries,
+            retry_mutating_requests=retry_mutating_requests,
             headers=headers,
             http_client=http_client,
         )
@@ -137,7 +140,7 @@ class Client:
             text: The text content to store.
             store: Target store (default ``"episodic"``).
             emotion: Optional emotion vector.
-            metadata: Optional metadata dict (sent as context source).
+            metadata: Optional metadata dict (sent as request metadata).
 
         Returns:
             The UUID of the newly created record.
@@ -148,6 +151,7 @@ class Client:
             content=_text_content(text),
             store=store,
             emotion=emotion,
+            metadata=metadata,
         )
         response = self._client.encode_store(request)
         return response.record_id
@@ -160,6 +164,8 @@ class Client:
         stores: list[str | StoreType] | None = None,
         mode: str | RecallMode = RecallMode.HUMAN,
         min_fidelity: float | None = None,
+        reconsolidate: bool = True,
+        activation_depth: int = 2,
     ) -> list[RecalledMemory]:
         """Recall memories matching a text query.
 
@@ -169,6 +175,8 @@ class Client:
             stores: Optional list of stores to search.
             mode: Recall mode (default ``"human"``).
             min_fidelity: Optional minimum fidelity threshold.
+            reconsolidate: Whether to reconsolidate recalled memories.
+            activation_depth: Activation depth for spreading activation.
 
         Returns:
             List of recalled memories with relevance scores.
@@ -187,6 +195,8 @@ class Client:
             stores=resolved_stores,
             recall_mode=mode,
             min_fidelity=min_fidelity,
+            reconsolidate=reconsolidate,
+            activation_depth=activation_depth,
         )
         response = self._client.recall_query(request)
         return response.memories
@@ -333,7 +343,8 @@ class AsyncClient:
         base_url: Base URL of the Cerememory server.
         api_key: Optional Bearer token for authentication.
         timeout: Request timeout in seconds (default 30).
-        max_retries: Number of retries on transient errors (default 3).
+        max_retries: Number of retries on transient errors (default 0).
+        retry_mutating_requests: Whether retries may also apply to mutating requests.
         headers: Additional headers to include in every request.
         http_client: Optional pre-configured ``httpx.AsyncClient`` instance.
     """
@@ -344,7 +355,8 @@ class AsyncClient:
         *,
         api_key: str | None = None,
         timeout: float = 30.0,
-        max_retries: int = 3,
+        max_retries: int = 0,
+        retry_mutating_requests: bool = False,
         headers: dict[str, str] | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -353,6 +365,7 @@ class AsyncClient:
             api_key=api_key,
             timeout=timeout,
             max_retries=max_retries,
+            retry_mutating_requests=retry_mutating_requests,
             headers=headers,
             http_client=http_client,
         )
@@ -386,6 +399,7 @@ class AsyncClient:
             content=_text_content(text),
             store=store,
             emotion=emotion,
+            metadata=metadata,
         )
         response = await self._client.encode_store(request)
         return response.record_id
@@ -398,6 +412,8 @@ class AsyncClient:
         stores: list[str | StoreType] | None = None,
         mode: str | RecallMode = RecallMode.HUMAN,
         min_fidelity: float | None = None,
+        reconsolidate: bool = True,
+        activation_depth: int = 2,
     ) -> list[RecalledMemory]:
         """Recall memories matching a text query."""
 
@@ -414,6 +430,8 @@ class AsyncClient:
             stores=resolved_stores,
             recall_mode=mode,
             min_fidelity=min_fidelity,
+            reconsolidate=reconsolidate,
+            activation_depth=activation_depth,
         )
         response = await self._client.recall_query(request)
         return response.memories

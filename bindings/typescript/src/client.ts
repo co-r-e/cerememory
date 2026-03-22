@@ -67,8 +67,11 @@ export interface CerememoryClientOptions {
   /** Request timeout in milliseconds. Default: 30000 (30s). */
   timeoutMs?: number;
 
-  /** Maximum number of retries for retryable errors. Default: 3. */
+  /** Maximum number of retries for retryable errors. Default: 0 (opt-in). */
   maxRetries?: number;
+
+  /** Allow retries for mutating requests such as store/update/forget. Default: false. */
+  retryMutatingRequests?: boolean;
 
   /** Base delay for exponential backoff in ms. Default: 500. */
   retryBaseDelayMs?: number;
@@ -109,7 +112,7 @@ function textContent(text: string): MemoryContent {
  * The main Cerememory SDK client.
  *
  * Wraps the Cerememory REST API with a type-safe interface. Uses native
- * `fetch` for HTTP transport, with automatic retry on 429/5xx errors
+ * `fetch` for HTTP transport, with optional retry on 429/5xx errors
  * and configurable timeouts.
  */
 export class CerememoryClient {
@@ -127,6 +130,7 @@ export class CerememoryClient {
       apiKey: options.apiKey,
       timeoutMs: options.timeoutMs,
       maxRetries: options.maxRetries,
+      retryMutatingRequests: options.retryMutatingRequests,
       retryBaseDelayMs: options.retryBaseDelayMs,
       fetch: options.fetch,
       headers: options.headers,
@@ -141,6 +145,7 @@ export class CerememoryClient {
    *
    * @param text - The text content to store.
    * @param options - Optional store configuration.
+   *   `metadata` is forwarded as request metadata.
    * @returns The UUID of the created record.
    *
    * @example
@@ -178,6 +183,9 @@ export class CerememoryClient {
     if (options.context) {
       request.context = options.context;
     }
+    if (options.metadata) {
+      request.metadata = options.metadata;
+    }
 
     const response = await this.encodeStore(request);
     return response.record_id;
@@ -188,6 +196,7 @@ export class CerememoryClient {
    *
    * @param query - The text query to search for.
    * @param options - Optional recall configuration.
+   *   `reconsolidate` and `activation_depth` are forwarded when set.
    * @returns Array of recalled memories.
    *
    * @example
@@ -215,6 +224,12 @@ export class CerememoryClient {
     }
     if (options.include_decayed !== undefined) {
       request.include_decayed = options.include_decayed;
+    }
+    if (options.reconsolidate !== undefined) {
+      request.reconsolidate = options.reconsolidate;
+    }
+    if (options.activation_depth !== undefined) {
+      request.activation_depth = options.activation_depth;
     }
 
     const response = await this.recallQuery(request);

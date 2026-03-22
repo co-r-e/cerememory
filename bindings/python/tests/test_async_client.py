@@ -10,6 +10,7 @@ import respx
 
 from cerememory import (
     AsyncClient,
+    CerememoryError,
     ConsolidateRequest,
     ContentBlock,
     DecayForecastRequest,
@@ -79,6 +80,22 @@ class TestAsyncHighLevelStore:
             assert isinstance(record_id, UUID)
         await async_high_level_client.close()
 
+    @pytest.mark.asyncio
+    async def test_store_with_metadata(self, async_high_level_client):
+        with respx.mock(base_url=BASE_URL) as mock_api:
+            mock_api.post("/v1/encode").mock(
+                return_value=httpx.Response(200, json=make_encode_store_response())
+            )
+            await async_high_level_client.store(
+                "Session note", metadata={"source": "chat"}
+            )
+
+            import json
+
+            body = json.loads(mock_api.calls.last.request.content)
+            assert body["metadata"]["source"] == "chat"
+        await async_high_level_client.close()
+
 
 class TestAsyncHighLevelRecall:
     """Test AsyncClient.recall() convenience method."""
@@ -104,6 +121,23 @@ class TestAsyncHighLevelRecall:
                 "hello", stores=["episodic", "semantic"]
             )
             assert len(memories) == 1
+        await async_high_level_client.close()
+
+    @pytest.mark.asyncio
+    async def test_recall_with_activation_options(self, async_high_level_client):
+        with respx.mock(base_url=BASE_URL) as mock_api:
+            mock_api.post("/v1/recall/query").mock(
+                return_value=httpx.Response(200, json=make_recall_query_response())
+            )
+            await async_high_level_client.recall(
+                "hello", reconsolidate=False, activation_depth=5
+            )
+
+            import json
+
+            body = json.loads(mock_api.calls.last.request.content)
+            assert body["reconsolidate"] is False
+            assert body["activation_depth"] == 5
         await async_high_level_client.close()
 
 
@@ -466,6 +500,21 @@ class TestAsyncRetryBehavior:
     """Test retry logic in async transport."""
 
     @pytest.mark.asyncio
+    async def test_retry_disabled_by_default(self):
+        with respx.mock(base_url=BASE_URL) as mock_api:
+            route = mock_api.get("/v1/introspect/stats")
+            route.mock(
+                return_value=httpx.Response(
+                    503, json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy")
+                )
+            )
+
+            async with AsyncClient(BASE_URL, api_key="key") as client:
+                with pytest.raises(CerememoryError):
+                    await client.stats()
+            assert route.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_retry_on_503(self):
         with respx.mock(base_url=BASE_URL) as mock_api:
             route = mock_api.get("/v1/introspect/stats")
@@ -482,3 +531,118 @@ class TestAsyncRetryBehavior:
             ) as client:
                 stats = await client.stats()
                 assert stats.total_records == 42
+            assert route.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_mutating_post_by_default(self):
+        with respx.mock(base_url=BASE_URL) as mock_api:
+            route = mock_api.post("/v1/encode")
+            route.side_effect = [
+                httpx.Response(
+                    503,
+                    json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy", retry_after=0),
+                ),
+                httpx.Response(200, json=make_encode_store_response()),
+            ]
+
+            async with AsyncClient(BASE_URL, api_key="key", max_retries=1) as client:
+                req = EncodeStoreRequest(
+                    content=MemoryContent(
+                        blocks=[
+                            ContentBlock(
+                                modality=Modality.TEXT, format="text/plain", data=b"x"
+                            )
+                        ]
+                    )
+                )
+                with pytest.raises(CerememoryError):
+                    await client.encode_store(req)
+            assert route.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_on_mutating_post_when_opted_in(self):
+        with respx.mock(base_url=BASE_URL) as mock_api:
+            route = mock_api.post("/v1/encode")
+            route.side_effect = [
+                httpx.Response(
+                    503,
+                    json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy", retry_after=0),
+                ),
+                httpx.Response(200, json=make_encode_store_response()),
+            ]
+
+            async with AsyncClient(
+                BASE_URL,
+                api_key="key",
+                max_retries=1,
+                retry_mutating_requests=True,
+            ) as client:
+                req = EncodeStoreRequest(
+                    content=MemoryContent(
+                        blocks=[
+                            ContentBlock(
+                                modality=Modality.TEXT, format="text/plain", data=b"x"
+                            )
+                        ]
+                    )
+                )
+                resp = await client.encode_store(req)
+                assert resp.record_id == SAMPLE_RECORD_ID
+            assert route.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_mutating_post_by_default(self):
+        with respx.mock(base_url=BASE_URL) as mock_api:
+            route = mock_api.post("/v1/encode")
+            route.side_effect = [
+                httpx.Response(
+                    503,
+                    json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy", retry_after=0),
+                ),
+                httpx.Response(200, json=make_encode_store_response()),
+            ]
+
+            async with AsyncClient(BASE_URL, api_key="key", max_retries=1) as client:
+                req = EncodeStoreRequest(
+                    content=MemoryContent(
+                        blocks=[
+                            ContentBlock(
+                                modality=Modality.TEXT, format="text/plain", data=b"x"
+                            )
+                        ]
+                    )
+                )
+                with pytest.raises(CerememoryError):
+                    await client.encode_store(req)
+            assert route.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_on_mutating_post_when_opted_in(self):
+        with respx.mock(base_url=BASE_URL) as mock_api:
+            route = mock_api.post("/v1/encode")
+            route.side_effect = [
+                httpx.Response(
+                    503,
+                    json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy", retry_after=0),
+                ),
+                httpx.Response(200, json=make_encode_store_response()),
+            ]
+
+            async with AsyncClient(
+                BASE_URL,
+                api_key="key",
+                max_retries=1,
+                retry_mutating_requests=True,
+            ) as client:
+                req = EncodeStoreRequest(
+                    content=MemoryContent(
+                        blocks=[
+                            ContentBlock(
+                                modality=Modality.TEXT, format="text/plain", data=b"x"
+                            )
+                        ]
+                    )
+                )
+                resp = await client.encode_store(req)
+                assert resp.record_id == SAMPLE_RECORD_ID
+            assert route.call_count == 2

@@ -182,6 +182,7 @@ export interface EncodeStoreRequest {
   store?: StoreType | null;
   emotion?: EmotionVector | null;
   context?: EncodeContext | null;
+  metadata?: Record<string, unknown> | null;
   associations?: ManualAssociation[] | null;
 }
 
@@ -276,7 +277,15 @@ export interface ActivationTrace {
 export interface RecallQueryResponse {
   memories: RecalledMemory[];
   activation_trace?: ActivationTrace | null;
+  query_metadata?: QueryMetadata | null;
   total_candidates: number;
+}
+
+/** Metadata about a recall query execution. */
+export interface QueryMetadata {
+  total_records_scanned: number;
+  stores_searched: StoreType[];
+  fidelity_filtered: number;
 }
 
 /** recall.associate request (CMP Spec section 4.2). */
@@ -467,6 +476,7 @@ export interface CMPErrorEnvelope {
   message: string;
   details?: unknown | null;
   retry_after?: number | null;
+  request_id?: string | null;
 }
 
 // ─── Health ──────────────────────────────────────────────────────────
@@ -483,6 +493,7 @@ export interface StoreOptions {
   store?: StoreType;
   emotion?: Partial<EmotionVector>;
   context?: EncodeContext;
+  /** Stored alongside the record as request metadata. */
   metadata?: Record<string, unknown>;
 }
 
@@ -493,6 +504,10 @@ export interface RecallOptions {
   min_fidelity?: number;
   recall_mode?: RecallMode;
   include_decayed?: boolean;
+  /** Whether recall should reconsolidate the result set. Defaults to the protocol default. */
+  reconsolidate?: boolean;
+  /** Activation depth for spreading activation. Defaults to the protocol default. */
+  activation_depth?: number;
 }
 
 /** Options for the simplified `forget()` method. */

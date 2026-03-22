@@ -423,6 +423,7 @@ mod tests {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         })
         .unwrap()
@@ -477,6 +478,7 @@ mod tests {
                     store: Some(StoreType::Episodic),
                     emotion: None,
                     context: None,
+                    metadata: None,
                     associations: None,
                 },
                 EncodeStoreRequest {
@@ -493,6 +495,7 @@ mod tests {
                     store: Some(StoreType::Semantic),
                     emotion: None,
                     context: None,
+                    metadata: None,
                     associations: None,
                 },
             ],

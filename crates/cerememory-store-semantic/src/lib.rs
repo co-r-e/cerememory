@@ -71,6 +71,7 @@ fn association_type_to_byte(t: AssociationType) -> u8 {
     }
 }
 
+#[allow(dead_code)]
 fn byte_to_association_type(b: u8) -> AssociationType {
     match b {
         0 => AssociationType::Temporal,
@@ -162,17 +163,15 @@ impl SemanticStore {
                 .begin_write()
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
             {
-                // Verify both nodes exist
-                let nodes = txn
+                // Verify both nodes exist and update the source record's
+                // persisted association list so graph reads survive rebuilds.
+                let mut nodes = txn
                     .open_table(NODES)
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                if nodes
+                let source_value = nodes
                     .get(source.as_bytes().as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?
-                    .is_none()
-                {
-                    return Err(CerememoryError::RecordNotFound(source.to_string()));
-                }
+                    .ok_or_else(|| CerememoryError::RecordNotFound(source.to_string()))?;
                 if nodes
                     .get(target.as_bytes().as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?
@@ -180,7 +179,31 @@ impl SemanticStore {
                 {
                     return Err(CerememoryError::RecordNotFound(target.to_string()));
                 }
-                drop(nodes);
+                let mut source_record: MemoryRecord =
+                    rmp_serde::from_slice(source_value.value())
+                        .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                drop(source_value);
+
+                if !source_record
+                    .associations
+                    .iter()
+                    .any(|assoc| assoc.target_id == target && assoc.association_type == assoc_type)
+                {
+                    source_record.associations.push(Association {
+                        target_id: target,
+                        association_type: assoc_type,
+                        weight,
+                        created_at: Utc::now(),
+                        last_co_activation: Utc::now(),
+                    });
+                    source_record.updated_at = Utc::now();
+                    source_record.version += 1;
+                    let source_bytes = rmp_serde::to_vec(&source_record)
+                        .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                    nodes
+                        .insert(source.as_bytes().as_slice(), source_bytes.as_slice())
+                        .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                }
 
                 let fwd_key = edge_key(&source, &target, assoc_type);
                 let rev_key = reverse_edge_key(&source, &target, assoc_type);
@@ -227,6 +250,39 @@ impl SemanticStore {
                 .begin_write()
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
             let removed = {
+                let mut nodes = txn
+                    .open_table(NODES)
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                let source_value = nodes
+                    .get(source.as_bytes().as_slice())
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                let updated_source = if let Some(val) = source_value.as_ref() {
+                    let mut rec: MemoryRecord = rmp_serde::from_slice(val.value())
+                        .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                    let original_len = rec.associations.len();
+                    rec.associations.retain(|assoc| {
+                        !(assoc.target_id == target && assoc.association_type == assoc_type)
+                    });
+                    if rec.associations.len() != original_len {
+                        rec.updated_at = Utc::now();
+                        rec.version += 1;
+                        Some(
+                            rmp_serde::to_vec(&rec)
+                                .map_err(|e| CerememoryError::Serialization(e.to_string()))?,
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                drop(source_value);
+                if let Some(bytes) = updated_source {
+                    nodes
+                        .insert(source.as_bytes().as_slice(), bytes.as_slice())
+                        .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                }
+
                 let fwd_key = edge_key(&source, &target, assoc_type);
                 let rev_key = reverse_edge_key(&source, &target, assoc_type);
 
@@ -256,43 +312,10 @@ impl SemanticStore {
 
     /// Get all outgoing neighbors (forward edges) of a node.
     pub async fn get_neighbors(&self, id: Uuid) -> Result<Vec<Association>, CerememoryError> {
-        let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let txn = db
-                .begin_read()
-                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-            let edges = txn
-                .open_table(EDGES)
-                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-
-            let prefix = id.as_bytes().to_vec();
-            let mut result = Vec::new();
-
-            for entry in edges
-                .iter()
-                .map_err(|e| CerememoryError::Storage(e.to_string()))?
-            {
-                let (k, v) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                let key_bytes = k.value();
-                if key_bytes.len() == 33 && key_bytes.starts_with(&prefix) {
-                    let edge: EdgeEntry = rmp_serde::from_slice(v.value())
-                        .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
-                    let source_target_type_byte = key_bytes[32];
-                    let target_uuid =
-                        Uuid::from_bytes(key_bytes[16..32].try_into().expect("16 bytes"));
-                    result.push(Association {
-                        target_id: target_uuid,
-                        association_type: byte_to_association_type(source_target_type_byte),
-                        weight: edge.weight,
-                        created_at: edge.created_at,
-                        last_co_activation: edge.created_at,
-                    });
-                }
-            }
-            Ok(result)
-        })
-        .await
-        .map_err(|e| CerememoryError::Internal(e.to_string()))?
+        self.get(&id)
+            .await?
+            .map(|record| record.associations)
+            .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))
     }
 
     /// Get all nodes that have edges *pointing to* the given node (reverse lookup).
@@ -305,24 +328,25 @@ impl SemanticStore {
             let txn = db
                 .begin_read()
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-            let rev = txn
-                .open_table(REVERSE_EDGES)
+            let nodes = txn
+                .open_table(NODES)
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-
-            let prefix = id.as_bytes().to_vec();
             let mut result = Vec::new();
 
-            for entry in rev
+            for entry in nodes
                 .iter()
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?
             {
-                let (k, _v) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                let key_bytes = k.value();
-                if key_bytes.len() == 33 && key_bytes.starts_with(&prefix) {
-                    let source_uuid =
-                        Uuid::from_bytes(key_bytes[16..32].try_into().expect("16 bytes"));
-                    let assoc_type = byte_to_association_type(key_bytes[32]);
-                    result.push((source_uuid, assoc_type));
+                let (key, value) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                let source_uuid = Uuid::from_bytes(key.value().try_into().map_err(|_| {
+                    CerememoryError::Internal("Invalid UUID key length".to_string())
+                })?);
+                let record: MemoryRecord = rmp_serde::from_slice(value.value())
+                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                for assoc in record.associations {
+                    if assoc.target_id == id {
+                        result.push((source_uuid, assoc.association_type));
+                    }
                 }
             }
             Ok(result)
@@ -820,6 +844,47 @@ impl Store for SemanticStore {
                     }
                     SemanticStore::index_concepts_for_record(&mut concepts, &rec)?;
                 }
+
+                let bytes = rmp_serde::to_vec(&rec)
+                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                nodes
+                    .insert(id.as_bytes().as_slice(), bytes.as_slice())
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            }
+            txn.commit()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(e.to_string()))?
+    }
+
+    async fn replace_associations(
+        &self,
+        id: &Uuid,
+        associations: Vec<Association>,
+    ) -> Result<(), CerememoryError> {
+        let db = self.db.clone();
+        let id = *id;
+        tokio::task::spawn_blocking(move || {
+            let txn = db
+                .begin_write()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            {
+                let mut nodes = txn
+                    .open_table(NODES)
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                let val = nodes
+                    .get(id.as_bytes().as_slice())
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?
+                    .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
+                let mut rec: MemoryRecord = rmp_serde::from_slice(val.value())
+                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                drop(val);
+
+                rec.associations = associations;
+                rec.updated_at = Utc::now();
+                rec.version += 1;
 
                 let bytes = rmp_serde::to_vec(&rec)
                     .map_err(|e| CerememoryError::Serialization(e.to_string()))?;

@@ -54,6 +54,16 @@ pub trait Store: Send + Sync {
         metadata: Option<serde_json::Value>,
     ) -> impl Future<Output = Result<(), CerememoryError>> + Send;
 
+    /// Replace the full association list for a record.
+    ///
+    /// This is used when inferred or derived associations must be persisted so
+    /// they survive rebuild/export/import.
+    fn replace_associations(
+        &self,
+        id: &Uuid,
+        associations: Vec<Association>,
+    ) -> impl Future<Output = Result<(), CerememoryError>> + Send;
+
     /// Update access metadata (access count and last accessed timestamp).
     ///
     /// Used by reconsolidation to persist retrieval statistics.

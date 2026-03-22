@@ -28,6 +28,9 @@ export class CerememoryError extends Error {
   /** HTTP status code from the response, if available. */
   public readonly statusCode: number | null;
 
+  /** Request correlation ID from the server, if available. */
+  public requestId: string | null;
+
   constructor(
     code: CMPErrorCode,
     message: string,
@@ -35,6 +38,7 @@ export class CerememoryError extends Error {
       details?: unknown | null;
       retryAfter?: number | null;
       statusCode?: number | null;
+      requestId?: string | null;
     },
   ) {
     super(message);
@@ -43,6 +47,7 @@ export class CerememoryError extends Error {
     this.details = options?.details ?? null;
     this.retryAfter = options?.retryAfter ?? null;
     this.statusCode = options?.statusCode ?? null;
+    this.requestId = options?.requestId ?? null;
   }
 
   /** Whether the client should retry the request. */
@@ -205,53 +210,61 @@ export function fromEnvelope(
   envelope: CMPErrorEnvelope,
   statusCode: number,
 ): CerememoryError {
-  const { code, message, details, retry_after } = envelope;
+  const { code, message, details, retry_after, request_id } = envelope;
+
+  const attachRequestId = <T extends CerememoryError>(err: T): T => {
+    err.requestId = request_id ?? null;
+    return err;
+  };
 
   switch (code) {
     case "RECORD_NOT_FOUND":
-      return new RecordNotFoundError(message, statusCode);
+      return attachRequestId(new RecordNotFoundError(message, statusCode));
     case "STORE_INVALID":
-      return new StoreInvalidError(message, statusCode);
+      return attachRequestId(new StoreInvalidError(message, statusCode));
     case "CONTENT_TOO_LARGE":
-      return new ContentTooLargeError(message, statusCode);
+      return attachRequestId(new ContentTooLargeError(message, statusCode));
     case "VALIDATION_ERROR":
-      return new ValidationError(message, details, statusCode);
+      return attachRequestId(new ValidationError(message, details, statusCode));
     case "MODALITY_UNSUPPORTED":
-      return new ModalityUnsupportedError(message, statusCode);
+      return attachRequestId(new ModalityUnsupportedError(message, statusCode));
     case "WORKING_MEMORY_FULL":
-      return new WorkingMemoryFullError(message, statusCode);
+      return attachRequestId(new WorkingMemoryFullError(message, statusCode));
     case "DECAY_ENGINE_BUSY":
-      return new DecayEngineBusyError(
+      return attachRequestId(new DecayEngineBusyError(
         message,
         retry_after ?? undefined,
         statusCode,
-      );
+      ));
     case "CONSOLIDATION_IN_PROGRESS":
-      return new ConsolidationInProgressError(message, statusCode);
+      return attachRequestId(
+        new ConsolidationInProgressError(message, statusCode),
+      );
     case "EXPORT_FAILED":
-      return new ExportFailedError(message, statusCode);
+      return attachRequestId(new ExportFailedError(message, statusCode));
     case "IMPORT_CONFLICT":
-      return new ImportConflictError(message, statusCode);
+      return attachRequestId(new ImportConflictError(message, statusCode));
     case "FORGET_UNCONFIRMED":
-      return new ForgetUnconfirmedError(message, statusCode);
+      return attachRequestId(new ForgetUnconfirmedError(message, statusCode));
     case "VERSION_MISMATCH":
-      return new VersionMismatchError(message, statusCode);
+      return attachRequestId(new VersionMismatchError(message, statusCode));
     case "UNAUTHORIZED":
-      return new UnauthorizedError(message, statusCode);
+      return attachRequestId(new UnauthorizedError(message, statusCode));
     case "RATE_LIMITED":
-      return new RateLimitedError(
+      return attachRequestId(new RateLimitedError(
         message,
         retry_after ?? undefined,
         statusCode,
-      );
+      ));
     case "INTERNAL_ERROR":
-      return new InternalError(message, statusCode);
+      return attachRequestId(new InternalError(message, statusCode));
     default: {
       // Fallback for unknown codes — future-proof
       const err = new CerememoryError(code, message, {
         details,
         retryAfter: retry_after,
         statusCode,
+        requestId: request_id,
       });
       return err;
     }

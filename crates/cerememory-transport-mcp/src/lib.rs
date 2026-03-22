@@ -62,6 +62,10 @@ struct RecallParams {
     limit: Option<u32>,
     /// Comma-separated store type filter (e.g., 'episodic,semantic'). Omit to search all stores.
     stores: Option<String>,
+    /// Whether to reconsolidate recalled memories (default: true).
+    reconsolidate: Option<bool>,
+    /// Activation depth for spreading activation (default: 2).
+    activation_depth: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -90,6 +94,8 @@ struct ForgetParams {
     record_ids: String,
     /// Also delete records associated with the target records (default: false)
     cascade: Option<bool>,
+    /// Must be true to confirm irreversible deletion.
+    confirm: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -114,6 +120,8 @@ struct ExportParams {
     encrypt: Option<bool>,
     /// Passphrase for archive encryption. Required when encrypt is true. Use a strong passphrase (16+ chars recommended).
     encryption_key: Option<String>,
+    /// Output path for the exported CMA archive. Required.
+    output_path: String,
 }
 
 /// Convert an EmotionVector to a human-readable label, or None if neutral (intensity == 0).
@@ -153,6 +161,7 @@ struct McpRecalledMemory {
 #[derive(Serialize)]
 struct McpRecallResponse {
     memories: Vec<McpRecalledMemory>,
+    query_metadata: Option<QueryMetadata>,
     total_candidates: u32,
 }
 
@@ -301,6 +310,7 @@ fn build_text_store_request(
         store,
         emotion,
         context: None,
+        metadata: None,
         associations: None,
     }
 }
@@ -451,8 +461,8 @@ impl CerememoryMcpServer {
             limit: p.limit.unwrap_or(10).clamp(1, 1000),
             min_fidelity: None,
             include_decayed: false,
-            reconsolidate: true,
-            activation_depth: 2,
+            reconsolidate: p.reconsolidate.unwrap_or(true),
+            activation_depth: p.activation_depth.unwrap_or(2),
             recall_mode: RecallMode::Perfect,
         };
 
@@ -476,6 +486,7 @@ impl CerememoryMcpServer {
                     emotion: emotion_label(&m.record.emotion),
                 })
                 .collect(),
+            query_metadata: resp.query_metadata,
             total_candidates: resp.total_candidates,
         };
         ok_json(&mcp_resp)
@@ -570,10 +581,16 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Permanently and irreversibly delete memory records by UUID. Returns JSON: {records_deleted}."
+        description = "Permanently and irreversibly delete memory records by UUID. Requires confirm=true. Returns JSON: {records_deleted}."
     )]
     async fn forget(&self, params: Parameters<ForgetParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        if !p.confirm {
+            return Err(McpError::invalid_params(
+                "Forget requires confirm=true to proceed".to_string(),
+                None,
+            ));
+        }
         let ids: Vec<uuid::Uuid> = p
             .record_ids
             .split(',')
@@ -586,7 +603,7 @@ impl CerememoryMcpServer {
             store: None,
             temporal_range: None,
             cascade: p.cascade.unwrap_or(false),
-            confirm: true,
+            confirm: p.confirm,
         };
 
         let deleted = self
@@ -652,11 +669,17 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Export all memory records as a CMA archive file. Optionally encrypted with ChaCha20-Poly1305. Returns metadata and archive size."
+        description = "Export all memory records as a CMA archive file to an explicit output path. Optionally encrypted with ChaCha20-Poly1305. Returns metadata and archive size."
     )]
     async fn export(&self, params: Parameters<ExportParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let format = parse_export_format(p.format)?;
+        if p.output_path.trim().is_empty() {
+            return Err(McpError::invalid_params(
+                "output_path must not be empty".to_string(),
+                None,
+            ));
+        }
         let req = ExportRequest {
             header: None,
             format,
@@ -671,12 +694,7 @@ impl CerememoryMcpServer {
             .await
             .map_err(engine_err)?;
 
-        // Write archive to file
-        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let filename = format!("cerememory-export-{timestamp}.cma");
-        let path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(&filename);
+        let path = std::path::PathBuf::from(p.output_path);
         std::fs::write(&path, &bytes).map_err(|e| {
             McpError::internal_error(format!("Failed to write archive file: {e}"), None)
         })?;
@@ -702,12 +720,12 @@ impl ServerHandler for CerememoryMcpServer {
                  - update: Edit an existing memory by UUID\n\
                  - batch_store: Save multiple memories at once\n\
                  - recall: Search memories by query, or list recent memories (omit query)\n\
-                 - timeline: Browse memories by time period\n\
+                - timeline: Browse memories by time period\n\
                  - associate: Find connected memories via spreading activation\n\
                  - inspect: View full details of a memory by UUID\n\
-                 - forget: Permanently delete memories by UUID\n\
+                 - forget: Permanently delete memories by UUID (requires confirm=true)\n\
                  - consolidate: Migrate mature episodic memories to semantic store\n\
-                 - export: Export all memories to a CMA archive file\n\
+                 - export: Export all memories to a CMA archive file (requires output_path)\n\
                  - stats: View system statistics and store counts",
             )
     }

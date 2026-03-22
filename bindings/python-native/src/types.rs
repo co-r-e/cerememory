@@ -335,6 +335,17 @@ impl PyRecallQueryResponse {
             .unwrap_or_else(|| py.None()))
     }
 
+    /// Metadata about how the recall query was executed.
+    #[getter]
+    fn query_metadata(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .inner
+            .get("query_metadata")
+            .map(|v| json_value_to_py(py, v))
+            .transpose()?
+            .unwrap_or_else(|| py.None()))
+    }
+
     /// Total number of candidate records evaluated.
     #[getter]
     fn total_candidates(&self) -> u32 {

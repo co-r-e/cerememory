@@ -211,6 +211,22 @@ impl Store for WorkingMemoryStore {
         Ok(())
     }
 
+    async fn replace_associations(
+        &self,
+        id: &Uuid,
+        associations: Vec<Association>,
+    ) -> Result<(), CerememoryError> {
+        let mut inner = self.inner.write().await;
+        let record = inner
+            .records
+            .get_mut(id)
+            .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
+        record.associations = associations;
+        record.updated_at = Utc::now();
+        record.version = record.version.saturating_add(1);
+        Ok(())
+    }
+
     async fn update_access(
         &self,
         id: &Uuid,

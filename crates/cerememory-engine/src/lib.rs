@@ -672,6 +672,121 @@ impl CerememoryEngine {
         Ok(None)
     }
 
+    fn build_record_metadata(
+        context: Option<EncodeContext>,
+        metadata: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let context_value = context.and_then(|ctx| serde_json::to_value(ctx).ok());
+        match (metadata, context_value) {
+            (Some(serde_json::Value::Object(mut map)), Some(context)) => {
+                map.insert("_context".to_string(), context);
+                serde_json::Value::Object(map)
+            }
+            (Some(other), Some(context)) => serde_json::json!({
+                "_metadata": other,
+                "_context": context,
+            }),
+            (Some(metadata), None) => metadata,
+            (None, Some(context)) => serde_json::json!({ "_context": context }),
+            (None, None) => serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    async fn persist_associations_for_record(
+        &self,
+        record_id: &Uuid,
+        store_type: StoreType,
+        associations: Vec<Association>,
+    ) -> Result<(), CerememoryError> {
+        dispatch_store!(
+            self,
+            store_type,
+            replace_associations(record_id, associations.clone())
+        )?;
+        self.coordinator
+            .update_associations(record_id, associations)
+            .await?;
+        Ok(())
+    }
+
+    async fn add_persisted_association(
+        &self,
+        record_id: &Uuid,
+        association: Association,
+    ) -> Result<(), CerememoryError> {
+        let Some((record, store_type)) = self.get_store_record(record_id).await? else {
+            return Err(CerememoryError::RecordNotFound(record_id.to_string()));
+        };
+
+        let mut associations = self.coordinator.get_associations(record_id).await?;
+        for persisted in &record.associations {
+            if !associations.iter().any(|existing| {
+                existing.target_id == persisted.target_id
+                    && existing.association_type == persisted.association_type
+            }) {
+                associations.push(persisted.clone());
+            }
+        }
+
+        if associations.iter().any(|existing| {
+            existing.target_id == association.target_id
+                && existing.association_type == association.association_type
+        }) {
+            return Ok(());
+        }
+
+        associations.push(association);
+        self.persist_associations_for_record(record_id, store_type, associations)
+            .await
+    }
+
+    async fn remove_deleted_targets_from_records(
+        &self,
+        deleted_ids: &HashSet<Uuid>,
+    ) -> Result<(), CerememoryError> {
+        if deleted_ids.is_empty() {
+            return Ok(());
+        }
+
+        for store_type in ALL_STORES {
+            let ids = dispatch_store!(self, store_type, list_ids())?;
+            for id in ids {
+                let Some(record) = dispatch_store!(self, store_type, get(&id))? else {
+                    continue;
+                };
+                let filtered: Vec<_> = record
+                    .associations
+                    .iter()
+                    .filter(|association| !deleted_ids.contains(&association.target_id))
+                    .cloned()
+                    .collect();
+                if filtered.len() != record.associations.len() {
+                    self.persist_associations_for_record(&id, store_type, filtered)
+                        .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn cleanup_deleted_records(
+        &self,
+        deleted_records: &[(Uuid, StoreType)],
+    ) -> Result<(), CerememoryError> {
+        if deleted_records.is_empty() {
+            return Ok(());
+        }
+
+        let mut deleted_ids = HashSet::with_capacity(deleted_records.len());
+        for (record_id, _) in deleted_records {
+            deleted_ids.insert(*record_id);
+            self.coordinator.unregister(record_id).await;
+            self.unindex_record(*record_id);
+        }
+        self.remove_deleted_targets_from_records(&deleted_ids).await
+    }
+
     // ─── CMP Encode Operations ───────────────────────────────────────
 
     /// encode.store — Store a new memory record (CMP Spec §3.1).
@@ -680,7 +795,16 @@ impl CerememoryEngine {
         req: EncodeStoreRequest,
     ) -> Result<EncodeStoreResponse, CerememoryError> {
         let _timer = TimerGuard::new("cerememory_encode_duration_seconds");
-        let store_type = req.store.unwrap_or_else(|| self.route_store(&req.content));
+        let EncodeStoreRequest {
+            content,
+            store,
+            emotion,
+            context,
+            metadata,
+            associations,
+            ..
+        } = req;
+        let store_type = store.unwrap_or_else(|| self.route_store(&content));
 
         let mut record = MemoryRecord {
             id: Uuid::now_v7(),
@@ -689,17 +813,17 @@ impl CerememoryEngine {
             updated_at: Utc::now(),
             last_accessed_at: Utc::now(),
             access_count: 0,
-            content: req.content,
+            content,
             fidelity: FidelityState::default(),
-            emotion: req.emotion.unwrap_or_default(),
+            emotion: emotion.unwrap_or_default(),
             associations: Vec::new(),
-            metadata: serde_json::Value::Object(serde_json::Map::new()),
+            metadata: Self::build_record_metadata(context, metadata),
             version: 1,
         };
 
         // Add manual associations
         let mut assoc_count = 0u32;
-        if let Some(manual) = req.associations {
+        if let Some(manual) = associations {
             for ma in manual {
                 record.associations.push(Association {
                     target_id: ma.target_id,
@@ -842,8 +966,8 @@ impl CerememoryEngine {
         if store_type == StoreType::Working {
             let (_, evicted) = self.working.store_with_eviction(record.clone()).await?;
             if let Some(evicted_id) = evicted {
-                self.coordinator.unregister(&evicted_id).await;
-                self.unindex_record(evicted_id);
+                self.cleanup_deleted_records(&[(evicted_id, StoreType::Working)])
+                    .await?;
             }
         } else {
             dispatch_store!(self, store_type, store(record.clone()))?;
@@ -908,11 +1032,9 @@ impl CerememoryEngine {
                         created_at: Utc::now(),
                         last_co_activation: Utc::now(),
                     };
-                    let _ = self.coordinator.add_association(&prev, assoc_fwd).await;
-                    let _ = self
-                        .coordinator
-                        .add_association(&resp.record_id, assoc_bwd)
-                        .await;
+                    self.add_persisted_association(&prev, assoc_fwd).await?;
+                    self.add_persisted_association(&resp.record_id, assoc_bwd)
+                        .await?;
                     total_inferred += 2;
                 }
             }
@@ -1107,27 +1229,31 @@ impl CerememoryEngine {
             // No search cue — candidates will come from temporal or activation only
         }
 
-        // 4. Temporal range filter
+        // 4. Temporal range enrichment across all requested stores
         if let Some(ref temporal) = req.cue.temporal {
-            let results = self
-                .episodic
-                .query_temporal_range(temporal.start, temporal.end)
-                .await?;
-            for record in results {
-                if scanned_ids.insert(record.id) {
-                    total_records_scanned += 1;
-                }
-                if !seen_ids.insert(record.id) {
-                    continue;
-                }
-                if let Some(min_f) = req.min_fidelity {
-                    if record.fidelity.score < min_f && !req.include_decayed {
-                        fidelity_filtered += 1;
+            for store_type in &stores {
+                let ids = dispatch_store!(self, *store_type, list_ids())?;
+                for id in ids {
+                    let Some(record) = dispatch_store!(self, *store_type, get(&id))? else {
+                        continue;
+                    };
+                    if record.created_at < temporal.start || record.created_at > temporal.end {
                         continue;
                     }
+                    if scanned_ids.insert(record.id) {
+                        total_records_scanned += 1;
+                    }
+                    if !seen_ids.insert(record.id) {
+                        continue;
+                    }
+                    if let Some(min_f) = req.min_fidelity {
+                        if record.fidelity.score < min_f && !req.include_decayed {
+                            fidelity_filtered += 1;
+                            continue;
+                        }
+                    }
+                    candidates.push((record.clone(), record.fidelity.score));
                 }
-                let score = record.fidelity.score;
-                candidates.push((record, score));
             }
         }
 
@@ -1164,6 +1290,19 @@ impl CerememoryEngine {
             if let Some(activation) = activated_ids.get(&record.id) {
                 *relevance += activation * 0.3;
             }
+        }
+
+        if let Some(ref temporal) = req.cue.temporal {
+            candidates.retain(|(record, _)| {
+                record.created_at >= temporal.start && record.created_at <= temporal.end
+            });
+        }
+        candidates.retain(|(record, _)| stores.contains(&record.store));
+        if let Some(min_fidelity) = req.min_fidelity {
+            let before = candidates.len();
+            candidates
+                .retain(|(record, _)| req.include_decayed || record.fidelity.score >= min_fidelity);
+            fidelity_filtered += (before - candidates.len()) as u32;
         }
 
         // Sort by relevance descending, track pre-truncation count
@@ -1635,14 +1774,15 @@ impl CerememoryEngine {
                     // Merge associations from removed to kept
                     let removed_assocs = self.coordinator.get_associations(&actual_remove).await?;
                     for assoc in removed_assocs {
-                        let _ = self.coordinator.add_association(&actual_keep, assoc).await;
+                        self.add_persisted_association(&actual_keep, assoc).await?;
                     }
 
                     // Delete the duplicate
-                    dispatch_store!(self, actual_remove_store, delete(&actual_remove))?;
-                    self.coordinator.unregister(&actual_remove).await;
-                    self.unindex_record(actual_remove);
-                    compressed += 1;
+                    if dispatch_store!(self, actual_remove_store, delete(&actual_remove))? {
+                        self.cleanup_deleted_records(&[(actual_remove, actual_remove_store)])
+                            .await?;
+                        compressed += 1;
+                    }
                 }
             }
         }
@@ -1753,15 +1893,16 @@ impl CerememoryEngine {
                     created_at: Utc::now(),
                     last_co_activation: Utc::now(),
                 };
-                let _ = self.coordinator.add_association(&id, assoc).await;
+                self.add_persisted_association(&id, assoc).await?;
 
                 migrated += 1;
 
                 if record.fidelity.score < 0.1 {
-                    self.episodic.delete(&id).await?;
-                    self.coordinator.unregister(&id).await;
-                    self.unindex_record(id);
-                    pruned += 1;
+                    if self.episodic.delete(&id).await? {
+                        self.cleanup_deleted_records(&[(id, StoreType::Episodic)])
+                            .await?;
+                        pruned += 1;
+                    }
                 }
             }
         }
@@ -1820,9 +1961,10 @@ impl CerememoryEngine {
         for output in &result.updates {
             if let Some(&store_type) = record_stores.get(&output.id) {
                 if output.should_prune {
-                    dispatch_store!(self, store_type, delete(&output.id))?;
-                    self.coordinator.unregister(&output.id).await;
-                    self.unindex_record(output.id);
+                    if dispatch_store!(self, store_type, delete(&output.id))? {
+                        self.cleanup_deleted_records(&[(output.id, store_type)])
+                            .await?;
+                    }
                 } else {
                     dispatch_store!(
                         self,
@@ -1874,33 +2016,24 @@ impl CerememoryEngine {
             return Err(CerememoryError::ForgetUnconfirmed);
         }
 
+        let ForgetRequest {
+            record_ids,
+            store,
+            temporal_range,
+            cascade,
+            ..
+        } = req;
         let mut deleted = 0u32;
+        let mut delete_targets: HashMap<Uuid, StoreType> = HashMap::new();
 
-        if let Some(ids) = req.record_ids {
+        if let Some(ids) = record_ids {
             for id in ids {
-                if let Some(store_type) = self.coordinator.get_record_store_type(&id).await? {
-                    let cascade_targets = if req.cascade {
-                        self.coordinator.get_associations(&id).await?
-                    } else {
-                        Vec::new()
-                    };
-
-                    if dispatch_store!(self, store_type, delete(&id))? {
-                        self.coordinator.unregister(&id).await;
-                        self.unindex_record(id);
-                        deleted += 1;
-                    }
-
-                    for assoc in cascade_targets {
-                        if let Some(st) = self
-                            .coordinator
-                            .get_record_store_type(&assoc.target_id)
-                            .await?
-                        {
-                            if dispatch_store!(self, st, delete(&assoc.target_id))? {
-                                self.coordinator.unregister(&assoc.target_id).await;
-                                self.unindex_record(assoc.target_id);
-                                deleted += 1;
+                if let Some((record, store_type)) = self.get_store_record(&id).await? {
+                    delete_targets.insert(id, store_type);
+                    if cascade {
+                        for assoc in &record.associations {
+                            if let Some((_, st)) = self.get_store_record(&assoc.target_id).await? {
+                                delete_targets.insert(assoc.target_id, st);
                             }
                         }
                     }
@@ -1908,16 +2041,35 @@ impl CerememoryEngine {
             }
         }
 
-        if let Some(store_type) = req.store {
+        if let Some(store_type) = store {
             let ids = dispatch_store!(self, store_type, list_ids())?;
             for id in ids {
-                if dispatch_store!(self, store_type, delete(&id))? {
-                    self.coordinator.unregister(&id).await;
-                    self.unindex_record(id);
-                    deleted += 1;
+                delete_targets.insert(id, store_type);
+            }
+        }
+
+        if let Some(range) = temporal_range {
+            for store_type in ALL_STORES {
+                let ids = dispatch_store!(self, store_type, list_ids())?;
+                for id in ids {
+                    let Some(record) = dispatch_store!(self, store_type, get(&id))? else {
+                        continue;
+                    };
+                    if record.created_at >= range.start && record.created_at <= range.end {
+                        delete_targets.insert(id, store_type);
+                    }
                 }
             }
         }
+
+        let mut deleted_records = Vec::new();
+        for (id, store_type) in delete_targets {
+            if dispatch_store!(self, store_type, delete(&id))? {
+                deleted_records.push((id, store_type));
+                deleted += 1;
+            }
+        }
+        self.cleanup_deleted_records(&deleted_records).await?;
 
         warn!(deleted, "Forget operation completed");
         Ok(deleted)
@@ -1975,29 +2127,38 @@ impl CerememoryEngine {
 
         for record in records {
             let store_type = record.store;
+            let mut replaced_cross_store: Option<StoreType> = None;
 
             // Check for ID conflicts
             if let Some((existing, existing_store)) = self.get_store_record(&record.id).await? {
                 match conflict_resolution {
                     ConflictResolution::KeepExisting => continue,
                     ConflictResolution::KeepImported => {
-                        // Delete existing, then store new
-                        dispatch_store!(self, existing_store, delete(&record.id))?;
-                        self.coordinator.unregister(&record.id).await;
-                        self.unindex_record(record.id);
+                        if existing_store != store_type {
+                            replaced_cross_store = Some(existing_store);
+                        }
                     }
                     ConflictResolution::KeepNewer => {
                         if record.updated_at <= existing.updated_at {
                             continue;
                         }
-                        dispatch_store!(self, existing_store, delete(&record.id))?;
-                        self.coordinator.unregister(&record.id).await;
-                        self.unindex_record(record.id);
+                        if existing_store != store_type {
+                            replaced_cross_store = Some(existing_store);
+                        }
                     }
                 }
             }
 
             dispatch_store!(self, store_type, store(record.clone()))?;
+            if let Some(existing_store) = replaced_cross_store {
+                if !dispatch_store!(self, existing_store, delete(&record.id))? {
+                    let _ = dispatch_store!(self, store_type, delete(&record.id));
+                    return Err(CerememoryError::ImportConflict(format!(
+                        "Failed to replace cross-store record {} from {} to {}",
+                        record.id, existing_store, store_type
+                    )));
+                }
+            }
             self.coordinator
                 .register(record.id, store_type, record.associations.clone())
                 .await;
@@ -2315,6 +2476,7 @@ mod tests {
             store,
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         }
     }
@@ -2334,6 +2496,7 @@ mod tests {
             store,
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         }
     }
@@ -2373,6 +2536,51 @@ mod tests {
             recall_resp.memories[0].record.text_content(),
             Some("The quick brown fox")
         );
+    }
+
+    #[tokio::test]
+    async fn encode_store_persists_metadata_and_context() {
+        let engine = make_engine().await;
+
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryContent {
+                    blocks: vec![ContentBlock {
+                        modality: Modality::Text,
+                        format: "text/plain".to_string(),
+                        data: b"metadata roundtrip".to_vec(),
+                        embedding: None,
+                    }],
+                    summary: None,
+                },
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: Some(EncodeContext {
+                    source: Some("chat".to_string()),
+                    session_id: Some("sess-1".to_string()),
+                    spatial: None,
+                    temporal: None,
+                }),
+                metadata: Some(serde_json::json!({"tag": "important"})),
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(record.metadata["tag"], "important");
+        assert_eq!(record.metadata["_context"]["source"], "chat");
+        assert_eq!(record.metadata["_context"]["session_id"], "sess-1");
     }
 
     #[tokio::test]
@@ -2430,6 +2638,7 @@ mod tests {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         };
         engine.encode_store(req).await.unwrap();
@@ -2477,6 +2686,7 @@ mod tests {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         };
         engine.encode_store(req1).await.unwrap();
@@ -2544,6 +2754,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn temporal_query_filters_activation_results_across_stores() {
+        let engine = make_engine().await;
+
+        let mut old_semantic = MemoryRecord::new_text(StoreType::Semantic, "alpha out of range");
+        old_semantic.created_at = Utc::now() - chrono::Duration::days(7);
+        old_semantic.updated_at = old_semantic.created_at;
+        old_semantic.last_accessed_at = old_semantic.created_at;
+        engine.semantic.store(old_semantic.clone()).await.unwrap();
+        engine
+            .coordinator
+            .register(
+                old_semantic.id,
+                StoreType::Semantic,
+                old_semantic.associations.clone(),
+            )
+            .await;
+        engine.index_record(&old_semantic).unwrap();
+
+        let current = MemoryRecord {
+            associations: vec![Association {
+                target_id: old_semantic.id,
+                association_type: AssociationType::Semantic,
+                weight: 0.9,
+                created_at: Utc::now(),
+                last_co_activation: Utc::now(),
+            }],
+            ..MemoryRecord::new_text(StoreType::Episodic, "alpha in range")
+        };
+        engine.episodic.store(current.clone()).await.unwrap();
+        engine
+            .coordinator
+            .register(
+                current.id,
+                StoreType::Episodic,
+                current.associations.clone(),
+            )
+            .await;
+        engine.index_record(&current).unwrap();
+
+        let now = Utc::now();
+        let resp = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("alpha".to_string()),
+                    temporal: Some(TemporalRange {
+                        start: now - chrono::Duration::minutes(1),
+                        end: now + chrono::Duration::minutes(1),
+                    }),
+                    ..Default::default()
+                },
+                stores: None,
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 1,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.memories.len(), 1);
+        assert_eq!(resp.memories[0].record.id, current.id);
+    }
+
+    #[tokio::test]
     async fn encode_batch_with_associations() {
         let engine = make_engine().await;
 
@@ -2560,6 +2837,51 @@ mod tests {
         let resp = engine.encode_batch(batch).await.unwrap();
         assert_eq!(resp.results.len(), 3);
         assert_eq!(resp.associations_inferred, 4);
+    }
+
+    #[tokio::test]
+    async fn encode_batch_associations_survive_rebuild() {
+        let engine = make_engine().await;
+
+        let resp = engine
+            .encode_batch(EncodeBatchRequest {
+                header: None,
+                records: vec![
+                    text_store_req("Persisted first", Some(StoreType::Episodic)),
+                    text_store_req("Persisted second", Some(StoreType::Episodic)),
+                ],
+                infer_associations: true,
+            })
+            .await
+            .unwrap();
+
+        engine.rebuild_coordinator().await.unwrap();
+
+        let first = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.results[0].record_id,
+                include_history: false,
+                include_associations: true,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.associations.len(), 1);
+
+        let assoc_resp = engine
+            .recall_associate(RecallAssociateRequest {
+                header: None,
+                record_id: resp.results[0].record_id,
+                association_types: Some(vec![AssociationType::Sequential]),
+                depth: 1,
+                min_weight: 0.1,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(assoc_resp.memories.len(), 1);
+        assert_eq!(assoc_resp.memories[0].record.id, resp.results[1].record_id);
     }
 
     #[tokio::test]
@@ -2636,6 +2958,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forget_temporal_range_deletes_matching_records() {
+        let engine = make_engine().await;
+
+        let mut old_record = MemoryRecord::new_text(StoreType::Episodic, "old");
+        old_record.created_at = Utc::now() - chrono::Duration::days(2);
+        old_record.updated_at = old_record.created_at;
+        old_record.last_accessed_at = old_record.created_at;
+        engine.episodic.store(old_record.clone()).await.unwrap();
+        engine
+            .coordinator
+            .register(
+                old_record.id,
+                StoreType::Episodic,
+                old_record.associations.clone(),
+            )
+            .await;
+        engine.index_record(&old_record).unwrap();
+
+        let current = MemoryRecord::new_text(StoreType::Episodic, "current");
+        engine.episodic.store(current.clone()).await.unwrap();
+        engine
+            .coordinator
+            .register(
+                current.id,
+                StoreType::Episodic,
+                current.associations.clone(),
+            )
+            .await;
+        engine.index_record(&current).unwrap();
+
+        let deleted = engine
+            .lifecycle_forget(ForgetRequest {
+                header: None,
+                record_ids: None,
+                store: None,
+                temporal_range: Some(TemporalRange {
+                    start: Utc::now() - chrono::Duration::minutes(1),
+                    end: Utc::now() + chrono::Duration::minutes(1),
+                }),
+                cascade: false,
+                confirm: true,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 1);
+        assert!(engine
+            .get_store_record(&current.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(engine
+            .get_store_record(&old_record.id)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn mode_switch() {
         let engine = make_engine().await;
 
@@ -2691,6 +3072,7 @@ mod tests {
             store: None,
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         };
         let resp2 = engine.encode_store(req).await.unwrap();
@@ -2784,6 +3166,7 @@ mod tests {
                 store: Some(StoreType::Episodic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -2840,6 +3223,7 @@ mod tests {
                 store: Some(StoreType::Episodic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -2914,6 +3298,7 @@ mod tests {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         };
 
@@ -2973,6 +3358,7 @@ mod tests {
                 store: Some(StoreType::Semantic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -3027,6 +3413,7 @@ mod tests {
                 store: Some(StoreType::Episodic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -3201,6 +3588,7 @@ mod tests {
                 store: Some(StoreType::Episodic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -3317,6 +3705,7 @@ mod tests {
                 store: Some(StoreType::Episodic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -3376,6 +3765,7 @@ mod tests {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         };
 
@@ -3990,6 +4380,7 @@ mod tests {
                 ..Default::default()
             }),
             context: None,
+            metadata: None,
             associations: None,
         };
         engine.encode_store(req).await.unwrap();
@@ -4012,6 +4403,7 @@ mod tests {
                 ..Default::default()
             }),
             context: None,
+            metadata: None,
             associations: None,
         };
         engine.encode_store(req2).await.unwrap();
@@ -4473,6 +4865,7 @@ mod tests {
                 store: Some(StoreType::Episodic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -4533,6 +4926,7 @@ mod tests {
                 store: Some(StoreType::Episodic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -4619,6 +5013,7 @@ mod tests {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         };
 
@@ -4756,6 +5151,7 @@ mod tests {
                 store: Some(StoreType::Episodic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await
@@ -4808,6 +5204,7 @@ mod tests {
                 store: Some(StoreType::Episodic),
                 emotion: None,
                 context: None,
+                metadata: None,
                 associations: None,
             })
             .await

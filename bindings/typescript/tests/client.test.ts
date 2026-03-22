@@ -198,12 +198,14 @@ describe("errors", () => {
     const err = new CerememoryError("RECORD_NOT_FOUND", "Not found", {
       statusCode: 404,
       details: { id: "abc" },
+      requestId: "req-123",
     });
     expect(err.code).toBe("RECORD_NOT_FOUND");
     expect(err.message).toBe("Not found");
     expect(err.statusCode).toBe(404);
     expect(err.details).toEqual({ id: "abc" });
     expect(err.retryAfter).toBeNull();
+    expect(err.requestId).toBe("req-123");
     expect(err.name).toBe("CerememoryError");
     expect(err).toBeInstanceOf(Error);
   });
@@ -284,10 +286,12 @@ describe("errors", () => {
         code: "RATE_LIMITED",
         message: "Rate limit exceeded",
         retry_after: 60,
+        request_id: "req-rate",
       };
       const err = fromEnvelope(envelope, 429);
       expect(err).toBeInstanceOf(RateLimitedError);
       expect(err.retryAfter).toBe(60);
+      expect(err.requestId).toBe("req-rate");
     });
 
     it("maps VALIDATION_ERROR envelope with details", () => {
@@ -443,6 +447,20 @@ describe("Transport", () => {
   });
 
   describe("retry logic", () => {
+    it("does not retry by default", async () => {
+      const fetchFn = mockFetch(500, {
+        code: "INTERNAL_ERROR",
+        message: "Transient failure",
+      });
+
+      const client = new CerememoryClient("http://localhost:8420", {
+        fetch: fetchFn,
+      });
+
+      await expect(client.stats()).rejects.toThrow(InternalError);
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
     it("retries on 429 and succeeds on second attempt", async () => {
       const fetchFn = mockFetchSequence([
         {
@@ -464,6 +482,56 @@ describe("Transport", () => {
 
       const result = await transport.get<StatsResponse>("/v1/introspect/stats");
       expect(result.total_records).toBe(42);
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not retry mutating requests unless explicitly enabled", async () => {
+      const fetchFn = mockFetchSequence([
+        {
+          status: 503,
+          body: { code: "DECAY_ENGINE_BUSY", message: "Busy" },
+        },
+        {
+          status: 200,
+          body: ENCODE_RESPONSE,
+        },
+      ]);
+
+      const transport = new Transport({
+        baseUrl: "http://localhost:8420",
+        fetch: fetchFn,
+        maxRetries: 1,
+        retryBaseDelayMs: 10,
+      });
+
+      await expect(transport.post("/v1/encode", {})).rejects.toThrow(
+        CerememoryError,
+      );
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("can retry mutating requests when explicitly enabled", async () => {
+      const fetchFn = mockFetchSequence([
+        {
+          status: 503,
+          body: { code: "DECAY_ENGINE_BUSY", message: "Busy" },
+        },
+        {
+          status: 200,
+          body: ENCODE_RESPONSE,
+        },
+      ]);
+
+      const transport = new Transport({
+        baseUrl: "http://localhost:8420",
+        fetch: fetchFn,
+        maxRetries: 1,
+        retryMutatingRequests: true,
+        retryBaseDelayMs: 10,
+      });
+
+      const result = await transport.post<EncodeStoreResponse>("/v1/encode", {});
+      expect(result.record_id).toBe(ENCODE_RESPONSE.record_id);
       expect(fetchFn).toHaveBeenCalledTimes(2);
     });
 
@@ -735,6 +803,21 @@ describe("CerememoryClient", () => {
       expect(body.context.source).toBe("chat");
       expect(body.context.session_id).toBe("sess-123");
     });
+
+    it("stores text with metadata", async () => {
+      const fetchFn = mockFetch(200, ENCODE_RESPONSE);
+      const client = createClient(fetchFn);
+
+      await client.store("Session memory", {
+        metadata: { source: "chat", session_id: "sess-123" },
+      });
+
+      const body = JSON.parse(
+        (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0]![1].body,
+      );
+      expect(body.metadata.source).toBe("chat");
+      expect(body.metadata.session_id).toBe("sess-123");
+    });
   });
 
   describe("recall", () => {
@@ -749,6 +832,7 @@ describe("CerememoryClient", () => {
           },
         ],
         activation_trace: null,
+        query_metadata: null,
         total_candidates: 1,
       };
 
@@ -771,6 +855,7 @@ describe("CerememoryClient", () => {
       const response: RecallQueryResponse = {
         memories: [],
         activation_trace: null,
+        query_metadata: null,
         total_candidates: 0,
       };
 
@@ -783,6 +868,8 @@ describe("CerememoryClient", () => {
         recall_mode: "perfect",
         min_fidelity: 0.5,
         include_decayed: true,
+        reconsolidate: false,
+        activation_depth: 4,
       });
 
       const body = JSON.parse(
@@ -793,6 +880,8 @@ describe("CerememoryClient", () => {
       expect(body.recall_mode).toBe("perfect");
       expect(body.min_fidelity).toBe(0.5);
       expect(body.include_decayed).toBe(true);
+      expect(body.reconsolidate).toBe(false);
+      expect(body.activation_depth).toBe(4);
     });
   });
 
@@ -922,6 +1011,11 @@ describe("CerememoryClient", () => {
       const response: RecallQueryResponse = {
         memories: [],
         activation_trace: null,
+        query_metadata: {
+          total_records_scanned: 7,
+          stores_searched: ["episodic"],
+          fidelity_filtered: 0,
+        },
         total_candidates: 0,
       };
       const fetchFn = mockFetch(200, response);
@@ -936,6 +1030,7 @@ describe("CerememoryClient", () => {
 
       expect(result.memories).toEqual([]);
       expect(result.total_candidates).toBe(0);
+      expect(result.query_metadata?.total_records_scanned).toBe(7);
     });
   });
 

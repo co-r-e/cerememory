@@ -79,6 +79,18 @@ class TestHighLevelStore:
         body = json.loads(request.content)
         assert body["emotion"]["joy"] == 0.9
 
+    def test_store_with_metadata(self, high_level_client, mock_api):
+        mock_api.post("/v1/encode").mock(
+            return_value=httpx.Response(200, json=make_encode_store_response())
+        )
+        high_level_client.store("Session note", metadata={"source": "chat"})
+
+        import json
+
+        request = mock_api.calls.last.request
+        body = json.loads(request.content)
+        assert body["metadata"]["source"] == "chat"
+
 
 class TestHighLevelRecall:
     """Test Client.recall() convenience method."""
@@ -114,6 +126,21 @@ class TestHighLevelRecall:
         request = mock_api.calls.last.request
         body = json.loads(request.content)
         assert body["recall_mode"] == "perfect"
+
+    def test_recall_with_activation_options(self, high_level_client, mock_api):
+        mock_api.post("/v1/recall/query").mock(
+            return_value=httpx.Response(200, json=make_recall_query_response())
+        )
+        high_level_client.recall(
+            "hello", reconsolidate=False, activation_depth=5
+        )
+
+        import json
+
+        request = mock_api.calls.last.request
+        body = json.loads(request.content)
+        assert body["reconsolidate"] is False
+        assert body["activation_depth"] == 5
 
 
 class TestHighLevelForget:
@@ -372,6 +399,19 @@ class TestErrorHandling:
             high_level_client.stats()
         assert exc_info.value.retry_after == 5
 
+    def test_error_preserves_request_id(self, high_level_client, mock_api):
+        mock_api.get("/v1/introspect/stats").mock(
+            return_value=httpx.Response(
+                401,
+                json=make_cmp_error(
+                    "UNAUTHORIZED", "Missing key", request_id="req-123"
+                ),
+            )
+        )
+        with pytest.raises(UnauthorizedError) as exc_info:
+            high_level_client.stats()
+        assert exc_info.value.request_id == "req-123"
+
     def test_unknown_error_code(self, high_level_client, mock_api):
         mock_api.get("/v1/introspect/stats").mock(
             return_value=httpx.Response(
@@ -406,6 +446,22 @@ class TestContextManager:
 
 class TestRetryBehavior:
     """Test retry logic in the transport layer."""
+
+    def test_retry_disabled_by_default(self, mock_api):
+        route = mock_api.get("/v1/introspect/stats")
+        route.mock(
+            return_value=httpx.Response(
+                503, json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy")
+            )
+        )
+
+        client = Client(BASE_URL, api_key="key")
+        try:
+            with pytest.raises(CerememoryError):
+                client.stats()
+            assert route.call_count == 1
+        finally:
+            client.close()
 
     def test_retry_on_503(self, mock_api):
         route = mock_api.get("/v1/introspect/stats")
@@ -448,5 +504,64 @@ class TestRetryBehavior:
                 client.encode_store(req)
             # Should only have been called once (no retries for 400)
             assert route.call_count == 1
+        finally:
+            client.close()
+
+    def test_no_retry_on_mutating_post_by_default(self, mock_api):
+        route = mock_api.post("/v1/encode")
+        route.side_effect = [
+            httpx.Response(
+                503,
+                json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy", retry_after=0),
+            ),
+            httpx.Response(200, json=make_encode_store_response()),
+        ]
+
+        client = Client(BASE_URL, api_key="key", max_retries=1)
+        try:
+            req = EncodeStoreRequest(
+                content=MemoryContent(
+                    blocks=[
+                        ContentBlock(
+                            modality=Modality.TEXT, format="text/plain", data=b"x"
+                        )
+                    ]
+                )
+            )
+            with pytest.raises(CerememoryError):
+                client.encode_store(req)
+            assert route.call_count == 1
+        finally:
+            client.close()
+
+    def test_retry_on_mutating_post_when_opted_in(self, mock_api):
+        route = mock_api.post("/v1/encode")
+        route.side_effect = [
+            httpx.Response(
+                503,
+                json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy", retry_after=0),
+            ),
+            httpx.Response(200, json=make_encode_store_response()),
+        ]
+
+        client = Client(
+            BASE_URL,
+            api_key="key",
+            max_retries=1,
+            retry_mutating_requests=True,
+        )
+        try:
+            req = EncodeStoreRequest(
+                content=MemoryContent(
+                    blocks=[
+                        ContentBlock(
+                            modality=Modality.TEXT, format="text/plain", data=b"x"
+                        )
+                    ]
+                )
+            )
+            resp = client.encode_store(req)
+            assert resp.record_id == SAMPLE_RECORD_ID
+            assert route.call_count == 2
         finally:
             client.close()
