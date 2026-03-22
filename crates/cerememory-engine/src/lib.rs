@@ -1897,12 +1897,10 @@ impl CerememoryEngine {
 
                 migrated += 1;
 
-                if record.fidelity.score < 0.1 {
-                    if self.episodic.delete(&id).await? {
-                        self.cleanup_deleted_records(&[(id, StoreType::Episodic)])
-                            .await?;
-                        pruned += 1;
-                    }
+                if record.fidelity.score < 0.1 && self.episodic.delete(&id).await? {
+                    self.cleanup_deleted_records(&[(id, StoreType::Episodic)])
+                        .await?;
+                    pruned += 1;
                 }
             }
         }

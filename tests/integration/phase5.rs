@@ -293,7 +293,13 @@ async fn response_includes_request_id() {
 #[tokio::test]
 async fn cors_preflight_returns_ok() {
     let engine = in_memory_engine();
-    let app = cerememory_transport_http::router(engine, vec![]);
+    let app = cerememory_transport_http::router_with_config(
+        engine,
+        cerememory_transport_http::HttpMiddlewareConfig {
+            cors_origins: vec!["http://localhost:3000".to_string()],
+            ..Default::default()
+        },
+    );
 
     let resp = app
         .oneshot(
@@ -502,6 +508,7 @@ async fn metrics_endpoint_returns_prometheus_format() {
     let app = cerememory_transport_http::router_with_config(
         engine,
         cerememory_transport_http::HttpMiddlewareConfig {
+            metrics_enabled: true,
             prometheus_handle: Some(handle),
             ..Default::default()
         },
@@ -525,7 +532,7 @@ async fn metrics_endpoint_returns_prometheus_format() {
 }
 
 #[tokio::test]
-async fn metrics_endpoint_not_behind_auth() {
+async fn metrics_endpoint_requires_auth_when_enabled() {
     let engine = in_memory_engine();
     let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
         .build_recorder()
@@ -533,13 +540,15 @@ async fn metrics_endpoint_not_behind_auth() {
     let app = cerememory_transport_http::router_with_config(
         engine,
         cerememory_transport_http::HttpMiddlewareConfig {
+            auth_enabled: true,
             api_keys: vec!["secret".to_string()],
+            metrics_enabled: true,
             prometheus_handle: Some(handle),
             ..Default::default()
         },
     );
 
-    // No auth header, should still work
+    // No auth header, should be rejected
     let resp = app
         .oneshot(
             axum::http::Request::builder()
@@ -550,7 +559,7 @@ async fn metrics_endpoint_not_behind_auth() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
 }
 
 // ─── TLS Tests ───────────────────────────────────────────────────────
@@ -573,9 +582,16 @@ async fn grpc_tls_server_starts_with_self_signed_cert() {
     let tls = cerememory_transport_grpc::TlsConfig { cert_pem, key_pem };
 
     let server = tokio::spawn(async move {
-        cerememory_transport_grpc::serve_with_tls(engine, "127.0.0.1:0", vec![], Some(tls), async {
-            rx.await.ok();
-        })
+        cerememory_transport_grpc::serve_with_tls(
+            engine,
+            "127.0.0.1:0",
+            false,
+            vec![],
+            Some(tls),
+            async {
+                rx.await.ok();
+            },
+        )
         .await
         .map_err(|e| e.to_string())
     });
@@ -612,6 +628,7 @@ async fn grpc_plaintext_server_starts_without_tls() {
         cerememory_transport_grpc::serve_with_tls(
             engine,
             "127.0.0.1:0",
+            false,
             vec![],
             None, // No TLS
             async {
