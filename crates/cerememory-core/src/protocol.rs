@@ -743,6 +743,7 @@ mod tests {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         };
 
@@ -768,6 +769,7 @@ mod tests {
             store: None,
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         };
 
