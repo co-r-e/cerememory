@@ -163,7 +163,8 @@ pub struct RateLimitService<S> {
 
 /// Extract client IP from the request.
 ///
-/// Priority: `X-Forwarded-For` first entry → `X-Real-IP` → fallback `127.0.0.1`.
+/// Priority: trusted proxy `X-Forwarded-For` first entry → trusted proxy `X-Real-IP`
+/// → peer socket address → fallback `127.0.0.1`.
 fn extract_client_ip(req: &Request<Body>, trusted_proxy_cidrs: &[TrustedProxyCidr]) -> IpAddr {
     let peer_addr = req
         .extensions()
@@ -174,10 +175,7 @@ fn extract_client_ip(req: &Request<Body>, trusted_proxy_cidrs: &[TrustedProxyCid
         .map(|ip| trusted_proxy_cidrs.iter().any(|cidr| cidr.contains(ip)))
         .unwrap_or(false);
 
-    let should_trust_forwarded = match peer_addr {
-        Some(_) => peer_is_trusted,
-        None => trusted_proxy_cidrs.is_empty(),
-    };
+    let should_trust_forwarded = peer_addr.is_some() && peer_is_trusted;
 
     if should_trust_forwarded {
         // Try X-Forwarded-For (first IP in the chain)
@@ -294,53 +292,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn different_ips_have_separate_buckets() {
+    async fn different_peer_ips_have_separate_buckets() {
         let app = test_app(1, 1);
 
-        // IP-A uses its bucket
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .header("X-Forwarded-For", "10.0.0.1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        // Peer-A uses its bucket
+        let mut req = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 12345))));
+        let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // IP-A is now limited
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .header("X-Forwarded-For", "10.0.0.1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        // Peer-A is now limited
+        let mut req = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 12346))));
+        let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 
-        // IP-B should still be allowed (separate bucket)
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .header("X-Forwarded-For", "10.0.0.2")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        // Peer-B should still be allowed (separate bucket)
+        let mut req = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 2], 12347))));
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn x_real_ip_header_used() {
+    async fn untrusted_forwarded_headers_are_ignored_without_connect_info() {
         let app = test_app(1, 1);
 
         let resp = app
@@ -348,7 +326,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/test")
-                    .header("X-Real-IP", "192.168.1.1")
+                    .header("X-Forwarded-For", "192.168.1.1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -356,12 +334,12 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // Same IP → limited
+        // Different forwarded IP is ignored; same fallback bucket is limited.
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/test")
-                    .header("X-Real-IP", "192.168.1.1")
+                    .header("X-Forwarded-For", "192.168.1.2")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -411,6 +389,33 @@ mod tests {
         let mut req2 = Request::builder()
             .uri("/test")
             .header("X-Forwarded-For", "192.168.1.11")
+            .body(Body::empty())
+            .unwrap();
+        req2.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 1, 2, 3], 12346))));
+        let resp = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_uses_x_real_ip() {
+        let app = Router::new()
+            .route("/test", get(|| async { "ok" }))
+            .layer(RateLimitLayer::new(1, 1, vec!["10.0.0.0/8".to_string()]));
+
+        let mut req1 = Request::builder()
+            .uri("/test")
+            .header("X-Real-IP", "192.168.1.10")
+            .body(Body::empty())
+            .unwrap();
+        req1.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 1, 2, 3], 12345))));
+        let resp = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut req2 = Request::builder()
+            .uri("/test")
+            .header("X-Real-IP", "192.168.1.11")
             .body(Body::empty())
             .unwrap();
         req2.extensions_mut()

@@ -1,7 +1,7 @@
 //! Cerememory CLI — command-line interface for the living memory database.
 
 use std::io::{IsTerminal, Write};
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -246,9 +246,14 @@ fn parse_conflict_resolution(value: &str) -> Result<ConflictResolution> {
 
 fn read_secret_from_stdin(label: &str) -> Result<String> {
     if std::io::stdin().is_terminal() {
-        eprint!("{label}: ");
-        std::io::stderr().flush()?;
+        let prompt = format!("{label}: ");
+        let secret = rpassword::prompt_password(prompt)?;
+        if secret.trim().is_empty() {
+            anyhow::bail!("{label} must not be empty");
+        }
+        return Ok(secret);
     }
+
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     let secret = input.trim().to_string();
@@ -517,10 +522,13 @@ async fn main() -> Result<()> {
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .with_context(|| format!("Failed to bind HTTP port {}", config.http.port))?;
-        axum::serve(listener, app)
-            .with_graceful_shutdown(http_cancel.cancelled_owned())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(http_cancel.cancelled_owned())
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // Await gRPC server shutdown
         if let Some(handle) = grpc_handle {
@@ -810,9 +818,7 @@ async fn main() -> Result<()> {
             encryption_key_stdin,
         } => {
             if encryption_key.is_some() && encryption_key_stdin {
-                anyhow::bail!(
-                    "Use either --encryption-key or --encryption-key-stdin, not both."
-                );
+                anyhow::bail!("Use either --encryption-key or --encryption-key-stdin, not both.");
             }
             let encryption_key = if encryption_key_stdin {
                 Some(read_secret_from_stdin("Export encryption passphrase")?)
@@ -846,9 +852,7 @@ async fn main() -> Result<()> {
             conflict_resolution,
         } => {
             if decryption_key.is_some() && decryption_key_stdin {
-                anyhow::bail!(
-                    "Use either --decryption-key or --decryption-key-stdin, not both."
-                );
+                anyhow::bail!("Use either --decryption-key or --decryption-key-stdin, not both.");
             }
             let decryption_key = if decryption_key_stdin {
                 Some(read_secret_from_stdin("Import decryption passphrase")?)

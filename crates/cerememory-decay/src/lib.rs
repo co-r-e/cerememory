@@ -139,7 +139,8 @@ impl DecayEngine for PowerLawDecayEngine {
                 let baseline = input
                     .last_accessed_at
                     .timestamp()
-                    .max(input.fidelity.last_decay_tick.timestamp()) as f64;
+                    .max(input.fidelity.last_decay_tick.timestamp())
+                    as f64;
                 wall_clock_now.max(baseline + tick_duration_secs)
             })
             .collect::<Vec<_>>();

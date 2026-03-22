@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "cerememory-native"
-version = "0.1.0"
+version = "0.2.1"
 description = "Native Python bindings for Cerememory (no HTTP needed)"
 requires-python = ">=3.9"
 license = { text = "MIT" }

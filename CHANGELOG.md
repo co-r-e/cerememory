@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-03-22
+
+### Fixed
+
+#### Security and Operations
+- CLI passphrase prompts for `--encryption-key-stdin` and `--decryption-key-stdin` now disable terminal echo in interactive sessions
+- HTTP rate limiting now treats forwarded IP headers as untrusted unless the peer socket address is present and matches `http.trusted_proxy_cidrs`
+- HTTP serving now propagates peer socket addresses into middleware so per-client rate limiting works correctly without trusting forwarded headers
+
+### Changed
+
+- Release metadata is now aligned at `0.2.1` across the Rust workspace, Python SDKs, and TypeScript SDKs
+
 ## [0.2.0] - 2026-03-22
 
 ### Added
@@ -110,3 +123,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Index search benchmarks
 
 [0.1.0]: https://github.com/co-r-e/cerememory/releases/tag/v0.1.0
+[0.2.0]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.0
+[0.2.1]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.1

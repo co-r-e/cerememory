@@ -43,7 +43,7 @@ def _build_headers(api_key: str | None, extra: dict[str, str] | None = None) -> 
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "cerememory-python/0.1.0",
+        "User-Agent": "cerememory-python/0.2.1",
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

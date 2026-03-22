@@ -492,7 +492,7 @@ checksum = "4f4c707c6a209cbe82d10abd08e1ea8995e9ea937d2550646e02798948992be0"
 
 [[package]]
 name = "cerememory-adapter-claude"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "backoff",
  "cerememory-core",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-adapter-gemini"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "backoff",
  "base64",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-adapter-openai"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "backoff",
  "base64",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-archive"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "argon2",
  "cerememory-core",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-association"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -591,6 +591,7 @@ dependencies = [
  "cerememory-transport-mcp",
  "clap",
  "reqwest",
+ "rpassword",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -601,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-config"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "cerememory-engine",
@@ -615,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chacha20poly1305",
  "chrono",
@@ -633,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-decay"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -646,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-archive",
  "cerememory-association",
@@ -674,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-evolution"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -688,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-index"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -742,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-napi"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "cerememory-engine",
@@ -756,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-python"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "cerememory-engine",
@@ -768,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-emotional"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -784,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-episodic"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -800,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-procedural"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -816,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-semantic"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -832,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-working"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -845,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-transport-grpc"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cerememory-core",
  "cerememory-engine",
@@ -864,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-transport-http"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "axum-extra",
@@ -887,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-transport-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "cerememory-core",
@@ -3459,6 +3460,27 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "rpassword"
+version = "7.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66d4c8b64f049c6721ec8ccec37ddfc3d641c4a7fca57e8f2a89de509c73df39"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7cc970b249fbe527d6e02e0a227762c9108b2f49d81094fe357ffc6d14d7f6f"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
