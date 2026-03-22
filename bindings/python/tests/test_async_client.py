@@ -533,62 +533,6 @@ class TestAsyncRetryBehavior:
                 assert stats.total_records == 42
             assert route.call_count == 2
 
-    @pytest.mark.asyncio
-    async def test_no_retry_on_mutating_post_by_default(self):
-        with respx.mock(base_url=BASE_URL) as mock_api:
-            route = mock_api.post("/v1/encode")
-            route.side_effect = [
-                httpx.Response(
-                    503,
-                    json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy", retry_after=0),
-                ),
-                httpx.Response(200, json=make_encode_store_response()),
-            ]
-
-            async with AsyncClient(BASE_URL, api_key="key", max_retries=1) as client:
-                req = EncodeStoreRequest(
-                    content=MemoryContent(
-                        blocks=[
-                            ContentBlock(
-                                modality=Modality.TEXT, format="text/plain", data=b"x"
-                            )
-                        ]
-                    )
-                )
-                with pytest.raises(CerememoryError):
-                    await client.encode_store(req)
-            assert route.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_retry_on_mutating_post_when_opted_in(self):
-        with respx.mock(base_url=BASE_URL) as mock_api:
-            route = mock_api.post("/v1/encode")
-            route.side_effect = [
-                httpx.Response(
-                    503,
-                    json=make_cmp_error("DECAY_ENGINE_BUSY", "Busy", retry_after=0),
-                ),
-                httpx.Response(200, json=make_encode_store_response()),
-            ]
-
-            async with AsyncClient(
-                BASE_URL,
-                api_key="key",
-                max_retries=1,
-                retry_mutating_requests=True,
-            ) as client:
-                req = EncodeStoreRequest(
-                    content=MemoryContent(
-                        blocks=[
-                            ContentBlock(
-                                modality=Modality.TEXT, format="text/plain", data=b"x"
-                            )
-                        ]
-                    )
-                )
-                resp = await client.encode_store(req)
-                assert resp.record_id == SAMPLE_RECORD_ID
-            assert route.call_count == 2
 
     @pytest.mark.asyncio
     async def test_no_retry_on_mutating_post_by_default(self):
