@@ -14,6 +14,64 @@ use serde::{Deserialize, Serialize};
 
 use cerememory_engine::EngineConfig;
 
+/// Log level for tracing output.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Trace => write!(f, "trace"),
+            Self::Debug => write!(f, "debug"),
+            Self::Info => write!(f, "info"),
+            Self::Warn => write!(f, "warn"),
+            Self::Error => write!(f, "error"),
+        }
+    }
+}
+
+/// Log output format.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Pretty,
+    Json,
+}
+
+/// LLM provider selection.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmProvider {
+    #[default]
+    None,
+    #[serde(alias = "openai")]
+    OpenAI,
+    #[serde(alias = "anthropic")]
+    Claude,
+    #[serde(alias = "google")]
+    Gemini,
+}
+
+impl std::fmt::Display for LlmProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::OpenAI => write!(f, "openai"),
+            Self::Claude => write!(f, "claude"),
+            Self::Gemini => write!(f, "gemini"),
+        }
+    }
+}
+
 /// Top-level server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -124,11 +182,11 @@ impl std::fmt::Debug for AuthConfig {
 }
 
 /// LLM provider settings.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LlmConfig {
-    /// Provider name: "openai", "claude", "gemini", or "none".
-    pub provider: String,
+    /// LLM provider selection.
+    pub provider: LlmProvider,
 
     /// API key for the LLM provider (raw string in config).
     #[serde(rename = "api_key")]
@@ -186,14 +244,14 @@ pub struct RateLimitConfig {
 }
 
 /// Logging settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
-    /// Log level: "trace", "debug", "info", "warn", "error".
-    pub level: String,
+    /// Log level.
+    pub level: LogLevel,
 
-    /// Log format: "pretty" or "json".
-    pub format: String,
+    /// Log output format.
+    pub format: LogFormat,
 }
 
 // ─── Defaults ────────────────────────────────────────────────────────
@@ -228,16 +286,7 @@ impl Default for HttpConfig {
 // GrpcConfig: derive Default (all fields are Option/default)
 // AuthConfig: derive Default (bool=false, Vec=empty)
 
-impl Default for LlmConfig {
-    fn default() -> Self {
-        Self {
-            provider: "none".to_string(),
-            api_key_raw: None,
-            model: None,
-            base_url: None,
-        }
-    }
-}
+// LlmConfig derives Default via LlmProvider::None and Option defaults.
 
 impl Default for DecayConfig {
     fn default() -> Self {
@@ -256,14 +305,7 @@ impl Default for RateLimitConfig {
     }
 }
 
-impl Default for LogConfig {
-    fn default() -> Self {
-        Self {
-            level: "info".to_string(),
-            format: "pretty".to_string(),
-        }
-    }
-}
+// LogConfig derives Default via LogLevel::Info and LogFormat::Pretty defaults.
 
 // ─── Loading ─────────────────────────────────────────────────────────
 
@@ -387,23 +429,7 @@ impl ServerConfig {
             ));
         }
 
-        const VALID_LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
-        if !VALID_LOG_LEVELS.contains(&self.log.level.to_lowercase().as_str()) {
-            return Err(format!(
-                "Invalid log.level '{}'. Valid options: {}",
-                self.log.level,
-                VALID_LOG_LEVELS.join(", ")
-            ));
-        }
-
-        const VALID_LOG_FORMATS: &[&str] = &["pretty", "json"];
-        if !VALID_LOG_FORMATS.contains(&self.log.format.to_lowercase().as_str()) {
-            return Err(format!(
-                "Invalid log.format '{}'. Valid options: {}",
-                self.log.format,
-                VALID_LOG_FORMATS.join(", ")
-            ));
-        }
+        // Log level and format are validated at deserialization time by serde.
 
         Ok(())
     }
@@ -471,7 +497,7 @@ mod tests {
     fn load_from_defaults_only() {
         let config = ServerConfig::load(None).unwrap();
         assert_eq!(config.http.port, 8420);
-        assert_eq!(config.llm.provider, "none");
+        assert_eq!(config.llm.provider, LlmProvider::None);
     }
 
     #[test]
@@ -496,9 +522,9 @@ level = "debug"
         let config = ServerConfig::load(Some(toml_path.to_str().unwrap())).unwrap();
         assert_eq!(config.http.port, 9999);
         assert_eq!(config.data_dir, "/tmp/cere");
-        assert_eq!(config.log.level, "debug");
+        assert_eq!(config.log.level, LogLevel::Debug);
         // Non-overridden fields keep defaults
-        assert_eq!(config.llm.provider, "none");
+        assert_eq!(config.llm.provider, LlmProvider::None);
     }
 
     #[test]
@@ -548,7 +574,7 @@ port = 9999
     #[test]
     fn llm_debug_is_redacted() {
         let config = LlmConfig {
-            provider: "openai".to_string(),
+            provider: LlmProvider::OpenAI,
             api_key_raw: Some("sk-secret-key".to_string()),
             model: None,
             base_url: None,
@@ -628,17 +654,19 @@ port = 9999
     }
 
     #[test]
-    fn validate_catches_invalid_log_level() {
-        let mut config = ServerConfig::default();
-        config.log.level = "invalid".to_string();
-        assert!(config.validate().is_err());
+    fn invalid_log_level_rejected_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("cerememory.toml");
+        std::fs::write(&toml_path, "[log]\nlevel = \"invalid\"\n").unwrap();
+        assert!(ServerConfig::load(Some(toml_path.to_str().unwrap())).is_err());
     }
 
     #[test]
-    fn validate_catches_invalid_log_format() {
-        let mut config = ServerConfig::default();
-        config.log.format = "yaml".to_string();
-        assert!(config.validate().is_err());
+    fn invalid_log_format_rejected_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("cerememory.toml");
+        std::fs::write(&toml_path, "[log]\nformat = \"yaml\"\n").unwrap();
+        assert!(ServerConfig::load(Some(toml_path.to_str().unwrap())).is_err());
     }
 
     #[test]

@@ -68,7 +68,8 @@ enum Commands {
     /// Change the recall mode used by stateful operations.
     SetMode {
         /// Recall mode: human or perfect.
-        mode: String,
+        #[arg(value_parser = parse_recall_mode)]
+        mode: RecallMode,
 
         /// Optional comma-separated store filter.
         #[arg(long)]
@@ -206,6 +207,16 @@ fn parse_embedding(s: &str) -> Result<Vec<f32>> {
         .collect()
 }
 
+fn parse_recall_mode(value: &str) -> Result<RecallMode, String> {
+    match value.trim().to_lowercase().as_str() {
+        "human" => Ok(RecallMode::Human),
+        "perfect" => Ok(RecallMode::Perfect),
+        other => Err(format!(
+            "Invalid recall mode '{other}'. Valid options: human, perfect"
+        )),
+    }
+}
+
 fn parse_store_list(value: &str) -> Result<Vec<StoreType>> {
     value
         .split(',')
@@ -298,7 +309,8 @@ fn load_config(cli: &Cli) -> Result<ServerConfig> {
 fn build_llm_provider(
     config: &ServerConfig,
 ) -> Result<Option<Arc<dyn cerememory_core::LLMProvider>>> {
-    let provider_name = config.llm.provider.as_str();
+    use cerememory_config::LlmProvider;
+
     let model = config.llm.model.clone();
     let base_url = config.llm.base_url.clone();
 
@@ -307,30 +319,27 @@ fn build_llm_provider(
             .llm
             .api_key_exposed()
             .map(str::to_string)
-            .ok_or_else(|| anyhow::anyhow!("LLM provider '{provider_name}' requires an API key"))
+            .ok_or_else(|| {
+                anyhow::anyhow!("LLM provider '{}' requires an API key", config.llm.provider)
+            })
     };
 
-    match provider_name {
+    match config.llm.provider {
         #[cfg(feature = "llm-openai")]
-        "openai" => Ok(Some(Arc::new(
+        LlmProvider::OpenAI => Ok(Some(Arc::new(
             cerememory_adapter_openai::OpenAIProvider::new(require_api_key()?, model, base_url)?,
         ))),
         #[cfg(feature = "llm-claude")]
-        "claude" | "anthropic" => Ok(Some(Arc::new(
+        LlmProvider::Claude => Ok(Some(Arc::new(
             cerememory_adapter_claude::ClaudeProvider::new(require_api_key()?, model, base_url)?,
         ))),
         #[cfg(feature = "llm-gemini")]
-        "gemini" | "google" => Ok(Some(Arc::new(
+        LlmProvider::Gemini => Ok(Some(Arc::new(
             cerememory_adapter_gemini::GeminiProvider::new(require_api_key()?, model, base_url)?,
         ))),
-        "none" | "" => Ok(None),
-        other => {
-            tracing::warn!(
-                provider = other,
-                "Unknown LLM provider, running without LLM"
-            );
-            Ok(None)
-        }
+        LlmProvider::None => Ok(None),
+        #[allow(unreachable_patterns)]
+        _ => Ok(None),
     }
 }
 
@@ -349,17 +358,17 @@ fn init_logging(config: &ServerConfig) {
     let filter = if std::env::var("RUST_LOG").is_ok() {
         EnvFilter::from_default_env()
     } else {
-        EnvFilter::try_new(&config.log.level).unwrap_or_else(|_| EnvFilter::new("info"))
+        EnvFilter::try_new(config.log.level.to_string()).unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
-    match config.log.format.as_str() {
-        "json" => {
+    match config.log.format {
+        cerememory_config::LogFormat::Json => {
             tracing_subscriber::fmt()
                 .json()
                 .with_env_filter(filter)
                 .init();
         }
-        _ => {
+        cerememory_config::LogFormat::Pretty => {
             tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
@@ -430,8 +439,8 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| std::path::PathBuf::from(&config.data_dir));
         println!("Data  {}", abs_data_dir.display());
         println!("Config {}", cli.config.as_deref().unwrap_or("(defaults)"));
-        let llm_status = match config.llm.provider.as_str() {
-            "none" | "" => "disabled".to_string(),
+        let llm_status = match config.llm.provider {
+            cerememory_config::LlmProvider::None => "disabled".to_string(),
             provider => format!(
                 "{provider} ({})",
                 config.llm.model.as_deref().unwrap_or("default")
@@ -630,14 +639,6 @@ async fn main() -> Result<()> {
         }
 
         Commands::SetMode { mode, scope } => {
-            let mode = match mode.to_lowercase().as_str() {
-                "human" => RecallMode::Human,
-                "perfect" => RecallMode::Perfect,
-                other => anyhow::bail!(
-                    "Invalid recall mode '{}'. Valid options: human, perfect",
-                    other
-                ),
-            };
             let scope = scope.as_deref().map(parse_store_list).transpose()?;
             engine
                 .lifecycle_set_mode(SetModeRequest {
@@ -708,8 +709,8 @@ async fn main() -> Result<()> {
                 limit,
                 min_fidelity: None,
                 include_decayed: false,
-                reconsolidate: true,
-                activation_depth: 2,
+                reconsolidate: DEFAULT_RECONSOLIDATE,
+                activation_depth: DEFAULT_ACTIVATION_DEPTH,
                 recall_mode,
             };
 

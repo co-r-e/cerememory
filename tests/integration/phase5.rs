@@ -37,7 +37,7 @@ fn config_defaults_are_valid() {
     assert!(config.validate().is_ok());
     assert_eq!(config.http.port, 8420);
     assert!(!config.auth.enabled);
-    assert_eq!(config.llm.provider, "none");
+    assert_eq!(config.llm.provider, cerememory_config::LlmProvider::None);
 }
 
 #[test]
