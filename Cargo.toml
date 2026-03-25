@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/cerememory-core",
     "crates/cerememory-config",
+    "crates/cerememory-store-common",
     "crates/cerememory-store-episodic",
     "crates/cerememory-store-semantic",
     "crates/cerememory-store-procedural",
@@ -126,6 +127,7 @@ wiremock = "0.6"
 
 # Internal crates
 cerememory-core = { version = "0.2.1", path = "crates/cerememory-core" }
+cerememory-store-common = { version = "0.2.1", path = "crates/cerememory-store-common" }
 cerememory-store-episodic = { version = "0.2.1", path = "crates/cerememory-store-episodic" }
 cerememory-store-semantic = { version = "0.2.1", path = "crates/cerememory-store-semantic" }
 cerememory-store-procedural = { version = "0.2.1", path = "crates/cerememory-store-procedural" }

@@ -21,6 +21,9 @@ use cerememory_core::traits::Store;
 use cerememory_core::types::{
     Association, EmotionVector, FidelityState, MemoryContent, MemoryRecord,
 };
+use cerememory_store_common::{
+    fidelity_bucket, fidelity_key, get_record_sync, record_matches_text, storage_err,
+};
 
 // ---------------------------------------------------------------------------
 // Table definitions
@@ -42,19 +45,6 @@ const EMOTIONAL_INTENSITY_INDEX: TableDefinition<&[u8], ()> =
 // ---------------------------------------------------------------------------
 // Key helpers
 // ---------------------------------------------------------------------------
-
-/// Build the 17-byte fidelity-index key: 1 byte bucket + 16 bytes UUID.
-fn fidelity_key(fidelity_score: f64, id: &Uuid) -> [u8; 17] {
-    let mut buf = [0u8; 17];
-    buf[0] = fidelity_bucket(fidelity_score);
-    buf[1..].copy_from_slice(id.as_bytes());
-    buf
-}
-
-/// Fidelity bucket byte from score.
-fn fidelity_bucket(score: f64) -> u8 {
-    (score * 100.0).round().clamp(0.0, 100.0) as u8
-}
 
 /// Build the 17-byte intensity-index key: 1 byte bucket + 16 bytes UUID.
 fn intensity_key(intensity: f64, id: &Uuid) -> [u8; 17] {
@@ -644,47 +634,6 @@ impl Store for EmotionalStore {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// Read a single `MemoryRecord` from the records table (synchronous).
-fn get_record_sync(
-    table: &redb::ReadOnlyTable<&[u8], &[u8]>,
-    id: &Uuid,
-) -> Result<Option<MemoryRecord>, CerememoryError> {
-    match table.get(id.as_bytes().as_slice()).map_err(storage_err)? {
-        Some(value_guard) => {
-            let record: MemoryRecord = rmp_serde::from_slice(value_guard.value())
-                .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
-            Ok(Some(record))
-        }
-        None => Ok(None),
-    }
-}
-
-/// Check if a record matches a text query (case-insensitive substring match).
-fn record_matches_text(record: &MemoryRecord, query_lower: &str) -> bool {
-    // Check text content blocks
-    for block in &record.content.blocks {
-        if block.modality == cerememory_core::types::Modality::Text {
-            if let Ok(text) = std::str::from_utf8(&block.data) {
-                if text.to_lowercase().contains(query_lower) {
-                    return true;
-                }
-            }
-        }
-    }
-    // Check summary
-    if let Some(ref summary) = record.content.summary {
-        if summary.to_lowercase().contains(query_lower) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Convert any `Display` error into `CerememoryError::Storage`.
-fn storage_err(e: impl std::fmt::Display) -> CerememoryError {
-    CerememoryError::Storage(e.to_string())
-}
 
 // ---------------------------------------------------------------------------
 // Tests

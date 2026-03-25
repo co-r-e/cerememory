@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 cerememory-core = { workspace = true }
+cerememory-store-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
