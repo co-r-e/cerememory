@@ -348,25 +348,23 @@ impl CerememoryEngine {
             StoreType::Procedural,
             StoreType::Emotional,
         ] {
-            let ids = dispatch_store!(self, store_type, list_ids())?;
-            for id in ids {
-                if let Some(record) = dispatch_store!(self, store_type, get(&id))? {
-                    entries.push((record.id, store_type, record.associations.clone()));
+            let records = dispatch_store!(self, store_type, get_all())?;
+            for record in records {
+                entries.push((record.id, store_type, record.associations.clone()));
 
-                    // Collect searchable text for full-text index rebuild.
-                    let text = Self::build_searchable_text(&record).unwrap_or_default();
-                    if Self::has_indexable_content(&text, &record) {
-                        text_records.push((
-                            record.id,
-                            store_type,
-                            text,
-                            record.content.summary.clone(),
-                        ));
-                    }
+                // Collect searchable text for full-text index rebuild.
+                let text = Self::build_searchable_text(&record).unwrap_or_default();
+                if Self::has_indexable_content(&text, &record) {
+                    text_records.push((
+                        record.id,
+                        store_type,
+                        text,
+                        record.content.summary.clone(),
+                    ));
+                }
 
-                    if let Some(embedding) = Self::primary_embedding(&record) {
-                        let _ = self.vector_index.upsert(record.id, embedding);
-                    }
+                if let Some(embedding) = Self::primary_embedding(&record) {
+                    let _ = self.vector_index.upsert(record.id, embedding);
                 }
             }
         }
@@ -749,11 +747,8 @@ impl CerememoryEngine {
         }
 
         for store_type in ALL_STORES {
-            let ids = dispatch_store!(self, store_type, list_ids())?;
-            for id in ids {
-                let Some(record) = dispatch_store!(self, store_type, get(&id))? else {
-                    continue;
-                };
+            let records = dispatch_store!(self, store_type, get_all())?;
+            for record in records {
                 let filtered: Vec<_> = record
                     .associations
                     .iter()
@@ -761,7 +756,7 @@ impl CerememoryEngine {
                     .cloned()
                     .collect();
                 if filtered.len() != record.associations.len() {
-                    self.persist_associations_for_record(&id, store_type, filtered)
+                    self.persist_associations_for_record(&record.id, store_type, filtered)
                         .await?;
                 }
             }
@@ -1232,11 +1227,8 @@ impl CerememoryEngine {
         // 4. Temporal range enrichment across all requested stores
         if let Some(ref temporal) = req.cue.temporal {
             for store_type in &stores {
-                let ids = dispatch_store!(self, *store_type, list_ids())?;
-                for id in ids {
-                    let Some(record) = dispatch_store!(self, *store_type, get(&id))? else {
-                        continue;
-                    };
+                let records = dispatch_store!(self, *store_type, get_all())?;
+                for record in records {
                     if record.created_at < temporal.start || record.created_at > temporal.end {
                         continue;
                     }
@@ -1486,23 +1478,21 @@ impl CerememoryEngine {
             StoreType::Procedural,
             StoreType::Emotional,
         ] {
-            let ids = dispatch_store!(self, store_type, list_ids())?;
-            for id in ids {
-                if let Some(record) = dispatch_store!(self, store_type, get(&id))? {
-                    if record.created_at >= req.range.start && record.created_at <= req.range.end {
-                        if let Some(min_f) = req.min_fidelity {
-                            if record.fidelity.score < min_f {
-                                continue;
-                            }
+            let records = dispatch_store!(self, store_type, get_all())?;
+            for record in records {
+                if record.created_at >= req.range.start && record.created_at <= req.range.end {
+                    if let Some(min_f) = req.min_fidelity {
+                        if record.fidelity.score < min_f {
+                            continue;
                         }
-                        if let Some(ref filter) = req.emotion_filter {
-                            if !Self::emotion_matches(&record.emotion, filter) {
-                                continue;
-                            }
-                        }
-                        let bucket_key = Self::bucket_key(record.created_at, req.granularity);
-                        bucket_map.entry(bucket_key).or_default().push(record);
                     }
+                    if let Some(ref filter) = req.emotion_filter {
+                        if !Self::emotion_matches(&record.emotion, filter) {
+                            continue;
+                        }
+                    }
+                    let bucket_key = Self::bucket_key(record.created_at, req.granularity);
+                    bucket_map.entry(bucket_key).or_default().push(record);
                 }
             }
         }
@@ -1817,120 +1807,117 @@ impl CerememoryEngine {
         }
 
         // Phase 2: Migrate eligible episodic records to semantic
-        let remaining_ids = self.episodic.list_ids().await?;
+        let remaining_records = self.episodic.get_all().await?;
 
-        for id in remaining_ids {
-            if let Some(record) = self.episodic.get(&id).await? {
-                processed += 1;
-                let age_hours = (Utc::now() - record.created_at).num_hours() as u32;
-                if age_hours < req.min_age_hours {
-                    continue;
-                }
-                if record.access_count < req.min_access_count {
-                    continue;
-                }
+        for record in remaining_records {
+            processed += 1;
+            let age_hours = (Utc::now() - record.created_at).num_hours() as u32;
+            if age_hours < req.min_age_hours {
+                continue;
+            }
+            if record.access_count < req.min_access_count {
+                continue;
+            }
 
-                if req.dry_run {
-                    migrated += 1;
-                    continue;
-                }
+            if req.dry_run {
+                migrated += 1;
+                continue;
+            }
 
-                // Create semantic node
-                let mut semantic_record = record.clone();
-                semantic_record.store = StoreType::Semantic;
-                semantic_record.id = Uuid::now_v7();
+            // Create semantic node
+            let mut semantic_record = record.clone();
+            semantic_record.store = StoreType::Semantic;
+            semantic_record.id = Uuid::now_v7();
 
-                // Generate summary: use LLM if available, otherwise truncate
-                if semantic_record.content.summary.is_none() {
-                    if let Some(ref provider) = self.llm_provider {
-                        if let Some(text) = record.text_content() {
-                            match provider.summarize(&[text.to_string()], 200).await {
-                                Ok(summary) if !summary.is_empty() => {
-                                    semantic_record.content.summary = Some(summary);
-                                }
-                                _ => {
-                                    // Fallback to truncation
-                                    semantic_record.content.summary = Some(
-                                        record
-                                            .text_content()
-                                            .map(|t| {
-                                                if t.len() > 100 {
-                                                    format!("{}...", truncate_str(t, 100))
-                                                } else {
-                                                    t.to_string()
-                                                }
-                                            })
-                                            .unwrap_or_default(),
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        semantic_record.content.summary = semantic_record.text_content().map(|t| {
-                            if t.len() > 100 {
-                                format!("{}...", truncate_str(t, 100))
-                            } else {
-                                t.to_string()
-                            }
-                        });
-                    }
-                }
-
-                // Extract relations via LLM if available
+            // Generate summary: use LLM if available, otherwise truncate
+            if semantic_record.content.summary.is_none() {
                 if let Some(ref provider) = self.llm_provider {
                     if let Some(text) = record.text_content() {
-                        if let Ok(relations) = provider.extract_relations(text).await {
-                            for rel in relations {
-                                // Store as metadata on the semantic record
-                                if let serde_json::Value::Object(ref mut map) =
-                                    semantic_record.metadata
-                                {
-                                    let relations_arr = map
-                                        .entry("extracted_relations".to_string())
-                                        .or_insert_with(|| serde_json::json!([]));
-                                    if let serde_json::Value::Array(ref mut arr) = relations_arr {
-                                        arr.push(serde_json::json!({
-                                            "subject": rel.subject,
-                                            "predicate": rel.predicate,
-                                            "object": rel.object,
-                                            "confidence": rel.confidence,
-                                        }));
-                                    }
+                        match provider.summarize(&[text.to_string()], 200).await {
+                            Ok(summary) if !summary.is_empty() => {
+                                semantic_record.content.summary = Some(summary);
+                            }
+                            _ => {
+                                // Fallback to truncation
+                                semantic_record.content.summary = Some(
+                                    record
+                                        .text_content()
+                                        .map(|t| {
+                                            if t.len() > 100 {
+                                                format!("{}...", truncate_str(t, 100))
+                                            } else {
+                                                t.to_string()
+                                            }
+                                        })
+                                        .unwrap_or_default(),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    semantic_record.content.summary = semantic_record.text_content().map(|t| {
+                        if t.len() > 100 {
+                            format!("{}...", truncate_str(t, 100))
+                        } else {
+                            t.to_string()
+                        }
+                    });
+                }
+            }
+
+            // Extract relations via LLM if available
+            if let Some(ref provider) = self.llm_provider {
+                if let Some(text) = record.text_content() {
+                    if let Ok(relations) = provider.extract_relations(text).await {
+                        for rel in relations {
+                            // Store as metadata on the semantic record
+                            if let serde_json::Value::Object(ref mut map) = semantic_record.metadata
+                            {
+                                let relations_arr = map
+                                    .entry("extracted_relations".to_string())
+                                    .or_insert_with(|| serde_json::json!([]));
+                                if let serde_json::Value::Array(ref mut arr) = relations_arr {
+                                    arr.push(serde_json::json!({
+                                        "subject": rel.subject,
+                                        "predicate": rel.predicate,
+                                        "object": rel.object,
+                                        "confidence": rel.confidence,
+                                    }));
                                 }
                             }
                         }
                     }
                 }
+            }
 
-                dispatch_store!(self, StoreType::Semantic, store(semantic_record.clone()))?;
-                self.coordinator
-                    .register(
-                        semantic_record.id,
-                        StoreType::Semantic,
-                        semantic_record.associations.clone(),
-                    )
-                    .await;
+            dispatch_store!(self, StoreType::Semantic, store(semantic_record.clone()))?;
+            self.coordinator
+                .register(
+                    semantic_record.id,
+                    StoreType::Semantic,
+                    semantic_record.associations.clone(),
+                )
+                .await;
 
-                if let Err(e) = self.index_record(&semantic_record) {
-                    warn!(error = %e, "Failed to index consolidated record");
-                }
+            if let Err(e) = self.index_record(&semantic_record) {
+                warn!(error = %e, "Failed to index consolidated record");
+            }
 
-                let assoc = Association {
-                    target_id: semantic_record.id,
-                    association_type: AssociationType::Semantic,
-                    weight: 1.0,
-                    created_at: Utc::now(),
-                    last_co_activation: Utc::now(),
-                };
-                self.add_persisted_association(&id, assoc).await?;
+            let assoc = Association {
+                target_id: semantic_record.id,
+                association_type: AssociationType::Semantic,
+                weight: 1.0,
+                created_at: Utc::now(),
+                last_co_activation: Utc::now(),
+            };
+            self.add_persisted_association(&record.id, assoc).await?;
 
-                migrated += 1;
+            migrated += 1;
 
-                if record.fidelity.score < 0.1 && self.episodic.delete(&id).await? {
-                    self.cleanup_deleted_records(&[(id, StoreType::Episodic)])
-                        .await?;
-                    pruned += 1;
-                }
+            if record.fidelity.score < 0.1 && self.episodic.delete(&record.id).await? {
+                self.cleanup_deleted_records(&[(record.id, StoreType::Episodic)])
+                    .await?;
+                pruned += 1;
             }
         }
 
@@ -1964,18 +1951,16 @@ impl CerememoryEngine {
             StoreType::Procedural,
             StoreType::Emotional,
         ] {
-            let ids = dispatch_store!(self, store_type, list_ids())?;
-            for id in ids {
-                if let Some((record, _)) = self.get_store_record(&id).await? {
-                    all_inputs.push(DecayInput {
-                        id: record.id,
-                        fidelity: record.fidelity.clone(),
-                        emotion: record.emotion.clone(),
-                        last_accessed_at: record.last_accessed_at,
-                        access_count: record.access_count,
-                    });
-                    record_stores.insert(record.id, store_type);
-                }
+            let records = dispatch_store!(self, store_type, get_all())?;
+            for record in records {
+                all_inputs.push(DecayInput {
+                    id: record.id,
+                    fidelity: record.fidelity.clone(),
+                    emotion: record.emotion.clone(),
+                    last_accessed_at: record.last_accessed_at,
+                    access_count: record.access_count,
+                });
+                record_stores.insert(record.id, store_type);
             }
         }
 
@@ -2077,13 +2062,10 @@ impl CerememoryEngine {
 
         if let Some(range) = temporal_range {
             for store_type in ALL_STORES {
-                let ids = dispatch_store!(self, store_type, list_ids())?;
-                for id in ids {
-                    let Some(record) = dispatch_store!(self, store_type, get(&id))? else {
-                        continue;
-                    };
+                let records = dispatch_store!(self, store_type, get_all())?;
+                for record in records {
                     if record.created_at >= range.start && record.created_at <= range.end {
-                        delete_targets.insert(id, store_type);
+                        delete_targets.insert(record.id, store_type);
                     }
                 }
             }
@@ -2257,12 +2239,8 @@ impl CerememoryEngine {
                 continue;
             }
 
-            let ids = dispatch_store!(self, store_type, list_ids())?;
-            for id in ids {
-                if let Some(record) = dispatch_store!(self, store_type, get(&id))? {
-                    records.push(record);
-                }
-            }
+            let store_records = dispatch_store!(self, store_type, get_all())?;
+            records.extend(store_records);
         }
         Ok(records)
     }
@@ -2282,13 +2260,11 @@ impl CerememoryEngine {
             total_records += count;
 
             if count > 0 {
-                let ids = dispatch_store!(self, store_type, list_ids())?;
+                let records = dispatch_store!(self, store_type, get_all())?;
                 let mut store_fidelity = 0.0f64;
-                for id in &ids {
-                    if let Some((record, _)) = self.get_store_record(id).await? {
-                        store_fidelity += record.fidelity.score;
-                        total_fidelity += record.fidelity.score;
-                    }
+                for record in &records {
+                    store_fidelity += record.fidelity.score;
+                    total_fidelity += record.fidelity.score;
                 }
                 avg_fidelity_by_store.insert(store_type, store_fidelity / count as f64);
             }

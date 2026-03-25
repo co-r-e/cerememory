@@ -22,7 +22,7 @@ use cerememory_core::types::{
     Association, EmotionVector, FidelityState, MemoryContent, MemoryRecord,
 };
 use cerememory_store_common::{
-    fidelity_bucket, fidelity_key, get_record_sync, record_matches_text, storage_err,
+    fidelity_bucket, fidelity_key, get_all_sync, get_record_sync, record_matches_text, storage_err,
 };
 
 // ---------------------------------------------------------------------------
@@ -368,6 +368,17 @@ impl Store for ProceduralStore {
                 }
             }
             Ok(ids)
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
+    }
+
+    async fn get_all(&self) -> Result<Vec<MemoryRecord>, CerememoryError> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read().map_err(storage_err)?;
+            let table = txn.open_table(PROCEDURAL_RECORDS).map_err(storage_err)?;
+            get_all_sync(&table)
         })
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?

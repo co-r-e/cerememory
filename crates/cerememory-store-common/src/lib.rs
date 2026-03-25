@@ -5,6 +5,7 @@
 
 use cerememory_core::error::CerememoryError;
 use cerememory_core::types::{MemoryRecord, Modality};
+use redb::ReadableTable;
 use uuid::Uuid;
 
 /// Convert any `Display` error into `CerememoryError::Storage`.
@@ -59,6 +60,22 @@ pub fn fidelity_key(fidelity_score: f64, id: &Uuid) -> [u8; 17] {
 /// Map a fidelity score (0.0–1.0) to a single-byte bucket (0–100).
 pub fn fidelity_bucket(score: f64) -> u8 {
     (score * 100.0).round().clamp(0.0, 100.0) as u8
+}
+
+/// Read all records from a redb table in a single transaction.
+///
+/// Iterates the entire table and deserializes each value as a `MemoryRecord`.
+pub fn get_all_sync(
+    table: &redb::ReadOnlyTable<&[u8], &[u8]>,
+) -> Result<Vec<MemoryRecord>, CerememoryError> {
+    let mut records = Vec::new();
+    for entry in table.iter().map_err(storage_err)? {
+        let (_, value) = entry.map_err(storage_err)?;
+        let record: MemoryRecord = rmp_serde::from_slice(value.value())
+            .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+        records.push(record);
+    }
+    Ok(records)
 }
 
 #[cfg(test)]

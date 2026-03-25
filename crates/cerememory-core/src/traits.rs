@@ -42,6 +42,12 @@ pub trait Store: Send + Sync {
     /// List all record IDs in this store.
     fn list_ids(&self) -> impl Future<Output = Result<Vec<Uuid>, CerememoryError>> + Send;
 
+    /// Retrieve all records in a single operation.
+    ///
+    /// More efficient than `list_ids()` followed by individual `get()` calls
+    /// because it reads all records in a single transaction.
+    fn get_all(&self) -> impl Future<Output = Result<Vec<MemoryRecord>, CerememoryError>> + Send;
+
     /// Count of records in this store.
     fn count(&self) -> impl Future<Output = Result<usize, CerememoryError>> + Send;
 

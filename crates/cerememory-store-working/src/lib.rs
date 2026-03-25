@@ -185,7 +185,11 @@ impl Store for WorkingMemoryStore {
         Ok(inner.records.keys().copied().collect())
     }
 
-    /// Count of records in this store.
+    async fn get_all(&self) -> Result<Vec<MemoryRecord>, CerememoryError> {
+        let inner = self.inner.read().await;
+        Ok(inner.records.values().cloned().collect())
+    }
+
     async fn count(&self) -> Result<usize, CerememoryError> {
         let inner = self.inner.read().await;
         Ok(inner.records.len())

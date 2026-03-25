@@ -784,6 +784,31 @@ impl Store for SemanticStore {
         .map_err(|e| CerememoryError::Internal(e.to_string()))?
     }
 
+    async fn get_all(&self) -> Result<Vec<MemoryRecord>, CerememoryError> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db
+                .begin_read()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            let nodes = txn
+                .open_table(NODES)
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            let mut records = Vec::new();
+            for entry in nodes
+                .iter()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?
+            {
+                let (_, value) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                let record: MemoryRecord = rmp_serde::from_slice(value.value())
+                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                records.push(record);
+            }
+            Ok(records)
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(e.to_string()))?
+    }
+
     async fn count(&self) -> Result<usize, CerememoryError> {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
