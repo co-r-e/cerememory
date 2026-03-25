@@ -7,12 +7,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use backoff::ExponentialBackoffBuilder;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use cerememory_adapter_common::{self as common, DEFAULT_MAX_RETRIES};
 use cerememory_core::media::{normalize_audio_upload_format, normalize_image_mime_type};
 use cerememory_core::{CerememoryError, ExtractedRelation, LLMProvider, ProviderCapabilities};
 use reqwest::multipart;
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -24,12 +24,6 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_EMBED_MODEL: &str = "text-embedding-3-small";
 /// Default chat model.
 const DEFAULT_CHAT_MODEL: &str = "gpt-4o";
-
-/// Maximum retry attempts for transient errors.
-const MAX_RETRIES: u32 = 3;
-
-/// Initial retry interval in milliseconds.
-const INITIAL_INTERVAL_MS: u64 = 500;
 
 /// Default Whisper model for audio transcription.
 const DEFAULT_WHISPER_MODEL: &str = "whisper-1";
@@ -153,12 +147,7 @@ pub struct OpenAIProvider {
 
 impl OpenAIProvider {
     fn build_client() -> Result<Client, CerememoryError> {
-        Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .map_err(|e| {
-                CerememoryError::Internal(format!("failed to build OpenAI HTTP client: {e}"))
-            })
+        common::build_http_client()
     }
 
     /// Create a new `OpenAIProvider`.
@@ -184,11 +173,7 @@ impl OpenAIProvider {
 
     /// Build the backoff policy used for transient-error retries.
     fn backoff_policy() -> backoff::ExponentialBackoff {
-        ExponentialBackoffBuilder::default()
-            .with_initial_interval(Duration::from_millis(INITIAL_INTERVAL_MS))
-            .with_max_elapsed_time(Some(Duration::from_secs(30)))
-            .with_multiplier(2.0)
-            .build()
+        common::create_backoff_policy()
     }
 
     /// Execute an HTTP request with exponential backoff retry on transient errors.
@@ -224,9 +209,7 @@ impl OpenAIProvider {
                 return Ok(text);
             }
 
-            let is_retryable = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
-
-            if !is_retryable || attempts > MAX_RETRIES {
+            if !common::is_transient_error(status) || attempts > DEFAULT_MAX_RETRIES {
                 let error_body = resp.text().await.unwrap_or_default();
                 return Err(CerememoryError::Internal(format!(
                     "OpenAI API error (HTTP {status}): {error_body}"

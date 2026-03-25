@@ -7,9 +7,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 
-use backoff::ExponentialBackoffBuilder;
+use cerememory_adapter_common::{self as common, DEFAULT_MAX_RETRIES};
 use cerememory_core::{CerememoryError, ExtractedRelation, LLMProvider, ProviderCapabilities};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
@@ -24,12 +23,6 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Anthropic API version header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-
-/// Maximum number of retry attempts for transient failures.
-const MAX_RETRIES: u32 = 3;
-
-/// Initial retry interval in milliseconds.
-const INITIAL_INTERVAL_MS: u64 = 500;
 
 // ---------------------------------------------------------------------------
 // Request / response types for the Anthropic Messages API
@@ -126,12 +119,7 @@ pub struct ClaudeProvider {
 
 impl ClaudeProvider {
     fn build_client() -> Result<Client, CerememoryError> {
-        Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .map_err(|e| {
-                CerememoryError::Internal(format!("failed to build Anthropic HTTP client: {e}"))
-            })
+        common::build_http_client()
     }
 
     /// Create a new `ClaudeProvider`.
@@ -163,10 +151,7 @@ impl ClaudeProvider {
         &self,
         body: &impl Serialize,
     ) -> Result<MessagesResponse, CerememoryError> {
-        let backoff = ExponentialBackoffBuilder::default()
-            .with_initial_interval(Duration::from_millis(INITIAL_INTERVAL_MS))
-            .with_max_elapsed_time(Some(Duration::from_secs(30)))
-            .build();
+        let backoff = common::create_backoff_policy();
 
         let url = self.messages_url();
         let attempt = AtomicU32::new(0);
@@ -213,8 +198,8 @@ impl ClaudeProvider {
                 let error_body = resp.text().await.unwrap_or_default();
 
                 // Rate-limited or server errors are transient.
-                if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-                    if current >= MAX_RETRIES {
+                if common::is_transient_error(status) {
+                    if current >= DEFAULT_MAX_RETRIES {
                         warn!(
                             status = %status,
                             attempt = current,

@@ -18,6 +18,7 @@ members = [
     "crates/cerememory-transport-mcp",
     "crates/cerememory-archive",
     "crates/cerememory-cli",
+    "adapters/adapter-common",
     "adapters/adapter-claude",
     "adapters/adapter-openai",
     "adapters/adapter-gemini",
@@ -140,6 +141,7 @@ cerememory-config = { version = "0.2.1", path = "crates/cerememory-config" }
 cerememory-transport-http = { version = "0.2.1", path = "crates/cerememory-transport-http" }
 cerememory-transport-grpc = { version = "0.2.1", path = "crates/cerememory-transport-grpc" }
 cerememory-transport-mcp = { version = "0.2.1", path = "crates/cerememory-transport-mcp" }
+cerememory-adapter-common = { version = "0.2.1", path = "adapters/adapter-common" }
 cerememory-adapter-openai = { version = "0.2.1", path = "adapters/adapter-openai" }
 cerememory-adapter-claude = { version = "0.2.1", path = "adapters/adapter-claude" }
 cerememory-adapter-gemini = { version = "0.2.1", path = "adapters/adapter-gemini" }

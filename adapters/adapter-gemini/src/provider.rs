@@ -7,10 +7,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
 
-use backoff::ExponentialBackoffBuilder;
 use base64::Engine as _;
+use cerememory_adapter_common::{self as common, DEFAULT_MAX_RETRIES};
 use cerememory_core::media::normalize_image_mime_type;
 use cerememory_core::{CerememoryError, ExtractedRelation, LLMProvider, ProviderCapabilities};
 use reqwest::Client;
@@ -26,9 +25,6 @@ const DEFAULT_MODEL: &str = "gemini-2.0-flash";
 const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-004";
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 const GOOGLE_API_KEY_HEADER: &str = "x-goog-api-key";
-
-const BACKOFF_INITIAL_INTERVAL_MS: u64 = 500;
-const BACKOFF_MAX_RETRIES: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -49,12 +45,7 @@ pub struct GeminiProvider {
 
 impl GeminiProvider {
     fn build_client() -> Result<Client, CerememoryError> {
-        Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .map_err(|e| {
-                CerememoryError::Internal(format!("failed to build Gemini HTTP client: {e}"))
-            })
+        common::build_http_client()
     }
 
     /// Create a new `GeminiProvider`.
@@ -270,16 +261,13 @@ where
     Req: Serialize + Sync,
     Res: for<'de> Deserialize<'de>,
 {
-    let backoff = ExponentialBackoffBuilder::default()
-        .with_initial_interval(Duration::from_millis(BACKOFF_INITIAL_INTERVAL_MS))
-        .with_max_elapsed_time(Some(Duration::from_secs(30)))
-        .build();
+    let backoff = common::create_backoff_policy();
 
     let attempts = std::sync::atomic::AtomicU32::new(0);
 
     backoff::future::retry(backoff, || async {
         let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if attempt > BACKOFF_MAX_RETRIES {
+        if attempt > DEFAULT_MAX_RETRIES {
             return Err(backoff::Error::permanent(CerememoryError::Internal(
                 "Gemini max retries exceeded".to_string(),
             )));
@@ -311,7 +299,7 @@ where
         let response_body = resp.text().await.unwrap_or_default();
 
         // Transient: retry on 429 (rate-limit) and 5xx server errors.
-        if status.as_u16() == 429 || status.is_server_error() {
+        if common::is_transient_error(status) {
             warn!(
                 status = status.as_u16(),
                 body = %response_body,

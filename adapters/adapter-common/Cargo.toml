@@ -1,0 +1,14 @@
+[package]
+name = "cerememory-adapter-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared utilities for Cerememory LLM adapters"
+rust-version.workspace = true
+
+[dependencies]
+cerememory-core = { workspace = true }
+reqwest = { workspace = true }
+backoff = { workspace = true }
