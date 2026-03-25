@@ -12,6 +12,8 @@ pub mod exporter;
 pub mod format;
 pub mod importer;
 
+use std::io::{BufRead, Write};
+
 use cerememory_core::error::CerememoryError;
 use cerememory_core::protocol::ExportResponse;
 use cerememory_core::types::{MemoryRecord, StoreType};
@@ -19,6 +21,14 @@ use cerememory_core::types::{MemoryRecord, StoreType};
 /// Export records to CMA archive format. Returns both the archive bytes and metadata.
 pub fn export(records: &[MemoryRecord]) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
     exporter::export(records)
+}
+
+/// Export records to a writer in streaming CMA format.
+pub fn export_to_writer<W: Write>(
+    records: &[MemoryRecord],
+    writer: &mut W,
+) -> Result<ExportResponse, CerememoryError> {
+    exporter::export_to_writer(records, writer)
 }
 
 /// Export records to CMA archive bytes only.
@@ -30,6 +40,11 @@ pub fn export_to_bytes(records: &[MemoryRecord]) -> Result<Vec<u8>, CerememoryEr
 /// Import records from CMA archive bytes with checksum verification.
 pub fn import_records(data: &[u8]) -> Result<Vec<MemoryRecord>, CerememoryError> {
     importer::import(data)
+}
+
+/// Import records from a reader in streaming CMA format.
+pub fn import_from_reader<R: BufRead>(reader: R) -> Result<Vec<MemoryRecord>, CerememoryError> {
+    importer::import_from_reader(reader)
 }
 
 /// Export records with optional store filtering and encryption.
