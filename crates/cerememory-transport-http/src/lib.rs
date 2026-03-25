@@ -425,31 +425,54 @@ where
     }
 }
 
+// ─── Handler macro ──────────────────────────────────────────────────
+
+/// Generate a handler that deserializes a JSON request, calls an engine method,
+/// and returns the result as JSON.
+macro_rules! define_json_handler {
+    // POST with JSON body
+    ($name:ident, $req:ty, $resp:ty, $method:ident) => {
+        async fn $name(
+            State(engine): State<AppState>,
+            MaybeRequestId(request_id): MaybeRequestId,
+            AppJson(req): AppJson<$req>,
+        ) -> Result<Json<$resp>, AppError> {
+            let resp = engine
+                .$method(req)
+                .await
+                .map_err(|err| AppError::new(err, request_id))?;
+            Ok(Json(resp))
+        }
+    };
+    // GET without body
+    ($name:ident, $resp:ty, $method:ident) => {
+        async fn $name(
+            State(engine): State<AppState>,
+            MaybeRequestId(request_id): MaybeRequestId,
+        ) -> Result<Json<$resp>, AppError> {
+            let resp = engine
+                .$method()
+                .await
+                .map_err(|err| AppError::new(err, request_id))?;
+            Ok(Json(resp))
+        }
+    };
+}
+
 // ─── Encode handlers ─────────────────────────────────────────────────
 
-async fn encode_store(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-    AppJson(req): AppJson<EncodeStoreRequest>,
-) -> Result<Json<EncodeStoreResponse>, AppError> {
-    let resp = engine
-        .encode_store(req)
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(resp))
-}
-
-async fn encode_batch(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-    AppJson(req): AppJson<EncodeBatchRequest>,
-) -> Result<Json<EncodeBatchResponse>, AppError> {
-    let resp = engine
-        .encode_batch(req)
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(resp))
-}
+define_json_handler!(
+    encode_store,
+    EncodeStoreRequest,
+    EncodeStoreResponse,
+    encode_store
+);
+define_json_handler!(
+    encode_batch,
+    EncodeBatchRequest,
+    EncodeBatchResponse,
+    encode_batch
+);
 
 async fn encode_update(
     State(engine): State<AppState>,
@@ -467,17 +490,12 @@ async fn encode_update(
 
 // ─── Recall handlers ─────────────────────────────────────────────────
 
-async fn recall_query(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-    AppJson(req): AppJson<RecallQueryRequest>,
-) -> Result<Json<RecallQueryResponse>, AppError> {
-    let resp = engine
-        .recall_query(req)
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(resp))
-}
+define_json_handler!(
+    recall_query,
+    RecallQueryRequest,
+    RecallQueryResponse,
+    recall_query
+);
 
 async fn recall_associate(
     State(engine): State<AppState>,
@@ -493,55 +511,33 @@ async fn recall_associate(
     Ok(Json(resp))
 }
 
-async fn recall_timeline(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-    AppJson(req): AppJson<RecallTimelineRequest>,
-) -> Result<Json<RecallTimelineResponse>, AppError> {
-    let resp = engine
-        .recall_timeline(req)
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(resp))
-}
-
-async fn recall_graph(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-    AppJson(req): AppJson<RecallGraphRequest>,
-) -> Result<Json<RecallGraphResponse>, AppError> {
-    let resp = engine
-        .recall_graph(req)
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(resp))
-}
+define_json_handler!(
+    recall_timeline,
+    RecallTimelineRequest,
+    RecallTimelineResponse,
+    recall_timeline
+);
+define_json_handler!(
+    recall_graph,
+    RecallGraphRequest,
+    RecallGraphResponse,
+    recall_graph
+);
 
 // ─── Lifecycle handlers ──────────────────────────────────────────────
 
-async fn lifecycle_consolidate(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-    AppJson(req): AppJson<ConsolidateRequest>,
-) -> Result<Json<ConsolidateResponse>, AppError> {
-    let resp = engine
-        .lifecycle_consolidate(req)
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(resp))
-}
-
-async fn lifecycle_decay_tick(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-    AppJson(req): AppJson<DecayTickRequest>,
-) -> Result<Json<DecayTickResponse>, AppError> {
-    let resp = engine
-        .lifecycle_decay_tick(req)
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(resp))
-}
+define_json_handler!(
+    lifecycle_consolidate,
+    ConsolidateRequest,
+    ConsolidateResponse,
+    lifecycle_consolidate
+);
+define_json_handler!(
+    lifecycle_decay_tick,
+    DecayTickRequest,
+    DecayTickResponse,
+    lifecycle_decay_tick
+);
 
 async fn lifecycle_set_mode(
     State(engine): State<AppState>,
@@ -571,39 +567,14 @@ async fn lifecycle_forget(
 
 // ─── Introspect handlers ─────────────────────────────────────────────
 
-async fn introspect_stats(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-) -> Result<Json<StatsResponse>, AppError> {
-    let stats = engine
-        .introspect_stats()
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(stats))
-}
-
-async fn introspect_decay_forecast(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-    AppJson(req): AppJson<DecayForecastRequest>,
-) -> Result<Json<DecayForecastResponse>, AppError> {
-    let resp = engine
-        .introspect_decay_forecast(req)
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(resp))
-}
-
-async fn introspect_evolution(
-    State(engine): State<AppState>,
-    MaybeRequestId(request_id): MaybeRequestId,
-) -> Result<Json<EvolutionMetrics>, AppError> {
-    let resp = engine
-        .introspect_evolution()
-        .await
-        .map_err(|err| AppError::new(err, request_id))?;
-    Ok(Json(resp))
-}
+define_json_handler!(introspect_stats, StatsResponse, introspect_stats);
+define_json_handler!(
+    introspect_decay_forecast,
+    DecayForecastRequest,
+    DecayForecastResponse,
+    introspect_decay_forecast
+);
+define_json_handler!(introspect_evolution, EvolutionMetrics, introspect_evolution);
 
 async fn introspect_record(
     State(engine): State<AppState>,
