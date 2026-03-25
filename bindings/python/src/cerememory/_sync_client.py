@@ -10,6 +10,7 @@ from uuid import UUID
 
 import httpx
 
+from cerememory._endpoints import dump, dump_without_id
 from cerememory._transport import SyncTransport
 from cerememory.types import (
     ConsolidateRequest,
@@ -124,174 +125,61 @@ class SyncCerememoryClient:
     # ------------------------------------------------------------------
 
     def encode_store(self, request: EncodeStoreRequest) -> EncodeStoreResponse:
-        """Store a new memory record (``POST /v1/encode``).
-
-        Args:
-            request: The encode store request.
-
-        Returns:
-            The encode store response with record_id.
-        """
-        return self._post(
-            "/v1/encode",
-            request.model_dump(mode="json", exclude_none=True),
-            EncodeStoreResponse,
-        )
+        """Store a new memory record (``POST /v1/encode``)."""
+        return self._post("/v1/encode", dump(request), EncodeStoreResponse)
 
     def encode_batch(self, request: EncodeBatchRequest) -> EncodeBatchResponse:
-        """Store multiple memory records (``POST /v1/encode/batch``).
-
-        Args:
-            request: The batch encode request.
-
-        Returns:
-            Batch encode response with results per record.
-        """
-        return self._post(
-            "/v1/encode/batch",
-            request.model_dump(mode="json", exclude_none=True),
-            EncodeBatchResponse,
-        )
+        """Store multiple memory records (``POST /v1/encode/batch``)."""
+        return self._post("/v1/encode/batch", dump(request), EncodeBatchResponse)
 
     def encode_update(self, record_id: UUID, request: EncodeUpdateRequest) -> None:
-        """Update an existing memory record (``PATCH /v1/encode/:record_id``).
-
-        Args:
-            record_id: ID of the record to update.
-            request: Fields to update.
-        """
-        body = request.model_dump(mode="json", exclude_none=True)
-        body.pop("record_id", None)
-        self._transport.request("PATCH", f"/v1/encode/{record_id}", json=body)
+        """Update an existing memory record (``PATCH /v1/encode/:record_id``)."""
+        self._transport.request("PATCH", f"/v1/encode/{record_id}", json=dump_without_id(request))
 
     # ------------------------------------------------------------------
     # Recall Operations
     # ------------------------------------------------------------------
 
     def recall_query(self, request: RecallQueryRequest) -> RecallQueryResponse:
-        """Query memories by cue (``POST /v1/recall/query``).
-
-        Args:
-            request: The recall query request.
-
-        Returns:
-            Matching memories with relevance scores.
-        """
-        return self._post(
-            "/v1/recall/query",
-            request.model_dump(mode="json", exclude_none=True),
-            RecallQueryResponse,
-        )
+        """Query memories by cue (``POST /v1/recall/query``)."""
+        return self._post("/v1/recall/query", dump(request), RecallQueryResponse)
 
     def recall_associate(
         self, record_id: UUID, request: RecallAssociateRequest
     ) -> RecallAssociateResponse:
-        """Find associated memories (``POST /v1/recall/associate/:id``).
-
-        Args:
-            record_id: ID of the source record.
-            request: Association query parameters.
-
-        Returns:
-            Associated memories.
-        """
-        body = request.model_dump(mode="json", exclude_none=True)
-        body.pop("record_id", None)
+        """Find associated memories (``POST /v1/recall/associate/:id``)."""
         resp = self._transport.request(
-            "POST", f"/v1/recall/associate/{record_id}", json=body
+            "POST", f"/v1/recall/associate/{record_id}", json=dump_without_id(request)
         )
         return RecallAssociateResponse.model_validate(resp.json())
 
     def recall_timeline(self, request: RecallTimelineRequest) -> RecallTimelineResponse:
-        """Query memories by timeline (``POST /v1/recall/timeline``).
-
-        Args:
-            request: Timeline query parameters.
-
-        Returns:
-            Timeline buckets with memories.
-        """
-        return self._post(
-            "/v1/recall/timeline",
-            request.model_dump(mode="json", exclude_none=True),
-            RecallTimelineResponse,
-        )
+        """Query memories by timeline (``POST /v1/recall/timeline``)."""
+        return self._post("/v1/recall/timeline", dump(request), RecallTimelineResponse)
 
     def recall_graph(self, request: RecallGraphRequest) -> RecallGraphResponse:
-        """Query the memory association graph (``POST /v1/recall/graph``).
-
-        Args:
-            request: Graph query parameters.
-
-        Returns:
-            Graph nodes and edges.
-        """
-        return self._post(
-            "/v1/recall/graph",
-            request.model_dump(mode="json", exclude_none=True),
-            RecallGraphResponse,
-        )
+        """Query the memory association graph (``POST /v1/recall/graph``)."""
+        return self._post("/v1/recall/graph", dump(request), RecallGraphResponse)
 
     # ------------------------------------------------------------------
     # Lifecycle Operations
     # ------------------------------------------------------------------
 
     def lifecycle_consolidate(self, request: ConsolidateRequest) -> ConsolidateResponse:
-        """Trigger memory consolidation (``POST /v1/lifecycle/consolidate``).
-
-        Args:
-            request: Consolidation parameters.
-
-        Returns:
-            Consolidation results.
-        """
-        return self._post(
-            "/v1/lifecycle/consolidate",
-            request.model_dump(mode="json", exclude_none=True),
-            ConsolidateResponse,
-        )
+        """Trigger memory consolidation (``POST /v1/lifecycle/consolidate``)."""
+        return self._post("/v1/lifecycle/consolidate", dump(request), ConsolidateResponse)
 
     def lifecycle_decay_tick(self, request: DecayTickRequest) -> DecayTickResponse:
-        """Trigger a decay tick (``POST /v1/lifecycle/decay-tick``).
-
-        Args:
-            request: Decay tick parameters.
-
-        Returns:
-            Decay tick results.
-        """
-        return self._post(
-            "/v1/lifecycle/decay-tick",
-            request.model_dump(mode="json", exclude_none=True),
-            DecayTickResponse,
-        )
+        """Trigger a decay tick (``POST /v1/lifecycle/decay-tick``)."""
+        return self._post("/v1/lifecycle/decay-tick", dump(request), DecayTickResponse)
 
     def lifecycle_set_mode(self, request: SetModeRequest) -> None:
-        """Set the recall mode (``PUT /v1/lifecycle/mode``).
-
-        Args:
-            request: Mode and optional scope.
-        """
-        self._transport.request(
-            "PUT",
-            "/v1/lifecycle/mode",
-            json=request.model_dump(mode="json", exclude_none=True),
-        )
+        """Set the recall mode (``PUT /v1/lifecycle/mode``)."""
+        self._transport.request("PUT", "/v1/lifecycle/mode", json=dump(request))
 
     def lifecycle_forget(self, request: ForgetRequest) -> ForgetResponse:
-        """Forget (delete) memory records (``DELETE /v1/lifecycle/forget``).
-
-        Args:
-            request: Forget parameters. ``confirm`` must be ``True``.
-
-        Returns:
-            Number of records deleted.
-        """
-        resp = self._transport.request(
-            "DELETE",
-            "/v1/lifecycle/forget",
-            json=request.model_dump(mode="json", exclude_none=True),
-        )
+        """Forget (delete) memory records (``DELETE /v1/lifecycle/forget``)."""
+        resp = self._transport.request("DELETE", "/v1/lifecycle/forget", json=dump(request))
         return ForgetResponse.model_validate(resp.json())
 
     # ------------------------------------------------------------------
@@ -299,45 +187,19 @@ class SyncCerememoryClient:
     # ------------------------------------------------------------------
 
     def introspect_stats(self) -> StatsResponse:
-        """Get memory store statistics (``GET /v1/introspect/stats``).
-
-        Returns:
-            Aggregate statistics.
-        """
+        """Get memory store statistics (``GET /v1/introspect/stats``)."""
         return self._get("/v1/introspect/stats", StatsResponse)
 
     def introspect_record(self, record_id: UUID) -> MemoryRecord:
-        """Get a single memory record (``GET /v1/introspect/record/:id``).
-
-        Args:
-            record_id: The record UUID.
-
-        Returns:
-            The full memory record.
-        """
+        """Get a single memory record (``GET /v1/introspect/record/:id``)."""
         return self._get(f"/v1/introspect/record/{record_id}", MemoryRecord)
 
     def introspect_decay_forecast(
         self, request: DecayForecastRequest
     ) -> DecayForecastResponse:
-        """Forecast future decay of records (``POST /v1/introspect/decay-forecast``).
-
-        Args:
-            request: Record IDs and forecast time.
-
-        Returns:
-            Per-record decay forecasts.
-        """
-        return self._post(
-            "/v1/introspect/decay-forecast",
-            request.model_dump(mode="json", exclude_none=True),
-            DecayForecastResponse,
-        )
+        """Forecast future decay of records (``POST /v1/introspect/decay-forecast``)."""
+        return self._post("/v1/introspect/decay-forecast", dump(request), DecayForecastResponse)
 
     def introspect_evolution(self) -> EvolutionMetrics:
-        """Get evolution metrics (``GET /v1/introspect/evolution``).
-
-        Returns:
-            Parameter adjustments, detected patterns, schema adaptations.
-        """
+        """Get evolution metrics (``GET /v1/introspect/evolution``)."""
         return self._get("/v1/introspect/evolution", EvolutionMetrics)

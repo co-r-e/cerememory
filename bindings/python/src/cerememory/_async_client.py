@@ -10,6 +10,7 @@ from uuid import UUID
 
 import httpx
 
+from cerememory._endpoints import dump, dump_without_id
 from cerememory._transport import AsyncTransport
 from cerememory.types import (
     ConsolidateRequest,
@@ -126,25 +127,17 @@ class AsyncCerememoryClient:
 
     async def encode_store(self, request: EncodeStoreRequest) -> EncodeStoreResponse:
         """Store a new memory record (``POST /v1/encode``)."""
-        return await self._post(
-            "/v1/encode",
-            request.model_dump(mode="json", exclude_none=True),
-            EncodeStoreResponse,
-        )
+        return await self._post("/v1/encode", dump(request), EncodeStoreResponse)
 
     async def encode_batch(self, request: EncodeBatchRequest) -> EncodeBatchResponse:
         """Store multiple memory records (``POST /v1/encode/batch``)."""
-        return await self._post(
-            "/v1/encode/batch",
-            request.model_dump(mode="json", exclude_none=True),
-            EncodeBatchResponse,
-        )
+        return await self._post("/v1/encode/batch", dump(request), EncodeBatchResponse)
 
     async def encode_update(self, record_id: UUID, request: EncodeUpdateRequest) -> None:
         """Update an existing memory record (``PATCH /v1/encode/:record_id``)."""
-        body = request.model_dump(mode="json", exclude_none=True)
-        body.pop("record_id", None)
-        await self._transport.request("PATCH", f"/v1/encode/{record_id}", json=body)
+        await self._transport.request(
+            "PATCH", f"/v1/encode/{record_id}", json=dump_without_id(request)
+        )
 
     # ------------------------------------------------------------------
     # Recall Operations
@@ -152,20 +145,14 @@ class AsyncCerememoryClient:
 
     async def recall_query(self, request: RecallQueryRequest) -> RecallQueryResponse:
         """Query memories by cue (``POST /v1/recall/query``)."""
-        return await self._post(
-            "/v1/recall/query",
-            request.model_dump(mode="json", exclude_none=True),
-            RecallQueryResponse,
-        )
+        return await self._post("/v1/recall/query", dump(request), RecallQueryResponse)
 
     async def recall_associate(
         self, record_id: UUID, request: RecallAssociateRequest
     ) -> RecallAssociateResponse:
         """Find associated memories (``POST /v1/recall/associate/:id``)."""
-        body = request.model_dump(mode="json", exclude_none=True)
-        body.pop("record_id", None)
         resp = await self._transport.request(
-            "POST", f"/v1/recall/associate/{record_id}", json=body
+            "POST", f"/v1/recall/associate/{record_id}", json=dump_without_id(request)
         )
         return RecallAssociateResponse.model_validate(resp.json())
 
@@ -173,19 +160,11 @@ class AsyncCerememoryClient:
         self, request: RecallTimelineRequest
     ) -> RecallTimelineResponse:
         """Query memories by timeline (``POST /v1/recall/timeline``)."""
-        return await self._post(
-            "/v1/recall/timeline",
-            request.model_dump(mode="json", exclude_none=True),
-            RecallTimelineResponse,
-        )
+        return await self._post("/v1/recall/timeline", dump(request), RecallTimelineResponse)
 
     async def recall_graph(self, request: RecallGraphRequest) -> RecallGraphResponse:
         """Query the memory association graph (``POST /v1/recall/graph``)."""
-        return await self._post(
-            "/v1/recall/graph",
-            request.model_dump(mode="json", exclude_none=True),
-            RecallGraphResponse,
-        )
+        return await self._post("/v1/recall/graph", dump(request), RecallGraphResponse)
 
     # ------------------------------------------------------------------
     # Lifecycle Operations
@@ -195,34 +174,20 @@ class AsyncCerememoryClient:
         self, request: ConsolidateRequest
     ) -> ConsolidateResponse:
         """Trigger memory consolidation (``POST /v1/lifecycle/consolidate``)."""
-        return await self._post(
-            "/v1/lifecycle/consolidate",
-            request.model_dump(mode="json", exclude_none=True),
-            ConsolidateResponse,
-        )
+        return await self._post("/v1/lifecycle/consolidate", dump(request), ConsolidateResponse)
 
     async def lifecycle_decay_tick(self, request: DecayTickRequest) -> DecayTickResponse:
         """Trigger a decay tick (``POST /v1/lifecycle/decay-tick``)."""
-        return await self._post(
-            "/v1/lifecycle/decay-tick",
-            request.model_dump(mode="json", exclude_none=True),
-            DecayTickResponse,
-        )
+        return await self._post("/v1/lifecycle/decay-tick", dump(request), DecayTickResponse)
 
     async def lifecycle_set_mode(self, request: SetModeRequest) -> None:
         """Set the recall mode (``PUT /v1/lifecycle/mode``)."""
-        await self._transport.request(
-            "PUT",
-            "/v1/lifecycle/mode",
-            json=request.model_dump(mode="json", exclude_none=True),
-        )
+        await self._transport.request("PUT", "/v1/lifecycle/mode", json=dump(request))
 
     async def lifecycle_forget(self, request: ForgetRequest) -> ForgetResponse:
         """Forget (delete) memory records (``DELETE /v1/lifecycle/forget``)."""
         resp = await self._transport.request(
-            "DELETE",
-            "/v1/lifecycle/forget",
-            json=request.model_dump(mode="json", exclude_none=True),
+            "DELETE", "/v1/lifecycle/forget", json=dump(request)
         )
         return ForgetResponse.model_validate(resp.json())
 
@@ -243,9 +208,7 @@ class AsyncCerememoryClient:
     ) -> DecayForecastResponse:
         """Forecast future decay of records (``POST /v1/introspect/decay-forecast``)."""
         return await self._post(
-            "/v1/introspect/decay-forecast",
-            request.model_dump(mode="json", exclude_none=True),
-            DecayForecastResponse,
+            "/v1/introspect/decay-forecast", dump(request), DecayForecastResponse
         )
 
     async def introspect_evolution(self) -> EvolutionMetrics:
