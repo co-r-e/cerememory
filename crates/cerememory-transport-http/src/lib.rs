@@ -141,8 +141,12 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
 
     // Build CORS layer
     let expose_headers: Vec<axum::http::HeaderName> = vec![
-        "x-request-id".parse().unwrap(),
-        "retry-after".parse().unwrap(),
+        "x-request-id"
+            .parse()
+            .expect("x-request-id is a valid header name"),
+        "retry-after"
+            .parse()
+            .expect("retry-after is a valid header name"),
     ];
     let cors = if config.cors_origins.is_empty() {
         None

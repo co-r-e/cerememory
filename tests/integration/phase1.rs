@@ -256,6 +256,7 @@ async fn test_forget_cascade() {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: Some(vec![cerememory_core::protocol::ManualAssociation {
                 target_id: resp_b.record_id,
                 association_type: AssociationType::Semantic,

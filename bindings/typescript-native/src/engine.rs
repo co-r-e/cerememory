@@ -129,8 +129,8 @@ impl CerememoryEngine {
             limit: limit.unwrap_or(10),
             min_fidelity: None,
             include_decayed: false,
-            reconsolidate: reconsolidate.unwrap_or(true),
-            activation_depth: activation_depth.unwrap_or(2),
+            reconsolidate: reconsolidate.unwrap_or(DEFAULT_RECONSOLIDATE),
+            activation_depth: activation_depth.unwrap_or(DEFAULT_ACTIVATION_DEPTH),
             recall_mode: RecallMode::Human,
         };
 

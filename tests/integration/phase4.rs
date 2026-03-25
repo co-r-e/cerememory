@@ -309,6 +309,7 @@ async fn graph_edge_type_filter() {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: Some(vec![
                 ManualAssociation {
                     target_id: b.record_id,

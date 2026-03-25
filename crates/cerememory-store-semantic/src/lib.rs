@@ -71,7 +71,6 @@ fn association_type_to_byte(t: AssociationType) -> u8 {
     }
 }
 
-#[allow(dead_code)]
 fn byte_to_association_type(b: u8) -> AssociationType {
     match b {
         0 => AssociationType::Temporal,
@@ -319,6 +318,9 @@ impl SemanticStore {
     }
 
     /// Get all nodes that have edges *pointing to* the given node (reverse lookup).
+    ///
+    /// Uses the REVERSE_EDGES table for an efficient prefix scan instead of
+    /// iterating all nodes.
     pub async fn get_reverse_neighbors(
         &self,
         id: Uuid,
@@ -328,26 +330,36 @@ impl SemanticStore {
             let txn = db
                 .begin_read()
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-            let nodes = txn
-                .open_table(NODES)
+            let rev = txn
+                .open_table(REVERSE_EDGES)
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
             let mut result = Vec::new();
 
-            for entry in nodes
-                .iter()
+            // Reverse-edge keys are: target(16) ++ source(16) ++ type(1).
+            // Scan all keys whose first 16 bytes equal `id`.
+            let prefix = id.as_bytes();
+            let range_start = prefix.as_slice();
+            // Upper bound: increment the last byte of the prefix to form an
+            // exclusive end key. Since UUIDs are 16 bytes, we append 16 0xFF
+            // bytes + 0xFF type byte to cover the entire prefix range.
+            let mut range_end = [0u8; 33];
+            range_end[..16].copy_from_slice(prefix);
+            range_end[16..].fill(0xFF);
+
+            for entry in rev
+                .range::<&[u8]>(range_start..=range_end.as_slice())
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?
             {
-                let (key, value) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                let source_uuid = Uuid::from_bytes(key.value().try_into().map_err(|_| {
+                let (key, _) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                let key_bytes = key.value();
+                if key_bytes.len() != 33 || &key_bytes[..16] != prefix.as_slice() {
+                    break;
+                }
+                let source_uuid = Uuid::from_bytes(key_bytes[16..32].try_into().map_err(|_| {
                     CerememoryError::Internal("Invalid UUID key length".to_string())
                 })?);
-                let record: MemoryRecord = rmp_serde::from_slice(value.value())
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
-                for assoc in record.associations {
-                    if assoc.target_id == id {
-                        result.push((source_uuid, assoc.association_type));
-                    }
-                }
+                let assoc_type = byte_to_association_type(key_bytes[32]);
+                result.push((source_uuid, assoc_type));
             }
             Ok(result)
         })

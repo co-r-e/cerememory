@@ -254,6 +254,7 @@ impl PyCerememoryEngine {
     ///
     /// Returns:
     ///     RecallQueryResponse containing matched memories.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (query, limit=10, stores=None, min_fidelity=None, recall_mode=None, reconsolidate=true, activation_depth=2))]
     fn recall(
         &self,

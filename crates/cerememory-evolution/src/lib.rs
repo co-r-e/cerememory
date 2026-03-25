@@ -5,7 +5,7 @@
 //! All adjustments are capped at ±50% of the default value.
 
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use cerememory_core::protocol::{EvolutionMetrics, ParameterAdjustment};
 use cerememory_core::types::StoreType;
@@ -20,25 +20,25 @@ pub struct StoreDecayDefaults {
     pub prune_threshold: f64,
 }
 
-/// Rolling average with a fixed window size.
+/// Rolling average with a fixed window size backed by a ring buffer.
 struct RollingAverage {
-    values: Vec<f64>,
+    values: VecDeque<f64>,
     window: usize,
 }
 
 impl RollingAverage {
     fn new(window: usize) -> Self {
         Self {
-            values: Vec::new(),
+            values: VecDeque::with_capacity(window),
             window,
         }
     }
 
     fn push(&mut self, value: f64) {
-        self.values.push(value);
-        if self.values.len() > self.window {
-            self.values.remove(0);
+        if self.values.len() >= self.window {
+            self.values.pop_front();
         }
+        self.values.push_back(value);
     }
 
     fn average(&self) -> Option<f64> {

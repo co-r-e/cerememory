@@ -142,6 +142,9 @@ impl Drop for EncryptionKey {
         // Use volatile write to prevent the compiler from optimizing this away.
         // This is a best-effort defense-in-depth measure.
         for byte in self.key.iter_mut() {
+            // SAFETY: `write_volatile` prevents the compiler from optimizing
+            // away the zeroing of sensitive key material. We hold an exclusive
+            // `&mut self` reference, so there are no concurrent reads.
             unsafe {
                 std::ptr::write_volatile(byte, 0);
             }

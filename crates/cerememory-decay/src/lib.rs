@@ -240,7 +240,7 @@ mod tests {
         let now = Utc::now();
         let input = make_input(default_fidelity(), default_emotion(), now);
 
-        let result = engine.compute_tick(&[input.clone()], 3600.0);
+        let result = engine.compute_tick(std::slice::from_ref(&input), 3600.0);
         let expected = math::compute_fidelity(
             input.fidelity.score,
             3600.0,

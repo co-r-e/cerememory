@@ -1252,7 +1252,8 @@ impl CerememoryEngine {
                             continue;
                         }
                     }
-                    candidates.push((record.clone(), record.fidelity.score));
+                    let score = record.fidelity.score;
+                    candidates.push((record, score));
                 }
             }
         }
@@ -1277,6 +1278,22 @@ impl CerememoryEngine {
                             if let Some((record, _store)) =
                                 self.get_store_record(&act.record_id).await?
                             {
+                                if !stores.contains(&record.store) {
+                                    continue;
+                                }
+                                if let Some(ref temporal) = req.cue.temporal {
+                                    if record.created_at < temporal.start
+                                        || record.created_at > temporal.end
+                                    {
+                                        continue;
+                                    }
+                                }
+                                if let Some(min_f) = req.min_fidelity {
+                                    if record.fidelity.score < min_f && !req.include_decayed {
+                                        fidelity_filtered += 1;
+                                        continue;
+                                    }
+                                }
                                 candidates.push((record, act.activation_level * 0.5));
                             }
                         }
@@ -1292,6 +1309,8 @@ impl CerememoryEngine {
             }
         }
 
+        // Final filter pass: catches index-search results outside the temporal
+        // window and any edge cases from spreading activation.
         if let Some(ref temporal) = req.cue.temporal {
             candidates.retain(|(record, _)| {
                 record.created_at >= temporal.start && record.created_at <= temporal.end
@@ -1325,16 +1344,20 @@ impl CerememoryEngine {
 
                 if let Some(store_type) = self.coordinator.get_record_store_type(&record.id).await?
                 {
-                    let _ = dispatch_store!(
+                    if let Err(e) = dispatch_store!(
                         self,
                         store_type,
                         update_fidelity(&record.id, record.fidelity.clone())
-                    );
-                    let _ = dispatch_store!(
+                    ) {
+                        warn!(record_id = %record.id, error = %e, "Failed to update fidelity during reconsolidation");
+                    }
+                    if let Err(e) = dispatch_store!(
                         self,
                         store_type,
                         update_access(&record.id, record.access_count, record.last_accessed_at)
-                    );
+                    ) {
+                        warn!(record_id = %record.id, error = %e, "Failed to update access during reconsolidation");
+                    }
                 }
             }
 
@@ -1390,10 +1413,16 @@ impl CerememoryEngine {
             .activate(&req.record_id, req.depth, req.min_weight)
             .await?;
 
+        let source_assocs = if req.association_types.is_some() {
+            Some(self.coordinator.get_associations(&req.record_id).await?)
+        } else {
+            None
+        };
+
         let mut memories = Vec::new();
         for act in activated.iter().take(req.limit as usize) {
             if let Some(types) = &req.association_types {
-                let assocs = self.coordinator.get_associations(&req.record_id).await?;
+                let assocs = source_assocs.as_ref().expect("pre-fetched above");
                 let matches = assocs
                     .iter()
                     .any(|a| a.target_id == act.record_id && types.contains(&a.association_type));
@@ -2150,7 +2179,14 @@ impl CerememoryEngine {
             dispatch_store!(self, store_type, store(record.clone()))?;
             if let Some(existing_store) = replaced_cross_store {
                 if !dispatch_store!(self, existing_store, delete(&record.id))? {
-                    let _ = dispatch_store!(self, store_type, delete(&record.id));
+                    if let Err(e) = dispatch_store!(self, store_type, delete(&record.id)) {
+                        warn!(
+                            record_id = %record.id,
+                            store = %store_type,
+                            error = %e,
+                            "Failed to clean up newly stored record during import conflict rollback"
+                        );
+                    }
                     return Err(CerememoryError::ImportConflict(format!(
                         "Failed to replace cross-store record {} from {} to {}",
                         record.id, existing_store, store_type

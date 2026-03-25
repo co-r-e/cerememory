@@ -124,9 +124,18 @@ function sleep(ms: number): Promise<void> {
  */
 export class Transport {
   private readonly config: ResolvedConfig;
+  private readonly baseHeaders: Record<string, string>;
 
   constructor(config: TransportConfig) {
     this.config = resolveConfig(config);
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      ...this.config.headers,
+    };
+    if (this.config.apiKey) {
+      headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    }
+    this.baseHeaders = headers;
   }
 
   /**
@@ -274,18 +283,9 @@ export class Transport {
     );
 
     try {
-      const headers: Record<string, string> = {
-        Accept: "application/json",
-        ...this.config.headers,
-      };
-
-      if (this.config.apiKey) {
-        headers["Authorization"] = `Bearer ${this.config.apiKey}`;
-      }
-
       const init: RequestInit = {
         method,
-        headers,
+        headers: { ...this.baseHeaders },
         signal: controller.signal,
       };
 

@@ -332,6 +332,7 @@ async fn vector_search_multimodal() {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         })
         .await
@@ -524,6 +525,7 @@ async fn image_record_store_recall() {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         })
         .await
@@ -604,6 +606,7 @@ async fn mixed_modality() {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         })
         .await
@@ -625,6 +628,7 @@ async fn mixed_modality() {
             store: Some(StoreType::Episodic),
             emotion: None,
             context: None,
+            metadata: None,
             associations: None,
         })
         .await

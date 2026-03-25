@@ -98,9 +98,9 @@ impl RateLimitLayer {
     /// Spawns a background task that shrinks the internal DashMap every 60 seconds
     /// to evict stale entries and prevent unbounded memory growth.
     pub fn new(per_second: u64, burst: u32, trusted_proxy_cidrs: Vec<String>) -> Self {
-        let quota =
-            Quota::per_second(NonZeroU32::new(per_second as u32).unwrap_or(NonZeroU32::MIN))
-                .allow_burst(NonZeroU32::new(burst).unwrap_or(NonZeroU32::MIN));
+        let clamped = per_second.min(u32::MAX as u64) as u32;
+        let quota = Quota::per_second(NonZeroU32::new(clamped).unwrap_or(NonZeroU32::MIN))
+            .allow_burst(NonZeroU32::new(burst).unwrap_or(NonZeroU32::MIN));
         let limiter = Arc::new(RateLimiter::keyed(quota));
         let trusted_proxy_cidrs = Arc::new(
             trusted_proxy_cidrs

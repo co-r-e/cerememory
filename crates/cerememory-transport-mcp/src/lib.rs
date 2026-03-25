@@ -272,19 +272,18 @@ fn parse_emotion(label: Option<String>) -> Result<Option<EmotionVector>, McpErro
 fn parse_consolidation_strategy(
     strategy: Option<String>,
 ) -> Result<ConsolidationStrategy, McpError> {
-    match strategy
+    let raw = strategy
         .as_deref()
         .unwrap_or("incremental")
         .trim()
-        .to_lowercase()
-        .as_str()
-    {
+        .to_string();
+    match raw.to_lowercase().as_str() {
         "full" => Ok(ConsolidationStrategy::Full),
         "incremental" => Ok(ConsolidationStrategy::Incremental),
         "selective" => Ok(ConsolidationStrategy::Selective),
-        other => Err(McpError::invalid_params(
+        _ => Err(McpError::invalid_params(
             format!(
-                "Invalid consolidation strategy: {other}. Use one of incremental, full, selective."
+                "Invalid consolidation strategy: {raw}. Use one of incremental, full, selective."
             ),
             None,
         )),
@@ -461,8 +460,8 @@ impl CerememoryMcpServer {
             limit: p.limit.unwrap_or(10).clamp(1, 1000),
             min_fidelity: None,
             include_decayed: false,
-            reconsolidate: p.reconsolidate.unwrap_or(true),
-            activation_depth: p.activation_depth.unwrap_or(2),
+            reconsolidate: p.reconsolidate.unwrap_or(DEFAULT_RECONSOLIDATE),
+            activation_depth: p.activation_depth.unwrap_or(DEFAULT_ACTIVATION_DEPTH),
             recall_mode: RecallMode::Perfect,
         };
 

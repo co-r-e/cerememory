@@ -178,14 +178,21 @@ pub struct RecallQueryRequest {
     pub recall_mode: RecallMode,
 }
 
+/// Default recall query limit.
+pub const DEFAULT_RECALL_LIMIT: u32 = 10;
+/// Default reconsolidate flag for recall queries.
+pub const DEFAULT_RECONSOLIDATE: bool = true;
+/// Default activation depth for spreading activation.
+pub const DEFAULT_ACTIVATION_DEPTH: u32 = 2;
+
 fn default_recall_limit() -> u32 {
-    10
+    DEFAULT_RECALL_LIMIT
 }
 fn default_true() -> bool {
-    true
+    DEFAULT_RECONSOLIDATE
 }
 fn default_activation_depth() -> u32 {
-    2
+    DEFAULT_ACTIVATION_DEPTH
 }
 fn default_recall_mode() -> RecallMode {
     RecallMode::Human

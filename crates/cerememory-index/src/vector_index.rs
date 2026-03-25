@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use cerememory_core::error::CerememoryError;
@@ -295,9 +295,13 @@ impl VectorIndex {
 
             let key_bytes = key.value();
             if key_bytes.len() != 16 {
+                warn!(
+                    key_len = key_bytes.len(),
+                    "Skipping vector index entry with invalid key length"
+                );
                 continue;
             }
-            let id = Uuid::from_bytes(key_bytes.try_into().unwrap());
+            let id = Uuid::from_bytes(key_bytes.try_into().expect("length validated above"));
 
             let vec: Vec<f32> = rmp_serde::from_slice(value.value())
                 .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
@@ -367,9 +371,13 @@ impl VectorIndex {
 
             let key_bytes = key.value();
             if key_bytes.len() != 16 {
+                warn!(
+                    key_len = key_bytes.len(),
+                    "Skipping vector index entry with invalid key length"
+                );
                 continue;
             }
-            let id = Uuid::from_bytes(key_bytes.try_into().unwrap());
+            let id = Uuid::from_bytes(key_bytes.try_into().expect("length validated above"));
             let vec: Vec<f32> = rmp_serde::from_slice(value.value())
                 .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
             entries.push((id, vec));
