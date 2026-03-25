@@ -11,6 +11,10 @@ use cerememory_core::types::MemoryRecord;
 
 use crate::format::{ArchiveFooter, ArchiveHeader, ARCHIVE_VERSION};
 
+fn write_err(e: std::io::Error) -> CerememoryError {
+    CerememoryError::ExportFailed(format!("Write error: {e}"))
+}
+
 /// Export records to a writer in CMA JSON Lines format (streaming).
 ///
 /// Writes one record at a time, computing the SHA-256 checksum incrementally.
@@ -19,7 +23,6 @@ pub fn export_to_writer<W: Write>(
     records: &[MemoryRecord],
     writer: &mut W,
 ) -> Result<ExportResponse, CerememoryError> {
-    // Write header
     let header = ArchiveHeader {
         version: ARCHIVE_VERSION.to_string(),
         timestamp: Utc::now(),
@@ -27,44 +30,26 @@ pub fn export_to_writer<W: Write>(
     };
     let header_line = serde_json::to_string(&header)
         .map_err(|e| CerememoryError::ExportFailed(format!("Header serialization: {e}")))?;
-    writer
-        .write_all(header_line.as_bytes())
-        .map_err(|e| CerememoryError::ExportFailed(format!("Write error: {e}")))?;
-    writer
-        .write_all(b"\n")
-        .map_err(|e| CerememoryError::ExportFailed(format!("Write error: {e}")))?;
-
+    writeln!(writer, "{header_line}").map_err(write_err)?;
     let mut bytes_written = header_line.len() as u64 + 1;
 
-    // Write records and compute checksum
     let mut hasher = Sha256::new();
     for record in records {
         let line = serde_json::to_string(record)
             .map_err(|e| CerememoryError::ExportFailed(format!("Record serialization: {e}")))?;
         hasher.update(line.as_bytes());
         hasher.update(b"\n");
-        writer
-            .write_all(line.as_bytes())
-            .map_err(|e| CerememoryError::ExportFailed(format!("Write error: {e}")))?;
-        writer
-            .write_all(b"\n")
-            .map_err(|e| CerememoryError::ExportFailed(format!("Write error: {e}")))?;
+        writeln!(writer, "{line}").map_err(write_err)?;
         bytes_written += line.len() as u64 + 1;
     }
 
-    // Write footer
     let checksum = format!("{:x}", hasher.finalize());
     let footer = ArchiveFooter {
         checksum: checksum.clone(),
     };
     let footer_line = serde_json::to_string(&footer)
         .map_err(|e| CerememoryError::ExportFailed(format!("Footer serialization: {e}")))?;
-    writer
-        .write_all(footer_line.as_bytes())
-        .map_err(|e| CerememoryError::ExportFailed(format!("Write error: {e}")))?;
-    writer
-        .write_all(b"\n")
-        .map_err(|e| CerememoryError::ExportFailed(format!("Write error: {e}")))?;
+    writeln!(writer, "{footer_line}").map_err(write_err)?;
     bytes_written += footer_line.len() as u64 + 1;
 
     Ok(ExportResponse {

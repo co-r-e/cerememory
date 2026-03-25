@@ -53,7 +53,6 @@ pub enum LogFormat {
 pub enum LlmProvider {
     #[default]
     None,
-    #[serde(alias = "openai")]
     OpenAI,
     #[serde(alias = "anthropic")]
     Claude,

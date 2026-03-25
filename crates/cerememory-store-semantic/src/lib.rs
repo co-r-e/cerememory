@@ -793,17 +793,7 @@ impl Store for SemanticStore {
             let nodes = txn
                 .open_table(NODES)
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-            let mut records = Vec::new();
-            for entry in nodes
-                .iter()
-                .map_err(|e| CerememoryError::Storage(e.to_string()))?
-            {
-                let (_, value) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                let record: MemoryRecord = rmp_serde::from_slice(value.value())
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
-                records.push(record);
-            }
-            Ok(records)
+            cerememory_store_common::get_all_sync(&nodes)
         })
         .await
         .map_err(|e| CerememoryError::Internal(e.to_string()))?
