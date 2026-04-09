@@ -27,6 +27,7 @@ COPY --from=builder --chown=nonroot:nonroot /app/target/release/cerememory /usr/
 COPY --from=builder --chown=nonroot:nonroot /tmp/cerememory-data /data
 
 ENV CEREMEMORY_DATA_DIR=/data
+ENV CEREMEMORY_HTTP__BIND_ADDRESS=0.0.0.0
 ENV CEREMEMORY_HTTP__PORT=8420
 
 EXPOSE 8420 8421
