@@ -212,7 +212,6 @@ impl CerememoryEngine {
     }
 
     #[napi]
-    #[allow(clippy::too_many_arguments)]
     pub fn store_raw(
         &self,
         text: String,

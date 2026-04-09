@@ -62,10 +62,10 @@ from cerememory.types import (
     RecallRawQueryResponse,
     RecallTimelineRequest,
     RecallTimelineResponse,
+    SecrecyLevel,
     SetModeRequest,
     StatsResponse,
     StoreType,
-    SecrecyLevel,
 )
 
 
