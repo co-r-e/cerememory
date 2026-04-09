@@ -178,13 +178,16 @@ fn extract_client_ip(req: &Request<Body>, trusted_proxy_cidrs: &[TrustedProxyCid
     let should_trust_forwarded = peer_addr.is_some() && peer_is_trusted;
 
     if should_trust_forwarded {
-        // Try X-Forwarded-For (first IP in the chain)
+        // Try X-Forwarded-For (rightmost non-trusted IP — the last entry
+        // before our trusted proxies appended their address).
         if let Some(xff) = req.headers().get("x-forwarded-for") {
             if let Ok(value) = xff.to_str() {
-                if let Some(first) = value.split(',').next() {
-                    if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                        return ip;
-                    }
+                if let Some(ip) = value
+                    .rsplit(',')
+                    .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+                    .find(|ip| !trusted_proxy_cidrs.iter().any(|cidr| cidr.contains(*ip)))
+                {
+                    return ip;
                 }
             }
         }

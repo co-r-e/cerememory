@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.1] - 2026-03-22
 
+### Added
+
+#### Human-Plus Memory
+- Raw journal preservation plane with dedicated redb store, session index, and raw full-text search
+- Raw ingest and forensic recall APIs across HTTP, MCP, and gRPC
+- `lifecycle.dream_tick` for raw-to-episodic summarization with backlinks
+- Topic inference for dream grouping based on time gaps and lexical shift
+- Secrecy-aware dream summarization with redaction accounting
+- Conditional semantic promotion from dream summaries
+- Background dream processing with configurable interval and graceful shutdown
+- Bundle CMA archive support for exporting/importing curated memory together with raw journal records
+
+#### SDK and Native Bindings
+- Python HTTP SDK support for `store_raw`, `recall_raw`, `dream_tick`, `lifecycle_export`, and `lifecycle_import`
+- TypeScript HTTP SDK support for `storeRaw`, `recallRaw`, `dreamTick`, `lifecycleExport`, and `lifecycleImport`
+- Python native binding support for raw journal and dream tick operations
+- TypeScript native binding support for raw journal and dream tick operations
+
+### Changed
+
+#### Introspection and Operations
+- `StatsResponse` now exposes raw journal counts, pending dream work, dream-derived record counts, last dream tick time, and background dream status
+- CLI now exposes `store-raw`, `recall-raw`, and `dream-tick`, plus raw-inclusive archive export
+
 ### Fixed
 
 #### Security and Operations

@@ -37,6 +37,71 @@ pub struct MemoryRecord {
     pub version: u32,
 }
 
+/// A verbatim preserved record in the raw journal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawJournalRecord {
+    pub id: Uuid,
+    pub session_id: String,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub topic_id: Option<String>,
+    pub source: RawSource,
+    pub speaker: RawSpeaker,
+    pub visibility: RawVisibility,
+    pub secrecy_level: SecrecyLevel,
+    #[serde(default = "Utc::now")]
+    pub created_at: DateTime<Utc>,
+    #[serde(default = "Utc::now")]
+    pub updated_at: DateTime<Utc>,
+    pub content: MemoryContent,
+    #[serde(default = "default_metadata")]
+    pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub derived_memory_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub suppressed: bool,
+}
+
+/// Origin channel for a raw journal record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawSource {
+    Conversation,
+    ToolIo,
+    Scratchpad,
+    Summary,
+    Imported,
+}
+
+/// The speaker or emitter of a raw journal record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawSpeaker {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+/// Visibility class for raw journal records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawVisibility {
+    Normal,
+    PrivateScratch,
+    Sealed,
+}
+
+/// Secrecy tier for preserved raw material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecrecyLevel {
+    Public,
+    Sensitive,
+    Secret,
+}
+
 /// Identifies the target memory store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -399,6 +464,85 @@ impl MemoryRecord {
     }
 }
 
+impl RawJournalRecord {
+    /// Create a new text-only raw journal record with sensible defaults.
+    pub fn new_text(
+        session_id: impl Into<String>,
+        source: RawSource,
+        speaker: RawSpeaker,
+        visibility: RawVisibility,
+        secrecy_level: SecrecyLevel,
+        text: impl Into<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::now_v7(),
+            session_id: session_id.into(),
+            turn_id: None,
+            topic_id: None,
+            source,
+            speaker,
+            visibility,
+            secrecy_level,
+            created_at: now,
+            updated_at: now,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: text.into().into_bytes(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            metadata: serde_json::Value::Object(serde_json::Map::new()),
+            derived_memory_ids: Vec::new(),
+            suppressed: false,
+        }
+    }
+
+    /// Validate record invariants using the same content rules as `MemoryRecord`.
+    pub fn validate(&self) -> Result<(), crate::error::CerememoryError> {
+        if self.session_id.trim().is_empty() {
+            return Err(crate::error::CerememoryError::Validation(
+                "session_id must not be empty".to_string(),
+            ));
+        }
+
+        let surrogate = MemoryRecord {
+            id: self.id,
+            store: StoreType::Working,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            last_accessed_at: self.updated_at,
+            access_count: 0,
+            content: self.content.clone(),
+            fidelity: FidelityState::default(),
+            emotion: EmotionVector::default(),
+            associations: Vec::new(),
+            metadata: self.metadata.clone(),
+            version: 1,
+        };
+        surrogate.validate()
+    }
+
+    /// Extract text content from the first text block, if any.
+    pub fn text_content(&self) -> Option<&str> {
+        self.content
+            .blocks
+            .iter()
+            .find(|b| b.modality == Modality::Text)
+            .and_then(|b| std::str::from_utf8(&b.data).ok())
+    }
+
+    /// Check if this raw record's text content contains the query (case-insensitive).
+    pub fn matches_text(&self, query_lower: &str) -> bool {
+        self.text_content()
+            .map(|t| t.to_lowercase().contains(query_lower))
+            .unwrap_or(false)
+    }
+}
+
 /// Rough token estimate from byte count (1 token ≈ 4 bytes).
 pub fn estimate_tokens_from_bytes(bytes: usize) -> usize {
     bytes.div_ceil(4)
@@ -613,6 +757,41 @@ mod tests {
         assert!(matches!(
             err,
             crate::error::CerememoryError::Validation(msg) if msg.contains("Invalid emotion label")
+        ));
+    }
+
+    #[test]
+    fn raw_journal_new_text_has_valid_defaults() {
+        let record = RawJournalRecord::new_text(
+            "sess-1",
+            RawSource::Conversation,
+            RawSpeaker::User,
+            RawVisibility::Normal,
+            SecrecyLevel::Public,
+            "raw hello",
+        );
+
+        assert_eq!(record.session_id, "sess-1");
+        assert_eq!(record.text_content(), Some("raw hello"));
+        assert!(!record.suppressed);
+        assert!(record.validate().is_ok());
+    }
+
+    #[test]
+    fn raw_journal_validate_rejects_blank_session() {
+        let record = RawJournalRecord::new_text(
+            "   ",
+            RawSource::Conversation,
+            RawSpeaker::Assistant,
+            RawVisibility::PrivateScratch,
+            SecrecyLevel::Sensitive,
+            "scratch",
+        );
+
+        let err = record.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CerememoryError::Validation(msg) if msg.contains("session_id")
         ));
     }
 }

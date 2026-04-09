@@ -23,11 +23,14 @@ import type {
   StoreType,
   CMPErrorCode,
   CMPErrorEnvelope,
+  EncodeStoreRawResponse,
   EncodeStoreResponse,
   RecallQueryResponse,
+  RecallRawQueryResponse,
   StatsResponse,
   MemoryRecord,
   HealthResponse,
+  DreamTickResponse,
   ForgetResponse,
   EvolutionMetrics,
   ConsolidateResponse,
@@ -96,6 +99,52 @@ const ENCODE_RESPONSE: EncodeStoreResponse = {
   associations_created: 0,
 };
 
+const ENCODE_RAW_RESPONSE: EncodeStoreRawResponse = {
+  record_id: "01916e3a-1234-7000-8000-000000000099",
+  session_id: "sess-1",
+  visibility: "normal",
+  secrecy_level: "public",
+};
+
+const RECALL_RAW_RESPONSE: RecallRawQueryResponse = {
+  records: [
+    {
+      id: "01916e3a-1234-7000-8000-000000000099",
+      session_id: "sess-1",
+      turn_id: null,
+      topic_id: null,
+      source: "conversation",
+      speaker: "user",
+      visibility: "normal",
+      secrecy_level: "public",
+      created_at: "2025-06-15T12:00:00Z",
+      updated_at: "2025-06-15T12:00:00Z",
+      content: {
+        blocks: [
+          {
+            modality: "text",
+            format: "text/plain",
+            data: [82, 97, 119],
+            embedding: null,
+          },
+        ],
+        summary: null,
+      },
+      metadata: {},
+      derived_memory_ids: [],
+      suppressed: false,
+    },
+  ],
+  total_candidates: 1,
+};
+
+const DREAM_TICK_RESPONSE: DreamTickResponse = {
+  groups_processed: 1,
+  raw_records_processed: 2,
+  episodic_summaries_created: 1,
+  semantic_nodes_created: 1,
+};
+
 /** A minimal valid StatsResponse. */
 const STATS_RESPONSE: StatsResponse = {
   total_records: 42,
@@ -106,8 +155,14 @@ const STATS_RESPONSE: StatsResponse = {
   oldest_record: "2025-01-01T00:00:00Z",
   newest_record: "2025-06-15T12:00:00Z",
   total_recall_count: 100,
+  raw_journal_records: 5,
+  raw_journal_pending_dream: 2,
+  dream_episodic_summaries: 3,
+  dream_semantic_nodes: 1,
+  last_dream_tick_at: "2025-06-15T12:00:00Z",
   evolution_metrics: null,
   background_decay_enabled: true,
+  background_dream_enabled: true,
 };
 
 /** A minimal MemoryRecord. */
@@ -1166,6 +1221,34 @@ describe("CerememoryClient", () => {
       });
 
       expect(result.records_deleted).toBe(2);
+    });
+  });
+
+  describe("raw and dream APIs", () => {
+    it("storeRaw stores a raw journal record", async () => {
+      const fetchFn = mockFetch(200, ENCODE_RAW_RESPONSE);
+      const client = createClient(fetchFn);
+
+      const id = await client.storeRaw("Raw note", { sessionId: "sess-1" });
+      expect(id).toBe(ENCODE_RAW_RESPONSE.record_id);
+    });
+
+    it("recallRaw recalls raw journal records", async () => {
+      const fetchFn = mockFetch(200, RECALL_RAW_RESPONSE);
+      const client = createClient(fetchFn);
+
+      const records = await client.recallRaw({ sessionId: "sess-1" });
+      expect(records).toHaveLength(1);
+      expect(records[0].session_id).toBe("sess-1");
+    });
+
+    it("dreamTick triggers dream processing", async () => {
+      const fetchFn = mockFetch(200, DREAM_TICK_RESPONSE);
+      const client = createClient(fetchFn);
+
+      const result = await client.dreamTick({ session_id: "sess-1" });
+      expect(result.groups_processed).toBe(1);
+      expect(result.semantic_nodes_created).toBe(1);
     });
   });
 

@@ -80,6 +80,33 @@ class ConsolidationStrategy(str, Enum):
     SELECTIVE = "selective"
 
 
+class RawSource(str, Enum):
+    CONVERSATION = "conversation"
+    TOOL_IO = "tool_io"
+    SCRATCHPAD = "scratchpad"
+    SUMMARY = "summary"
+    IMPORTED = "imported"
+
+
+class RawSpeaker(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+    TOOL = "tool"
+
+
+class RawVisibility(str, Enum):
+    NORMAL = "normal"
+    PRIVATE_SCRATCH = "private_scratch"
+    SEALED = "sealed"
+
+
+class SecrecyLevel(str, Enum):
+    PUBLIC = "public"
+    SENSITIVE = "sensitive"
+    SECRET = "secret"
+
+
 # ---------------------------------------------------------------------------
 # Core Types
 # ---------------------------------------------------------------------------
@@ -179,6 +206,23 @@ class MemoryRecord(BaseModel):
     version: int = 1
 
 
+class RawJournalRecord(BaseModel):
+    id: UUID
+    session_id: str
+    turn_id: str | None = None
+    topic_id: str | None = None
+    source: RawSource
+    speaker: RawSpeaker
+    visibility: RawVisibility
+    secrecy_level: SecrecyLevel
+    created_at: datetime
+    updated_at: datetime
+    content: MemoryContent
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    derived_memory_ids: list[UUID] = Field(default_factory=list)
+    suppressed: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Protocol Types — CMP Header
 # ---------------------------------------------------------------------------
@@ -259,6 +303,35 @@ class EncodeUpdateRequest(BaseModel):
     content: MemoryContent | None = None
     emotion: EmotionVector | None = None
     metadata: dict[str, Any] | None = None
+
+
+class EncodeStoreRawRequest(BaseModel):
+    header: CMPHeader | None = None
+    session_id: str
+    turn_id: str | None = None
+    topic_id: str | None = None
+    source: RawSource
+    speaker: RawSpeaker
+    visibility: RawVisibility
+    secrecy_level: SecrecyLevel
+    content: MemoryContent
+    metadata: dict[str, Any] | None = None
+
+
+class EncodeStoreRawResponse(BaseModel):
+    record_id: UUID
+    session_id: str
+    visibility: RawVisibility
+    secrecy_level: SecrecyLevel
+
+
+class EncodeBatchStoreRawRequest(BaseModel):
+    header: CMPHeader | None = None
+    records: list[EncodeStoreRawRequest]
+
+
+class EncodeBatchStoreRawResponse(BaseModel):
+    results: list[EncodeStoreRawResponse]
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +514,22 @@ class RecallGraphResponse(BaseModel):
     total_nodes: int
 
 
+class RecallRawQueryRequest(BaseModel):
+    header: CMPHeader | None = None
+    session_id: str | None = None
+    query: str | None = None
+    temporal: TemporalRange | None = None
+    limit: int = 10
+    include_private_scratch: bool = False
+    include_sealed: bool = False
+    secrecy_levels: list[SecrecyLevel] | None = None
+
+
+class RecallRawQueryResponse(BaseModel):
+    records: list[RawJournalRecord]
+    total_candidates: int
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle Operations
 # ---------------------------------------------------------------------------
@@ -481,6 +570,24 @@ class DecayTickResponse(BaseModel):
     records_pruned: int
 
 
+class DreamTickRequest(BaseModel):
+    header: CMPHeader | None = None
+    session_id: str | None = None
+    dry_run: bool = False
+    max_groups: int = 10
+    include_private_scratch: bool = False
+    include_sealed: bool = False
+    promote_semantic: bool = True
+    secrecy_levels: list[SecrecyLevel] | None = None
+
+
+class DreamTickResponse(BaseModel):
+    groups_processed: int
+    raw_records_processed: int
+    episodic_summaries_created: int
+    semantic_nodes_created: int
+
+
 class SetModeRequest(BaseModel):
     """Request body for ``PUT /v1/lifecycle/mode``."""
 
@@ -504,6 +611,87 @@ class ForgetResponse(BaseModel):
     """Response from ``DELETE /v1/lifecycle/forget``."""
 
     records_deleted: int
+
+
+class ExportRequest(BaseModel):
+    header: CMPHeader | None = None
+    format: str = "cma"
+    stores: list[StoreType] | None = None
+    include_raw_journal: bool = False
+    encrypt: bool = False
+    encryption_key: str | None = None
+
+
+class ExportResponse(BaseModel):
+    archive_id: str
+    size_bytes: int
+    record_count: int
+    checksum: str
+
+
+class ExportArchiveResponse(BaseModel):
+    """HTTP export response — fields are flattened (serde(flatten) in Rust)."""
+
+    archive_id: str
+    size_bytes: int
+    record_count: int
+    checksum: str
+    archive_data: bytes
+
+    @field_validator("archive_data", mode="before")
+    @classmethod
+    def _deserialize_archive_data(cls, v: Any) -> bytes:
+        if isinstance(v, bytes):
+            return v
+        if isinstance(v, list):
+            return bytes(v)
+        if isinstance(v, str):
+            return base64.b64decode(v)
+        raise ValueError(f"Cannot convert {type(v).__name__} to bytes")
+
+
+class ConflictResolution(str, Enum):
+    KEEP_EXISTING = "keep_existing"
+    KEEP_IMPORTED = "keep_imported"
+    KEEP_NEWER = "keep_newer"
+
+
+class ImportStrategy(str, Enum):
+    MERGE = "merge"
+    REPLACE = "replace"
+
+
+class ImportRequest(BaseModel):
+    header: CMPHeader | None = None
+    archive_id: str
+    strategy: ImportStrategy = ImportStrategy.MERGE
+    conflict_resolution: ConflictResolution = ConflictResolution.KEEP_NEWER
+    decryption_key: str | None = None
+    archive_data: bytes | None = None
+
+    @field_serializer("archive_data")
+    @classmethod
+    def _serialize_archive_data(cls, v: bytes | None, _info: Any) -> list[int] | None:
+        if v is None:
+            return None
+        return list(v)
+
+    @field_validator("archive_data", mode="before")
+    @classmethod
+    def _deserialize_import_archive_data(cls, v: Any) -> bytes | None:
+        if v is None:
+            return None
+        if isinstance(v, bytes):
+            return v
+        if isinstance(v, list):
+            return bytes(v)
+        if isinstance(v, str):
+            return base64.b64decode(v)
+        raise ValueError(f"Cannot convert {type(v).__name__} to bytes")
+
+
+class ImportResponse(BaseModel):
+    records_imported: int
 
 
 # ---------------------------------------------------------------------------
@@ -540,8 +728,14 @@ class StatsResponse(BaseModel):
     oldest_record: datetime | None = None
     newest_record: datetime | None = None
     total_recall_count: int
+    raw_journal_records: int = 0
+    raw_journal_pending_dream: int = 0
+    dream_episodic_summaries: int = 0
+    dream_semantic_nodes: int = 0
+    last_dream_tick_at: datetime | None = None
     evolution_metrics: EvolutionMetrics | None = None
     background_decay_enabled: bool = False
+    background_dream_enabled: bool = False
 
 
 class DecayForecastRequest(BaseModel):

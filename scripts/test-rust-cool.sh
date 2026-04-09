@@ -15,7 +15,7 @@ Examples:
   scripts/test-rust-cool.sh -p cerememory-decay --lib tests::batch_processing_10000_records -- --exact
 
 Defaults:
-  CARGO_BUILD_JOBS=2
+  CARGO_BUILD_JOBS=1
   RUST_TEST_THREADS=1
   RAYON_NUM_THREADS=1
 
@@ -33,7 +33,7 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
-build_jobs="${CARGO_BUILD_JOBS:-2}"
+build_jobs="${CARGO_BUILD_JOBS:-1}"
 test_threads="${RUST_TEST_THREADS:-1}"
 rayon_threads="${RAYON_NUM_THREADS:-1}"
 

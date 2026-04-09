@@ -445,6 +445,20 @@ async fn background_decay_stops_on_shutdown() {
 }
 
 #[tokio::test]
+async fn background_dream_stops_on_shutdown() {
+    let config = cerememory_engine::EngineConfig {
+        background_dream_interval_secs: Some(3600),
+        ..Default::default()
+    };
+    let engine = Arc::new(cerememory_engine::CerememoryEngine::new(config).unwrap());
+    engine.start_background_dream();
+    assert!(engine.is_background_dream_enabled().await);
+
+    engine.stop_background_dream().await;
+    assert!(!engine.is_background_dream_enabled().await);
+}
+
+#[tokio::test]
 async fn cancellation_token_propagates() {
     let token = tokio_util::sync::CancellationToken::new();
     let child = token.child_token();

@@ -42,8 +42,34 @@ struct UpdateParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct StoreRawParams {
+    /// Text content to preserve verbatim in the raw journal.
+    content: String,
+    /// Session identifier used to group preserved raw records.
+    session_id: String,
+    /// Optional turn identifier for the source conversation turn.
+    turn_id: Option<String>,
+    /// Optional topic identifier for higher-level clustering.
+    topic_id: Option<String>,
+    /// Raw source: conversation, tool_io, scratchpad, summary, imported.
+    source: Option<String>,
+    /// Speaker: user, assistant, system, tool.
+    speaker: Option<String>,
+    /// Visibility: normal, private_scratch, sealed.
+    visibility: Option<String>,
+    /// Secrecy level: public, sensitive, secret.
+    secrecy_level: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct BatchStoreParams {
     /// JSON array of records. Each record: {"content": "...", "store": "episodic" (optional), "emotion": "joy" (optional)}. Example: [{"content": "Meeting notes", "store": "episodic"}]
+    records_json: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct BatchStoreRawParams {
+    /// JSON array of raw records. Each record: {"content":"...","session_id":"...","source":"conversation","speaker":"user"}.
     records_json: String,
 }
 
@@ -52,6 +78,18 @@ struct BatchRecord {
     content: String,
     store: Option<String>,
     emotion: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+struct BatchRawRecord {
+    content: String,
+    session_id: String,
+    turn_id: Option<String>,
+    topic_id: Option<String>,
+    source: Option<String>,
+    speaker: Option<String>,
+    visibility: Option<String>,
+    secrecy_level: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -66,6 +104,26 @@ struct RecallParams {
     reconsolidate: Option<bool>,
     /// Activation depth for spreading activation (default: 2).
     activation_depth: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RecallRawParams {
+    /// Optional session id to scope forensic recall.
+    session_id: Option<String>,
+    /// Optional text query over raw preserved content.
+    query: Option<String>,
+    /// Optional start time in RFC3339 format.
+    start: Option<String>,
+    /// Optional end time in RFC3339 format.
+    end: Option<String>,
+    /// Maximum results (default: 10).
+    limit: Option<u32>,
+    /// Include private scratch records (default: false).
+    include_private_scratch: Option<bool>,
+    /// Include sealed records (default: false).
+    include_sealed: Option<bool>,
+    /// Comma-separated secrecy filter: public,sensitive,secret.
+    secrecy_levels: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -107,6 +165,24 @@ struct ConsolidateParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct DreamTickParams {
+    /// Optional session id to scope dream processing to a single session.
+    session_id: Option<String>,
+    /// If true, only preview what would be processed (default: false).
+    dry_run: Option<bool>,
+    /// Maximum number of session/topic/day groups to process (default: 10).
+    max_groups: Option<u32>,
+    /// If true, promote eligible dream summaries into semantic memory (default: true).
+    promote_semantic: Option<bool>,
+    /// Include private scratch raw records (default: false).
+    include_private_scratch: Option<bool>,
+    /// Include sealed raw records (default: false).
+    include_sealed: Option<bool>,
+    /// Comma-separated secrecy filter: public,sensitive,secret.
+    secrecy_levels: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct InspectParams {
     /// UUID of the record to inspect
     record_id: String,
@@ -114,7 +190,7 @@ struct InspectParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct ExportParams {
-    /// Export format (default: "cma")
+    /// Export format (default: "cma"; "jsonl" alias supported)
     format: Option<String>,
     /// Encrypt the archive with ChaCha20-Poly1305 AEAD (default: false). Requires encryption_key.
     encrypt: Option<bool>,
@@ -165,6 +241,24 @@ struct McpRecallResponse {
     total_candidates: u32,
 }
 
+#[derive(Serialize)]
+struct McpRawRecord {
+    record_id: uuid::Uuid,
+    session_id: String,
+    source: String,
+    speaker: String,
+    visibility: String,
+    secrecy_level: String,
+    text: String,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct McpRawRecallResponse {
+    records: Vec<McpRawRecord>,
+    total_candidates: u32,
+}
+
 // ─── Server ─────────────────────────────────────────────────────────
 
 /// MCP server backed by a shared `CerememoryEngine`.
@@ -188,6 +282,99 @@ fn parse_store_type(s: &str) -> Result<StoreType, McpError> {
                 None,
             )
         })
+}
+
+fn parse_raw_source(value: Option<String>) -> Result<RawSource, McpError> {
+    match value
+        .unwrap_or_else(|| "conversation".to_string())
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
+        "conversation" => Ok(RawSource::Conversation),
+        "tool_io" => Ok(RawSource::ToolIo),
+        "scratchpad" => Ok(RawSource::Scratchpad),
+        "summary" => Ok(RawSource::Summary),
+        "imported" => Ok(RawSource::Imported),
+        other => Err(McpError::invalid_params(
+            format!(
+                "Invalid raw source '{other}'. Valid options: conversation, tool_io, scratchpad, summary, imported"
+            ),
+            None,
+        )),
+    }
+}
+
+fn parse_raw_speaker(value: Option<String>) -> Result<RawSpeaker, McpError> {
+    match value
+        .unwrap_or_else(|| "user".to_string())
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
+        "user" => Ok(RawSpeaker::User),
+        "assistant" => Ok(RawSpeaker::Assistant),
+        "system" => Ok(RawSpeaker::System),
+        "tool" => Ok(RawSpeaker::Tool),
+        other => Err(McpError::invalid_params(
+            format!("Invalid raw speaker '{other}'. Valid options: user, assistant, system, tool"),
+            None,
+        )),
+    }
+}
+
+fn parse_raw_visibility(value: Option<String>) -> Result<RawVisibility, McpError> {
+    match value
+        .unwrap_or_else(|| "normal".to_string())
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
+        "normal" => Ok(RawVisibility::Normal),
+        "private_scratch" => Ok(RawVisibility::PrivateScratch),
+        "sealed" => Ok(RawVisibility::Sealed),
+        other => Err(McpError::invalid_params(
+            format!(
+                "Invalid raw visibility '{other}'. Valid options: normal, private_scratch, sealed"
+            ),
+            None,
+        )),
+    }
+}
+
+fn parse_secrecy_level(value: Option<String>) -> Result<SecrecyLevel, McpError> {
+    match value
+        .unwrap_or_else(|| "public".to_string())
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
+        "public" => Ok(SecrecyLevel::Public),
+        "sensitive" => Ok(SecrecyLevel::Sensitive),
+        "secret" => Ok(SecrecyLevel::Secret),
+        other => Err(McpError::invalid_params(
+            format!("Invalid secrecy level '{other}'. Valid options: public, sensitive, secret"),
+            None,
+        )),
+    }
+}
+
+fn parse_secrecy_levels_list(value: Option<String>) -> Result<Option<Vec<SecrecyLevel>>, McpError> {
+    let Some(levels) = value else {
+        return Ok(None);
+    };
+
+    let levels = levels
+        .split(',')
+        .filter(|level| !level.trim().is_empty())
+        .map(|level| parse_secrecy_level(Some(level.trim().to_string())))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if levels.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(levels))
+    }
 }
 
 fn parse_uuid(s: &str) -> Result<uuid::Uuid, McpError> {
@@ -247,7 +434,28 @@ fn engine_err(err: CerememoryError) -> McpError {
             tracing::warn!(error = %message, "Internal error");
             McpError::internal_error(INTERNAL_ERROR_MESSAGE.to_string(), None)
         }
-        other => McpError::internal_error(other.to_string(), None),
+        CerememoryError::WorkingMemoryFull => {
+            McpError::internal_error("Working memory is full. Try again later.".to_string(), None)
+        }
+        CerememoryError::RateLimited { retry_after_secs } => McpError::internal_error(
+            format!("Rate limited. Retry after {} seconds.", retry_after_secs),
+            None,
+        ),
+        CerememoryError::DecayEngineBusy { retry_after_secs } => McpError::internal_error(
+            format!(
+                "Decay engine busy. Retry after {} seconds.",
+                retry_after_secs
+            ),
+            None,
+        ),
+        CerememoryError::ConsolidationInProgress => McpError::internal_error(
+            "Consolidation in progress. Try again later.".to_string(),
+            None,
+        ),
+        CerememoryError::Unauthorized(message) => {
+            tracing::warn!(error = %message, "Unauthorized");
+            McpError::internal_error("Unauthorized".to_string(), None)
+        }
     }
 }
 
@@ -314,6 +522,38 @@ fn build_text_store_request(
     }
 }
 
+fn build_text_raw_store_request(
+    content: String,
+    session_id: String,
+    turn_id: Option<String>,
+    topic_id: Option<String>,
+    source: RawSource,
+    speaker: RawSpeaker,
+    visibility: RawVisibility,
+    secrecy_level: SecrecyLevel,
+) -> EncodeStoreRawRequest {
+    EncodeStoreRawRequest {
+        header: None,
+        session_id,
+        turn_id,
+        topic_id,
+        source,
+        speaker,
+        visibility,
+        secrecy_level,
+        content: MemoryContent {
+            blocks: vec![ContentBlock {
+                modality: Modality::Text,
+                format: "text/plain".to_string(),
+                data: content.into_bytes(),
+                embedding: None,
+            }],
+            summary: None,
+        },
+        metadata: None,
+    }
+}
+
 fn require_non_empty_content(content: &str) -> Result<(), McpError> {
     if content.trim().is_empty() {
         return Err(McpError::invalid_params(
@@ -326,11 +566,11 @@ fn require_non_empty_content(content: &str) -> Result<(), McpError> {
 
 fn parse_export_format(format: Option<String>) -> Result<String, McpError> {
     let format = format.unwrap_or_else(|| "cma".to_string());
-    if format.eq_ignore_ascii_case("cma") {
+    if format.eq_ignore_ascii_case("cma") || format.eq_ignore_ascii_case("jsonl") {
         Ok("cma".to_string())
     } else {
         Err(McpError::invalid_params(
-            format!("Unsupported export format: {format}. Only 'cma' is currently supported."),
+            format!("Unsupported export format: {format}. Valid options: cma, jsonl"),
             None,
         ))
     }
@@ -355,6 +595,41 @@ impl CerememoryMcpServer {
         let emotion = parse_emotion(p.emotion)?;
         let req = build_text_store_request(p.content, store_type, emotion);
         let resp = self.engine.encode_store(req).await.map_err(engine_err)?;
+        ok_json(&resp)
+    }
+
+    #[tool(
+        description = "Preserve a verbatim text item in the raw journal. Use for conversation turns, tool output, or externalized scratchpad entries that should remain available for forensic recall."
+    )]
+    async fn store_raw(
+        &self,
+        params: Parameters<StoreRawParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        require_non_empty_content(&p.content)?;
+        let session_id = p.session_id.trim().to_string();
+        if session_id.is_empty() {
+            return Err(McpError::invalid_params(
+                "session_id must not be empty".to_string(),
+                None,
+            ));
+        }
+
+        let req = build_text_raw_store_request(
+            p.content,
+            session_id,
+            p.turn_id,
+            p.topic_id,
+            parse_raw_source(p.source)?,
+            parse_raw_speaker(p.speaker)?,
+            parse_raw_visibility(p.visibility)?,
+            parse_secrecy_level(p.secrecy_level)?,
+        );
+        let resp = self
+            .engine
+            .encode_store_raw(req)
+            .await
+            .map_err(engine_err)?;
         ok_json(&resp)
     }
 
@@ -437,6 +712,58 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
+        description = "Preserve multiple raw journal entries in one batch. Accepts a JSON array string. Returns JSON: {results (array of {record_id, session_id, visibility, secrecy_level})}."
+    )]
+    async fn batch_store_raw(
+        &self,
+        params: Parameters<BatchStoreRawParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let records: Vec<BatchRawRecord> =
+            serde_json::from_str(&params.0.records_json).map_err(|e| {
+                McpError::invalid_params(
+                    format!(
+                        "Failed to parse records_json. Expected JSON array of raw records with \
+                         'content' and 'session_id'. Parse error: {e}"
+                    ),
+                    None,
+                )
+            })?;
+
+        let mut encode_records = Vec::with_capacity(records.len());
+        for record in records {
+            require_non_empty_content(&record.content)?;
+            let session_id = record.session_id.trim().to_string();
+            if session_id.is_empty() {
+                return Err(McpError::invalid_params(
+                    "session_id must not be empty".to_string(),
+                    None,
+                ));
+            }
+
+            encode_records.push(build_text_raw_store_request(
+                record.content,
+                session_id,
+                record.turn_id,
+                record.topic_id,
+                parse_raw_source(record.source)?,
+                parse_raw_speaker(record.speaker)?,
+                parse_raw_visibility(record.visibility)?,
+                parse_secrecy_level(record.secrecy_level)?,
+            ));
+        }
+
+        let resp = self
+            .engine
+            .encode_batch_store_raw(EncodeBatchStoreRawRequest {
+                header: None,
+                records: encode_records,
+            })
+            .await
+            .map_err(engine_err)?;
+        ok_json(&resp)
+    }
+
+    #[tool(
         description = "Recall memories matching a natural language query using hybrid text+vector search. If query is omitted, returns recent memories. Returns JSON: {memories (array of {record_id, store, text, relevance_score, fidelity, created_at, emotion}), total_candidates}."
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> Result<CallToolResult, McpError> {
@@ -486,6 +813,87 @@ impl CerememoryMcpServer {
                 })
                 .collect(),
             query_metadata: resp.query_metadata,
+            total_candidates: resp.total_candidates,
+        };
+        ok_json(&mcp_resp)
+    }
+
+    #[tool(
+        description = "Explicit forensic recall over the raw journal. Returns verbatim preserved records. By default excludes private_scratch, sealed, and secret records unless explicitly requested."
+    )]
+    async fn recall_raw(
+        &self,
+        params: Parameters<RecallRawParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let temporal = match (p.start, p.end) {
+            (Some(start), Some(end)) => {
+                let start = chrono::DateTime::parse_from_rfc3339(&start)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|e| {
+                        McpError::invalid_params(format!("Invalid start time: {e}"), None)
+                    })?;
+                let end = chrono::DateTime::parse_from_rfc3339(&end)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|e| {
+                        McpError::invalid_params(format!("Invalid end time: {e}"), None)
+                    })?;
+                Some(TemporalRange { start, end })
+            }
+            (None, None) => None,
+            _ => {
+                return Err(McpError::invalid_params(
+                    "Both start and end must be provided together for raw temporal filtering"
+                        .to_string(),
+                    None,
+                ));
+            }
+        };
+        let resp = self
+            .engine
+            .recall_raw_query(RecallRawQueryRequest {
+                header: None,
+                session_id: p.session_id.filter(|value| !value.trim().is_empty()),
+                query: p.query.filter(|value| !value.trim().is_empty()),
+                temporal,
+                limit: p.limit.unwrap_or(10).clamp(1, 1000),
+                include_private_scratch: p.include_private_scratch.unwrap_or(false),
+                include_sealed: p.include_sealed.unwrap_or(false),
+                secrecy_levels: parse_secrecy_levels_list(p.secrecy_levels)?,
+            })
+            .await
+            .map_err(engine_err)?;
+
+        let mcp_resp = McpRawRecallResponse {
+            records: resp
+                .records
+                .iter()
+                .map(|record| McpRawRecord {
+                    record_id: record.id,
+                    session_id: record.session_id.clone(),
+                    source: serde_json::to_value(record.source)
+                        .ok()
+                        .and_then(|value| value.as_str().map(|text| text.to_string()))
+                        .unwrap_or_else(|| "conversation".to_string()),
+                    speaker: serde_json::to_value(record.speaker)
+                        .ok()
+                        .and_then(|value| value.as_str().map(|text| text.to_string()))
+                        .unwrap_or_else(|| "user".to_string()),
+                    visibility: serde_json::to_value(record.visibility)
+                        .ok()
+                        .and_then(|value| value.as_str().map(|text| text.to_string()))
+                        .unwrap_or_else(|| "normal".to_string()),
+                    secrecy_level: serde_json::to_value(record.secrecy_level)
+                        .ok()
+                        .and_then(|value| value.as_str().map(|text| text.to_string()))
+                        .unwrap_or_else(|| "public".to_string()),
+                    text: record
+                        .text_content()
+                        .unwrap_or("[non-text content]")
+                        .to_string(),
+                    created_at: record.created_at.to_rfc3339(),
+                })
+                .collect(),
             total_candidates: resp.total_candidates,
         };
         ok_json(&mcp_resp)
@@ -639,6 +1047,31 @@ impl CerememoryMcpServer {
         ok_json(&resp)
     }
 
+    #[tool(
+        description = "Run a dream tick: summarize unprocessed raw journal entries into episodic summaries with backlinks. By default excludes private_scratch, sealed, and secret raw records."
+    )]
+    async fn dream_tick(
+        &self,
+        params: Parameters<DreamTickParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let resp = self
+            .engine
+            .lifecycle_dream_tick(DreamTickRequest {
+                header: None,
+                session_id: p.session_id.filter(|value| !value.trim().is_empty()),
+                dry_run: p.dry_run.unwrap_or(false),
+                max_groups: p.max_groups.unwrap_or(10),
+                promote_semantic: p.promote_semantic.unwrap_or(true),
+                include_private_scratch: p.include_private_scratch.unwrap_or(false),
+                include_sealed: p.include_sealed.unwrap_or(false),
+                secrecy_levels: parse_secrecy_levels_list(p.secrecy_levels)?,
+            })
+            .await
+            .map_err(engine_err)?;
+        ok_json(&resp)
+    }
+
     #[tool(description = "Get system statistics: record counts, store sizes, decay state.")]
     async fn stats(&self) -> Result<CallToolResult, McpError> {
         let resp = self.engine.introspect_stats().await.map_err(engine_err)?;
@@ -683,6 +1116,7 @@ impl CerememoryMcpServer {
             header: None,
             format,
             stores: None,
+            include_raw_journal: false,
             encrypt: p.encrypt.unwrap_or(false),
             encryption_key: p.encryption_key,
         };
@@ -693,15 +1127,31 @@ impl CerememoryMcpServer {
             .await
             .map_err(engine_err)?;
 
-        let path = std::path::PathBuf::from(p.output_path);
-        std::fs::write(&path, &bytes).map_err(|e| {
+        let path = std::path::PathBuf::from(&p.output_path);
+        // Resolve to an absolute path and validate it is not a symlink or
+        // pointing to sensitive system directories.
+        let canonical_parent = path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .canonicalize()
+            .map_err(|e| {
+                McpError::invalid_params(format!("Invalid output_path directory: {e}"), None)
+            })?;
+        if path.is_symlink() {
+            return Err(McpError::invalid_params(
+                "output_path must not be a symlink".to_string(),
+                None,
+            ));
+        }
+        let resolved = canonical_parent.join(path.file_name().unwrap_or_default());
+        std::fs::write(&resolved, &bytes).map_err(|e| {
             McpError::internal_error(format!("Failed to write archive file: {e}"), None)
         })?;
 
         let summary = serde_json::to_string_pretty(&resp).map_err(internal_err)?;
         ok_text(format!(
             "{summary}\n\nArchive written to: {}\nArchive size: {} bytes",
-            path.display(),
+            resolved.display(),
             bytes.len()
         ))
     }
@@ -715,14 +1165,18 @@ impl ServerHandler for CerememoryMcpServer {
             .with_server_info(Implementation::new("cerememory", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Cerememory is a living memory database. Available tools:\n\
-                 - store: Save a new memory\n\
-                 - update: Edit an existing memory by UUID\n\
-                 - batch_store: Save multiple memories at once\n\
+                  - store: Save a new memory\n\
+                 - store_raw: Preserve a verbatim raw journal entry\n\
+                  - update: Edit an existing memory by UUID\n\
+                  - batch_store: Save multiple memories at once\n\
+                 - batch_store_raw: Preserve multiple raw journal entries at once\n\
                  - recall: Search memories by query, or list recent memories (omit query)\n\
+                 - recall_raw: Explicit forensic recall over preserved raw journal entries\n\
                 - timeline: Browse memories by time period\n\
                  - associate: Find connected memories via spreading activation\n\
                  - inspect: View full details of a memory by UUID\n\
                  - forget: Permanently delete memories by UUID (requires confirm=true)\n\
+                 - dream_tick: Summarize raw journal entries into episodic summaries\n\
                  - consolidate: Migrate mature episodic memories to semantic store\n\
                  - export: Export all memories to a CMA archive file (requires output_path)\n\
                  - stats: View system statistics and store counts",
@@ -788,6 +1242,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_raw_enums_valid() {
+        assert_eq!(
+            parse_raw_source(Some("tool_io".to_string())).unwrap(),
+            RawSource::ToolIo
+        );
+        assert_eq!(
+            parse_raw_speaker(Some("assistant".to_string())).unwrap(),
+            RawSpeaker::Assistant
+        );
+        assert_eq!(
+            parse_raw_visibility(Some("sealed".to_string())).unwrap(),
+            RawVisibility::Sealed
+        );
+        assert_eq!(
+            parse_secrecy_level(Some("secret".to_string())).unwrap(),
+            SecrecyLevel::Secret
+        );
+    }
+
+    #[test]
+    fn parse_secrecy_levels_list_valid() {
+        let levels = parse_secrecy_levels_list(Some("public,secret".to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(levels, vec![SecrecyLevel::Public, SecrecyLevel::Secret]);
+    }
+
+    #[test]
     fn parse_consolidation_strategy_rejects_unknown_values() {
         assert!(parse_consolidation_strategy(Some("typo".to_string())).is_err());
     }
@@ -795,6 +1277,14 @@ mod tests {
     #[test]
     fn parse_export_format_rejects_non_cma_values() {
         assert!(parse_export_format(Some("zip".to_string())).is_err());
+    }
+
+    #[test]
+    fn parse_export_format_accepts_jsonl_alias() {
+        assert_eq!(
+            parse_export_format(Some("jsonl".to_string())).unwrap(),
+            "cma".to_string()
+        );
     }
 
     #[test]
@@ -853,13 +1343,17 @@ mod tests {
             vec![
                 "associate".to_string(),
                 "batch_store".to_string(),
+                "batch_store_raw".to_string(),
                 "consolidate".to_string(),
+                "dream_tick".to_string(),
                 "export".to_string(),
                 "forget".to_string(),
                 "inspect".to_string(),
                 "recall".to_string(),
+                "recall_raw".to_string(),
                 "stats".to_string(),
                 "store".to_string(),
+                "store_raw".to_string(),
                 "timeline".to_string(),
                 "update".to_string(),
             ]

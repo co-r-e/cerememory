@@ -90,6 +90,36 @@ enum Commands {
         embedding: Option<String>,
     },
 
+    /// Store a verbatim raw journal record
+    StoreRaw {
+        /// Text content to preserve verbatim
+        text: String,
+
+        /// Session identifier
+        #[arg(long)]
+        session_id: String,
+
+        /// Optional topic identifier
+        #[arg(long)]
+        topic_id: Option<String>,
+
+        /// Raw source: conversation, tool_io, scratchpad, summary, imported
+        #[arg(long, default_value = "conversation")]
+        source: String,
+
+        /// Speaker: user, assistant, system, tool
+        #[arg(long, default_value = "user")]
+        speaker: String,
+
+        /// Visibility: normal, private_scratch, sealed
+        #[arg(long, default_value = "normal")]
+        visibility: String,
+
+        /// Secrecy level: public, sensitive, secret
+        #[arg(long, default_value = "public")]
+        secrecy_level: String,
+    },
+
     /// Recall memories by query
     Recall {
         /// Text query
@@ -102,6 +132,32 @@ enum Commands {
         /// Recall mode (human or perfect)
         #[arg(long, default_value = "human")]
         mode: String,
+    },
+
+    /// Recall raw journal records
+    RecallRaw {
+        /// Optional text query
+        query: Option<String>,
+
+        /// Optional session filter
+        #[arg(long)]
+        session_id: Option<String>,
+
+        /// Maximum results
+        #[arg(long, default_value = "10")]
+        limit: u32,
+
+        /// Include private scratch
+        #[arg(long)]
+        include_private_scratch: bool,
+
+        /// Include sealed
+        #[arg(long)]
+        include_sealed: bool,
+
+        /// Optional comma-separated secrecy filter
+        #[arg(long)]
+        secrecy_levels: Option<String>,
     },
 
     /// Inspect a specific record
@@ -118,6 +174,37 @@ enum Commands {
         /// Simulated duration in seconds
         #[arg(long, default_value = "3600")]
         duration: u32,
+    },
+
+    /// Run a dream tick
+    DreamTick {
+        /// Optional session filter
+        #[arg(long)]
+        session_id: Option<String>,
+
+        /// Preview only
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Maximum groups
+        #[arg(long, default_value = "10")]
+        max_groups: u32,
+
+        /// Include private scratch
+        #[arg(long)]
+        include_private_scratch: bool,
+
+        /// Include sealed
+        #[arg(long)]
+        include_sealed: bool,
+
+        /// Promote eligible groups into semantic memory
+        #[arg(long, default_value_t = true)]
+        promote_semantic: bool,
+
+        /// Optional comma-separated secrecy filter
+        #[arg(long)]
+        secrecy_levels: Option<String>,
     },
 
     /// Forget (delete) a record
@@ -140,13 +227,17 @@ enum Commands {
         #[arg(long, default_value = "./backup.cma")]
         output: String,
 
-        /// Archive format.
+        /// Archive format (cma or jsonl alias).
         #[arg(long, default_value = "cma")]
         format: String,
 
         /// Comma-separated store filter.
         #[arg(long)]
         stores: Option<String>,
+
+        /// Include raw journal in the exported archive.
+        #[arg(long)]
+        include_raw_journal: bool,
 
         /// Encrypt the exported archive.
         #[arg(long)]
@@ -163,15 +254,19 @@ enum Commands {
 
     /// Health check (for Docker HEALTHCHECK / K8s liveness probe)
     Healthcheck {
-        /// HTTP port to check (default: 8420)
-        #[arg(long, default_value = "8420")]
-        port: u16,
+        /// HTTP port to check (defaults to the configured HTTP port)
+        #[arg(long)]
+        port: Option<u16>,
     },
 
     /// Import records from a CMA archive file
     Import {
         /// Path to the CMA archive file
         path: String,
+
+        /// Import strategy: merge or replace.
+        #[arg(long, default_value = "merge")]
+        strategy: String,
 
         /// Decryption passphrase for encrypted archives.
         #[arg(long)]
@@ -255,6 +350,75 @@ fn parse_conflict_resolution(value: &str) -> Result<ConflictResolution> {
     }
 }
 
+fn parse_import_strategy(value: &str) -> Result<ImportStrategy> {
+    match value.trim().to_lowercase().as_str() {
+        "merge" => Ok(ImportStrategy::Merge),
+        "replace" => Ok(ImportStrategy::Replace),
+        other => anyhow::bail!(
+            "Invalid import strategy '{}'. Valid options: merge, replace",
+            other
+        ),
+    }
+}
+
+fn parse_raw_source(value: &str) -> Result<RawSource> {
+    match value.trim().to_lowercase().as_str() {
+        "conversation" => Ok(RawSource::Conversation),
+        "tool_io" => Ok(RawSource::ToolIo),
+        "scratchpad" => Ok(RawSource::Scratchpad),
+        "summary" => Ok(RawSource::Summary),
+        "imported" => Ok(RawSource::Imported),
+        other => anyhow::bail!(
+            "Invalid raw source '{}'. Valid options: conversation, tool_io, scratchpad, summary, imported",
+            other
+        ),
+    }
+}
+
+fn parse_raw_speaker(value: &str) -> Result<RawSpeaker> {
+    match value.trim().to_lowercase().as_str() {
+        "user" => Ok(RawSpeaker::User),
+        "assistant" => Ok(RawSpeaker::Assistant),
+        "system" => Ok(RawSpeaker::System),
+        "tool" => Ok(RawSpeaker::Tool),
+        other => anyhow::bail!(
+            "Invalid raw speaker '{}'. Valid options: user, assistant, system, tool",
+            other
+        ),
+    }
+}
+
+fn parse_raw_visibility(value: &str) -> Result<RawVisibility> {
+    match value.trim().to_lowercase().as_str() {
+        "normal" => Ok(RawVisibility::Normal),
+        "private_scratch" => Ok(RawVisibility::PrivateScratch),
+        "sealed" => Ok(RawVisibility::Sealed),
+        other => anyhow::bail!(
+            "Invalid raw visibility '{}'. Valid options: normal, private_scratch, sealed",
+            other
+        ),
+    }
+}
+
+fn parse_secrecy_level(value: &str) -> Result<SecrecyLevel> {
+    match value.trim().to_lowercase().as_str() {
+        "public" => Ok(SecrecyLevel::Public),
+        "sensitive" => Ok(SecrecyLevel::Sensitive),
+        "secret" => Ok(SecrecyLevel::Secret),
+        other => anyhow::bail!(
+            "Invalid secrecy level '{}'. Valid options: public, sensitive, secret",
+            other
+        ),
+    }
+}
+
+fn parse_secrecy_levels(value: &str) -> Result<Vec<SecrecyLevel>> {
+    value
+        .split(',')
+        .map(|item| parse_secrecy_level(item.trim()))
+        .collect()
+}
+
 fn read_secret_from_stdin(label: &str) -> Result<String> {
     if std::io::stdin().is_terminal() {
         let prompt = format!("{label}: ");
@@ -267,15 +431,28 @@ fn read_secret_from_stdin(label: &str) -> Result<String> {
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
-    let secret = input.trim().to_string();
-    if secret.is_empty() {
+    // Only strip the trailing newline (matching rpassword::prompt_password behavior)
+    let secret = input
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_string();
+    if secret.trim().is_empty() {
         anyhow::bail!("{label} must not be empty");
     }
     Ok(secret)
 }
 
 fn bind_address_is_loopback(bind_address: &str) -> bool {
-    bind_address
+    // Direct IP checks (no DNS resolution needed)
+    if bind_address == "localhost" || bind_address == "127.0.0.1" || bind_address == "::1" {
+        return true;
+    }
+    // Try parsing as an IP address directly
+    if let Ok(ip) = bind_address.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    // Fall back to DNS resolution (needs host:port format for ToSocketAddrs)
+    format!("{bind_address}:0")
         .to_socket_addrs()
         .map(|addrs| addrs.into_iter().all(|addr| addr.ip().is_loopback()))
         .unwrap_or(false)
@@ -401,6 +578,7 @@ async fn main() -> Result<()> {
         let engine = Arc::new(create_engine_from_config(&config)?);
         engine.rebuild_coordinator().await?;
         engine.start_background_decay();
+        engine.start_background_dream();
 
         // Shutdown coordination: CancellationToken propagates to all components
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -452,7 +630,11 @@ async fn main() -> Result<()> {
         let mut grpc_handle: Option<tokio::task::JoinHandle<()>> = None;
         if let Some(grpc_port) = config.grpc.port {
             let engine_grpc = Arc::clone(&engine);
-            let grpc_addr = format!("{}:{grpc_port}", config.http.bind_address);
+            let grpc_addr = if config.http.bind_address.contains(':') {
+                format!("[{}]:{grpc_port}", config.http.bind_address)
+            } else {
+                format!("{}:{grpc_port}", config.http.bind_address)
+            };
             let grpc_keys = config.auth.api_key_strings();
             let grpc_auth_enabled = config.auth.enabled;
             let grpc_cancel = cancel.clone();
@@ -522,7 +704,12 @@ async fn main() -> Result<()> {
         };
         let app = cerememory_transport_http::router_with_config(Arc::clone(&engine), http_config);
 
-        let addr = format!("{}:{}", config.http.bind_address, config.http.port);
+        let addr = if config.http.bind_address.contains(':') {
+            // IPv6 address needs brackets
+            format!("[{}]:{}", config.http.bind_address, config.http.port)
+        } else {
+            format!("{}:{}", config.http.bind_address, config.http.port)
+        };
         println!("HTTP  listening on {addr}");
         if config.http.bind_address == "0.0.0.0" && !config.auth.enabled {
             tracing::warn!("Server bound to 0.0.0.0 with authentication disabled — accessible from entire network");
@@ -539,27 +726,37 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        // Await gRPC server shutdown
-        if let Some(handle) = grpc_handle {
-            match tokio::time::timeout(std::time::Duration::from_secs(30), handle).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!(error = %e, "gRPC server task panicked"),
-                Err(_) => tracing::warn!("gRPC server shutdown timed out after 30 seconds"),
-            }
-        }
+        // Shut down gRPC and background tasks concurrently to stay within
+        // Docker's default 10-second stop timeout.
+        let shutdown_timeout = std::time::Duration::from_secs(8);
 
-        // After HTTP server stops, clean up background tasks
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            engine.stop_background_decay(),
-        )
-        .await
-        {
-            Ok(()) => {}
-            Err(_) => {
-                tracing::warn!("Background decay shutdown timed out after 30 seconds");
+        let grpc_shutdown = async {
+            if let Some(handle) = grpc_handle {
+                match tokio::time::timeout(shutdown_timeout, handle).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(error = %e, "gRPC server task panicked"),
+                    Err(_) => tracing::warn!("gRPC server shutdown timed out"),
+                }
             }
-        }
+        };
+
+        let decay_shutdown = async {
+            if let Err(_) =
+                tokio::time::timeout(shutdown_timeout, engine.stop_background_decay()).await
+            {
+                tracing::warn!("Background decay shutdown timed out");
+            }
+        };
+
+        let dream_shutdown = async {
+            if let Err(_) =
+                tokio::time::timeout(shutdown_timeout, engine.stop_background_dream()).await
+            {
+                tracing::warn!("Background dream shutdown timed out");
+            }
+        };
+
+        tokio::join!(grpc_shutdown, decay_shutdown, dream_shutdown);
         tracing::info!("Shutdown complete");
         return Ok(());
     }
@@ -574,7 +771,19 @@ async fn main() -> Result<()> {
 
     // Healthcheck: lightweight HTTP probe, no engine needed
     if let Commands::Healthcheck { port } = &cli.command {
-        let url = format!("http://127.0.0.1:{port}/health");
+        let effective_port = port.unwrap_or(config.http.port);
+        let bind_addr = &config.http.bind_address;
+        let host = if bind_addr == "0.0.0.0" || bind_addr == "::" {
+            "127.0.0.1".to_string()
+        } else if bind_addr == "localhost" {
+            "localhost".to_string()
+        } else if bind_addr.contains(':') {
+            // IPv6 address — wrap in brackets for URL
+            format!("[{bind_addr}]")
+        } else {
+            bind_addr.clone()
+        };
+        let url = format!("http://{host}:{effective_port}/health");
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
@@ -600,6 +809,9 @@ async fn main() -> Result<()> {
         &cli.command,
         Commands::Store { .. }
             | Commands::Recall { .. }
+            | Commands::StoreRaw { .. }
+            | Commands::RecallRaw { .. }
+            | Commands::DreamTick { .. }
             | Commands::Consolidate { .. }
             | Commands::SetMode { .. }
             | Commands::Import { .. }
@@ -689,6 +901,40 @@ async fn main() -> Result<()> {
             );
         }
 
+        Commands::StoreRaw {
+            text,
+            session_id,
+            topic_id,
+            source,
+            speaker,
+            visibility,
+            secrecy_level,
+        } => {
+            let resp = engine
+                .encode_store_raw(EncodeStoreRawRequest {
+                    header: None,
+                    session_id,
+                    turn_id: None,
+                    topic_id,
+                    source: parse_raw_source(&source)?,
+                    speaker: parse_raw_speaker(&speaker)?,
+                    visibility: parse_raw_visibility(&visibility)?,
+                    secrecy_level: parse_secrecy_level(&secrecy_level)?,
+                    content: MemoryContent {
+                        blocks: vec![ContentBlock {
+                            modality: Modality::Text,
+                            format: "text/plain".to_string(),
+                            data: text.into_bytes(),
+                            embedding: None,
+                        }],
+                        summary: None,
+                    },
+                    metadata: None,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+
         Commands::Recall { query, limit, mode } => {
             let recall_mode = match mode.to_lowercase().as_str() {
                 "human" => RecallMode::Human,
@@ -736,6 +982,33 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::RecallRaw {
+            query,
+            session_id,
+            limit,
+            include_private_scratch,
+            include_sealed,
+            secrecy_levels,
+        } => {
+            let secrecy_levels = secrecy_levels
+                .as_deref()
+                .map(parse_secrecy_levels)
+                .transpose()?;
+            let resp = engine
+                .recall_raw_query(RecallRawQueryRequest {
+                    header: None,
+                    session_id,
+                    query,
+                    temporal: None,
+                    limit,
+                    include_private_scratch,
+                    include_sealed,
+                    secrecy_levels,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+
         Commands::Inspect { record_id } => {
             let record = engine
                 .introspect_record(RecordIntrospectRequest {
@@ -767,6 +1040,34 @@ async fn main() -> Result<()> {
             println!("  Records updated: {}", resp.records_updated);
             println!("  Below threshold: {}", resp.records_below_threshold);
             println!("  Pruned: {}", resp.records_pruned);
+        }
+
+        Commands::DreamTick {
+            session_id,
+            dry_run,
+            max_groups,
+            include_private_scratch,
+            include_sealed,
+            promote_semantic,
+            secrecy_levels,
+        } => {
+            let secrecy_levels = secrecy_levels
+                .as_deref()
+                .map(parse_secrecy_levels)
+                .transpose()?;
+            let resp = engine
+                .lifecycle_dream_tick(DreamTickRequest {
+                    header: None,
+                    session_id,
+                    dry_run,
+                    max_groups,
+                    include_private_scratch,
+                    include_sealed,
+                    promote_semantic,
+                    secrecy_levels,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
         }
 
         Commands::Forget {
@@ -814,12 +1115,18 @@ async fn main() -> Result<()> {
             output,
             format,
             stores,
+            include_raw_journal,
             encrypt,
             encryption_key,
             encryption_key_stdin,
         } => {
             if encryption_key.is_some() && encryption_key_stdin {
                 anyhow::bail!("Use either --encryption-key or --encryption-key-stdin, not both.");
+            }
+            if encrypt && encryption_key.is_none() && !encryption_key_stdin {
+                anyhow::bail!(
+                    "--encrypt requires either --encryption-key or --encryption-key-stdin"
+                );
             }
             let encryption_key = if encryption_key_stdin {
                 Some(read_secret_from_stdin("Export encryption passphrase")?)
@@ -831,6 +1138,7 @@ async fn main() -> Result<()> {
                 header: None,
                 format,
                 stores,
+                include_raw_journal,
                 encrypt,
                 encryption_key,
             };
@@ -848,6 +1156,7 @@ async fn main() -> Result<()> {
 
         Commands::Import {
             path,
+            strategy,
             decryption_key,
             decryption_key_stdin,
             conflict_resolution,
@@ -870,7 +1179,7 @@ async fn main() -> Result<()> {
                 .lifecycle_import(ImportRequest {
                     header: None,
                     archive_id,
-                    strategy: ImportStrategy::Merge,
+                    strategy: parse_import_strategy(&strategy)?,
                     conflict_resolution: parse_conflict_resolution(&conflict_resolution)?,
                     decryption_key,
                     archive_data: Some(bytes),

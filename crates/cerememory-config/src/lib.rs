@@ -95,6 +95,9 @@ pub struct ServerConfig {
     /// Decay engine configuration.
     pub decay: DecayConfig,
 
+    /// Dream processing configuration.
+    pub dream: DreamConfig,
+
     /// Rate limiting configuration.
     pub rate_limit: RateLimitConfig,
 
@@ -231,6 +234,14 @@ pub struct DecayConfig {
     pub background_interval_secs: u64,
 }
 
+/// Background dream processing settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DreamConfig {
+    /// Interval in seconds for background dream ticks.
+    pub background_interval_secs: u64,
+}
+
 /// Rate limiting settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -264,6 +275,7 @@ impl Default for ServerConfig {
             auth: AuthConfig::default(),
             llm: LlmConfig::default(),
             decay: DecayConfig::default(),
+            dream: DreamConfig::default(),
             rate_limit: RateLimitConfig::default(),
             log: LogConfig::default(),
         }
@@ -291,6 +303,14 @@ impl Default for DecayConfig {
     fn default() -> Self {
         Self {
             background_interval_secs: 3600,
+        }
+    }
+}
+
+impl Default for DreamConfig {
+    fn default() -> Self {
+        Self {
+            background_interval_secs: 86_400,
         }
     }
 }
@@ -340,11 +360,29 @@ impl ServerConfig {
 
         // Note: CEREMEMORY_LLM__API_KEY is handled by figment's env provider.
 
+        // Expand tilde in data_dir (shell does not expand ~ in env vars or TOML)
+        if config.data_dir.starts_with("~/") {
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+            {
+                config.data_dir = std::path::Path::new(&home)
+                    .join(&config.data_dir[2..])
+                    .to_string_lossy()
+                    .into_owned();
+            }
+        }
+
         Ok(config)
     }
 
     /// Validate configuration values.
     pub fn validate(&self) -> Result<(), String> {
+        if self.data_dir.trim().is_empty() {
+            return Err(
+                "data_dir must not be empty. Set data_dir in config or CEREMEMORY_DATA_DIR env var."
+                    .to_string(),
+            );
+        }
+
         if self.http.port == 0 {
             return Err(
                 "HTTP port must be non-zero. Set http.port in config or CEREMEMORY_HTTP__PORT env var."
@@ -416,6 +454,20 @@ impl ServerConfig {
             ));
         }
 
+        if self.decay.background_interval_secs == 0 {
+            return Err(
+                "decay.background_interval_secs must be > 0 to enable periodic decay processing."
+                    .to_string(),
+            );
+        }
+
+        if self.dream.background_interval_secs == 0 {
+            return Err(
+                "dream.background_interval_secs must be > 0 to enable periodic dream processing."
+                    .to_string(),
+            );
+        }
+
         if self.http.bind_address.is_empty() {
             return Err("http.bind_address must not be empty".to_string());
         }
@@ -435,15 +487,17 @@ impl ServerConfig {
 
     /// Convert to EngineConfig for the engine crate.
     pub fn to_engine_config(&self) -> EngineConfig {
-        let data_dir = &self.data_dir;
+        let base = std::path::Path::new(&self.data_dir);
         EngineConfig {
-            episodic_path: Some(format!("{data_dir}/episodic.redb")),
-            semantic_path: Some(format!("{data_dir}/semantic.redb")),
-            procedural_path: Some(format!("{data_dir}/procedural.redb")),
-            emotional_path: Some(format!("{data_dir}/emotional.redb")),
-            index_path: Some(format!("{data_dir}/text_index")),
-            vector_index_path: Some(format!("{data_dir}/vectors.redb")),
+            raw_journal_path: Some(base.join("raw_journal.redb").to_string_lossy().into_owned()),
+            episodic_path: Some(base.join("episodic.redb").to_string_lossy().into_owned()),
+            semantic_path: Some(base.join("semantic.redb").to_string_lossy().into_owned()),
+            procedural_path: Some(base.join("procedural.redb").to_string_lossy().into_owned()),
+            emotional_path: Some(base.join("emotional.redb").to_string_lossy().into_owned()),
+            index_path: Some(base.join("text_index").to_string_lossy().into_owned()),
+            vector_index_path: Some(base.join("vectors.redb").to_string_lossy().into_owned()),
             background_decay_interval_secs: Some(self.decay.background_interval_secs),
+            background_dream_interval_secs: Some(self.dream.background_interval_secs),
             ..EngineConfig::default()
         }
     }
@@ -633,12 +687,31 @@ port = 9999
             decay: DecayConfig {
                 background_interval_secs: 1800,
             },
+            dream: DreamConfig {
+                background_interval_secs: 7200,
+            },
             ..ServerConfig::default()
         };
         let ec = config.to_engine_config();
+        assert_eq!(ec.raw_journal_path.unwrap(), "/my/data/raw_journal.redb");
         assert_eq!(ec.episodic_path.unwrap(), "/my/data/episodic.redb");
         assert_eq!(ec.semantic_path.unwrap(), "/my/data/semantic.redb");
         assert_eq!(ec.background_decay_interval_secs, Some(1800));
+        assert_eq!(ec.background_dream_interval_secs, Some(7200));
+    }
+
+    #[test]
+    fn validate_rejects_zero_dream_interval() {
+        let mut config = ServerConfig::default();
+        config.dream.background_interval_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_decay_interval() {
+        let mut config = ServerConfig::default();
+        config.decay.background_interval_secs = 0;
+        assert!(config.validate().is_err());
     }
 
     #[test]

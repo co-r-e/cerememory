@@ -11,16 +11,20 @@ service CerememoryService {
   // ── Encode operations ──
   rpc EncodeStore(EncodeStoreRequest) returns (EncodeStoreResponse);
   rpc EncodeBatch(EncodeBatchRequest) returns (EncodeBatchResponse);
+  rpc EncodeStoreRaw(EncodeStoreRawRequest) returns (EncodeStoreRawResponse);
+  rpc EncodeBatchStoreRaw(EncodeBatchStoreRawRequest) returns (EncodeBatchStoreRawResponse);
   rpc EncodeUpdate(EncodeUpdateRequest) returns (Empty);
 
   // ── Recall operations ──
   rpc RecallQuery(RecallQueryRequest) returns (RecallQueryResponse);
+  rpc RecallRawQuery(RecallRawQueryRequest) returns (RecallRawQueryResponse);
   rpc RecallAssociate(RecallAssociateRequest) returns (RecallAssociateResponse);
   rpc RecallTimeline(RecallTimelineRequest) returns (RecallTimelineResponse);
   rpc RecallGraph(RecallGraphRequest) returns (RecallGraphResponse);
 
   // ── Lifecycle operations ──
   rpc Consolidate(ConsolidateRequest) returns (ConsolidateResponse);
+  rpc DreamTick(DreamTickRequest) returns (DreamTickResponse);
   rpc DecayTick(DecayTickRequest) returns (DecayTickResponse);
   rpc SetMode(SetModeRequest) returns (Empty);
   rpc Forget(ForgetRequest) returns (ForgetResponse);
@@ -55,6 +59,22 @@ message EncodeBatchResponse {
   bytes json_payload = 1;
 }
 
+message EncodeStoreRawRequest {
+  bytes json_payload = 1;
+}
+
+message EncodeStoreRawResponse {
+  bytes json_payload = 1;
+}
+
+message EncodeBatchStoreRawRequest {
+  bytes json_payload = 1;
+}
+
+message EncodeBatchStoreRawResponse {
+  bytes json_payload = 1;
+}
+
 message EncodeUpdateRequest {
   bytes json_payload = 1;
 }
@@ -66,6 +86,14 @@ message RecallQueryRequest {
 }
 
 message RecallQueryResponse {
+  bytes json_payload = 1;
+}
+
+message RecallRawQueryRequest {
+  bytes json_payload = 1;
+}
+
+message RecallRawQueryResponse {
   bytes json_payload = 1;
 }
 
@@ -100,6 +128,14 @@ message ConsolidateRequest {
 }
 
 message ConsolidateResponse {
+  bytes json_payload = 1;
+}
+
+message DreamTickRequest {
+  bytes json_payload = 1;
+}
+
+message DreamTickResponse {
   bytes json_payload = 1;
 }
 

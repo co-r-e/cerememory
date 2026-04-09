@@ -21,7 +21,7 @@ use std::{convert::Infallible, sync::Arc};
 use axum::{
     extract::{
         rejection::{JsonRejection, PathRejection},
-        DefaultBodyLimit, FromRequest, FromRequestParts, Path, Request, State,
+        DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State,
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -31,6 +31,7 @@ use axum::{
 use cerememory_core::error::CerememoryError;
 use cerememory_core::protocol::*;
 use cerememory_engine::CerememoryEngine;
+use serde::Deserialize;
 use tower_http::cors::AllowOrigin;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{
@@ -162,11 +163,16 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
             .iter()
             .any(|origin: &axum::http::HeaderValue| origin.as_bytes() == b"*")
         {
+            // Use mirror-origin instead of literal "*" so that
+            // credentialed (Authorization header) requests work in
+            // browsers. AllowOrigin::any() sends "Access-Control-Allow-Origin: *"
+            // which browsers reject for credentialed requests.
             Some(
                 CorsLayer::new()
-                    .allow_origin(AllowOrigin::any())
+                    .allow_origin(AllowOrigin::mirror_request())
                     .allow_methods(Any)
                     .allow_headers(Any)
+                    .allow_credentials(true)
                     .expose_headers(expose_headers),
             )
         } else {
@@ -215,14 +221,20 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
         // Encode
         .route("/v1/encode", post(encode_store))
         .route("/v1/encode/batch", post(encode_batch))
+        .route("/v1/encode/raw", post(encode_store_raw))
+        .route("/v1/encode/raw/batch", post(encode_batch_store_raw))
         .route("/v1/encode/{record_id}", patch(encode_update))
         // Recall
         .route("/v1/recall/query", post(recall_query))
+        .route("/v1/recall/raw", post(recall_raw_query))
         .route("/v1/recall/associate/{record_id}", post(recall_associate))
         .route("/v1/recall/timeline", post(recall_timeline))
         .route("/v1/recall/graph", post(recall_graph))
         // Lifecycle
         .route("/v1/lifecycle/consolidate", post(lifecycle_consolidate))
+        .route("/v1/lifecycle/export", post(lifecycle_export))
+        .route("/v1/lifecycle/import", post(lifecycle_import))
+        .route("/v1/lifecycle/dream-tick", post(lifecycle_dream_tick))
         .route("/v1/lifecycle/decay-tick", post(lifecycle_decay_tick))
         .route("/v1/lifecycle/mode", put(lifecycle_set_mode))
         .route("/v1/lifecycle/forget", delete(lifecycle_forget))
@@ -237,7 +249,7 @@ pub fn router_with_config(engine: Arc<CerememoryEngine>, config: HttpMiddlewareC
         .with_state(engine)
         .layer(auth_layer)
         .layer(rate_limit)
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)); // 2 MB
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024)); // 64 MB (import archives can be large)
 
     // Merge and apply global middleware (metrics, tracing, request-id, CORS)
     let merged = public_routes.merge(api_routes);
@@ -473,6 +485,18 @@ define_json_handler!(
     EncodeBatchResponse,
     encode_batch
 );
+define_json_handler!(
+    encode_store_raw,
+    EncodeStoreRawRequest,
+    EncodeStoreRawResponse,
+    encode_store_raw
+);
+define_json_handler!(
+    encode_batch_store_raw,
+    EncodeBatchStoreRawRequest,
+    EncodeBatchStoreRawResponse,
+    encode_batch_store_raw
+);
 
 async fn encode_update(
     State(engine): State<AppState>,
@@ -495,6 +519,12 @@ define_json_handler!(
     RecallQueryRequest,
     RecallQueryResponse,
     recall_query
+);
+define_json_handler!(
+    recall_raw_query,
+    RecallRawQueryRequest,
+    RecallRawQueryResponse,
+    recall_raw_query
 );
 
 async fn recall_associate(
@@ -532,6 +562,40 @@ define_json_handler!(
     ConsolidateResponse,
     lifecycle_consolidate
 );
+define_json_handler!(
+    lifecycle_dream_tick,
+    DreamTickRequest,
+    DreamTickResponse,
+    lifecycle_dream_tick
+);
+async fn lifecycle_export(
+    State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
+    AppJson(req): AppJson<ExportRequest>,
+) -> Result<Json<ExportArchiveResponse>, AppError> {
+    let (archive_data, metadata) = engine
+        .lifecycle_export(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
+    Ok(Json(ExportArchiveResponse {
+        metadata,
+        archive_data,
+    }))
+}
+
+async fn lifecycle_import(
+    State(engine): State<AppState>,
+    MaybeRequestId(request_id): MaybeRequestId,
+    AppJson(req): AppJson<ImportRequest>,
+) -> Result<Json<ImportResponse>, AppError> {
+    let imported = engine
+        .lifecycle_import(req)
+        .await
+        .map_err(|err| AppError::new(err, request_id))?;
+    Ok(Json(ImportResponse {
+        records_imported: imported,
+    }))
+}
 define_json_handler!(
     lifecycle_decay_tick,
     DecayTickRequest,
@@ -576,18 +640,29 @@ define_json_handler!(
 );
 define_json_handler!(introspect_evolution, EvolutionMetrics, introspect_evolution);
 
+#[derive(Debug, Deserialize)]
+struct IntrospectRecordParams {
+    #[serde(default)]
+    include_history: bool,
+    #[serde(default)]
+    include_associations: bool,
+    #[serde(default)]
+    include_versions: bool,
+}
+
 async fn introspect_record(
     State(engine): State<AppState>,
     MaybeRequestId(request_id): MaybeRequestId,
     AppPath(record_id): AppPath<Uuid>,
+    Query(params): Query<IntrospectRecordParams>,
 ) -> Result<Json<cerememory_core::types::MemoryRecord>, AppError> {
     let record = engine
         .introspect_record(RecordIntrospectRequest {
             header: None,
             record_id,
-            include_history: false,
-            include_associations: false,
-            include_versions: false,
+            include_history: params.include_history,
+            include_associations: params.include_associations,
+            include_versions: params.include_versions,
         })
         .await
         .map_err(|err| AppError::new(err, request_id))?;
@@ -668,6 +743,261 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn encode_store_raw_and_recall_raw() {
+        let app = test_app();
+
+        let req_body = serde_json::json!({
+            "session_id": "sess-http-raw",
+            "source": "conversation",
+            "speaker": "user",
+            "visibility": "normal",
+            "secrecy_level": "public",
+            "content": {
+                "blocks": [{
+                    "modality": "text",
+                    "format": "text/plain",
+                    "data": [114, 97, 119, 32, 104, 116, 116, 112],
+                    "embedding": null
+                }],
+                "summary": null
+            }
+        });
+
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/encode/raw")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let recall_body = serde_json::json!({
+            "session_id": "sess-http-raw",
+            "query": "raw http",
+            "limit": 10
+        });
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/recall/raw")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&recall_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["total_candidates"], 1);
+        assert_eq!(json["records"][0]["session_id"], "sess-http-raw");
+    }
+
+    #[tokio::test]
+    async fn raw_records_do_not_leak_into_normal_recall_endpoint() {
+        let app = test_app();
+
+        let req_body = serde_json::json!({
+            "session_id": "sess-http-leak",
+            "source": "conversation",
+            "speaker": "user",
+            "visibility": "normal",
+            "secrecy_level": "public",
+            "content": {
+                "blocks": [{
+                    "modality": "text",
+                    "format": "text/plain",
+                    "data": [104, 105, 100, 100, 101, 110, 32, 114, 97, 119],
+                    "embedding": null
+                }],
+                "summary": null
+            }
+        });
+
+        let _ = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/encode/raw")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let recall_body = serde_json::json!({
+            "cue": { "text": "hidden raw" },
+            "limit": 10,
+            "recall_mode": "perfect",
+            "activation_depth": 0
+        });
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/recall/query")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&recall_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["total_candidates"], 0);
+    }
+
+    #[tokio::test]
+    async fn dream_tick_endpoint_creates_summary() {
+        let app = test_app();
+
+        let raw_body = serde_json::json!({
+            "session_id": "sess-http-dream",
+            "source": "conversation",
+            "speaker": "user",
+            "visibility": "normal",
+            "secrecy_level": "public",
+            "content": {
+                "blocks": [{
+                    "modality": "text",
+                    "format": "text/plain",
+                    "data": [100, 114, 101, 97, 109, 32, 111, 110, 101],
+                    "embedding": null
+                }],
+                "summary": null
+            }
+        });
+
+        let _ = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/encode/raw")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&raw_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let dream_body = serde_json::json!({
+            "session_id": "sess-http-dream",
+            "dry_run": false,
+            "max_groups": 10
+        });
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/lifecycle/dream-tick")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&dream_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["groups_processed"], 1);
+        assert_eq!(json["episodic_summaries_created"], 1);
+    }
+
+    #[tokio::test]
+    async fn export_and_import_endpoints_roundtrip_raw_bundle() {
+        let app = test_app();
+
+        let raw_body = serde_json::json!({
+            "session_id": "sess-http-archive",
+            "source": "conversation",
+            "speaker": "user",
+            "visibility": "normal",
+            "secrecy_level": "public",
+            "content": {
+                "blocks": [{
+                    "modality": "text",
+                    "format": "text/plain",
+                    "data": [114, 97, 119],
+                    "embedding": null
+                }],
+                "summary": null
+            }
+        });
+
+        let _ = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/encode/raw")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&raw_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let export_body = serde_json::json!({
+            "format": "cma",
+            "include_raw_journal": true,
+            "encrypt": false
+        });
+        let export_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/lifecycle/export")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&export_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(export_resp.status(), StatusCode::OK);
+        let export_json = body_json(export_resp).await;
+        assert_eq!(export_json["record_count"], 1);
+
+        let import_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/lifecycle/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "archive_id": "http-bundle",
+                            "strategy": "merge",
+                            "conflict_resolution": "keep_existing",
+                            "archive_data": export_json["archive_data"],
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(import_resp.status(), StatusCode::OK);
+        let import_json = body_json(import_resp).await;
+        assert_eq!(import_json["records_imported"], 0);
     }
 
     #[tokio::test]

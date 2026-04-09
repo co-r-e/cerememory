@@ -16,11 +16,20 @@ use std::io::{BufRead, Write};
 
 use cerememory_core::error::CerememoryError;
 use cerememory_core::protocol::ExportResponse;
-use cerememory_core::types::{MemoryRecord, StoreType};
+use cerememory_core::types::{MemoryRecord, RawJournalRecord, StoreType};
+pub use format::ArchiveBundle;
 
 /// Export records to CMA archive format. Returns both the archive bytes and metadata.
 pub fn export(records: &[MemoryRecord]) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
     exporter::export(records)
+}
+
+/// Export curated and raw journal records to CMA bundle format.
+pub fn export_bundle(
+    records: &[MemoryRecord],
+    raw_records: &[RawJournalRecord],
+) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
+    exporter::export_bundle(records, raw_records)
 }
 
 /// Export records to a writer in streaming CMA format.
@@ -40,6 +49,11 @@ pub fn export_to_bytes(records: &[MemoryRecord]) -> Result<Vec<u8>, CerememoryEr
 /// Import records from CMA archive bytes with checksum verification.
 pub fn import_records(data: &[u8]) -> Result<Vec<MemoryRecord>, CerememoryError> {
     importer::import(data)
+}
+
+/// Import a mixed archive bundle containing curated and raw journal records.
+pub fn import_bundle(data: &[u8]) -> Result<ArchiveBundle, CerememoryError> {
+    importer::import_bundle(data)
 }
 
 /// Import records from a reader in streaming CMA format.
@@ -82,6 +96,34 @@ pub fn export_filtered(
     }
 }
 
+/// Export curated and raw journal records, optionally filtering curated stores and encrypting.
+pub fn export_bundle_filtered(
+    records: &[MemoryRecord],
+    raw_records: &[RawJournalRecord],
+    stores: Option<&[StoreType]>,
+    encryption_key: Option<&[u8; 32]>,
+) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
+    let filtered_records: Vec<MemoryRecord> = if let Some(store_filter) = stores {
+        records
+            .iter()
+            .filter(|record| store_filter.contains(&record.store))
+            .cloned()
+            .collect()
+    } else {
+        records.to_vec()
+    };
+
+    let (bytes, resp) = export_bundle(&filtered_records, raw_records)?;
+    if let Some(key) = encryption_key {
+        let encrypted = crypto::encrypt(&bytes, key)?;
+        let mut resp = resp;
+        resp.size_bytes = encrypted.len() as u64;
+        Ok((encrypted, resp))
+    } else {
+        Ok((bytes, resp))
+    }
+}
+
 /// Import records with optional decryption.
 ///
 /// If `decryption_key` is `Some`, the data is decrypted before parsing.
@@ -98,14 +140,44 @@ pub fn import_records_with_key(
     import_records(&plaintext)
 }
 
+/// Import a mixed archive bundle with optional decryption.
+pub fn import_bundle_with_key(
+    data: &[u8],
+    decryption_key: Option<&[u8; 32]>,
+) -> Result<ArchiveBundle, CerememoryError> {
+    let plaintext = if let Some(key) = decryption_key {
+        crypto::decrypt(data, key)?
+    } else {
+        data.to_vec()
+    };
+    import_bundle(&plaintext)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cerememory_core::types::{MemoryRecord, StoreType};
+    use cerememory_core::types::{
+        MemoryRecord, RawSource, RawSpeaker, RawVisibility, SecrecyLevel, StoreType,
+    };
 
     fn make_records(n: usize) -> Vec<MemoryRecord> {
         (0..n)
             .map(|i| MemoryRecord::new_text(StoreType::Episodic, format!("Memory {i}")))
+            .collect()
+    }
+
+    fn make_raw_records(n: usize) -> Vec<RawJournalRecord> {
+        (0..n)
+            .map(|i| {
+                RawJournalRecord::new_text(
+                    format!("sess-{i}"),
+                    RawSource::Conversation,
+                    RawSpeaker::User,
+                    RawVisibility::Normal,
+                    SecrecyLevel::Public,
+                    format!("Raw memory {i}"),
+                )
+            })
             .collect()
     }
 
@@ -215,6 +287,22 @@ mod tests {
         assert_eq!(resp.record_count, 5);
         assert_eq!(resp.size_bytes, bytes.len() as u64);
         assert!(!resp.checksum.is_empty());
+    }
+
+    #[test]
+    fn bundle_roundtrip_export_import() {
+        let records = make_records(2);
+        let raw_records = make_raw_records(3);
+        let (bytes, resp) = export_bundle(&records, &raw_records).unwrap();
+        assert_eq!(resp.record_count, 5);
+
+        let imported = import_bundle(&bytes).unwrap();
+        assert_eq!(imported.records.len(), 2);
+        assert_eq!(imported.raw_records.len(), 3);
+        assert_eq!(
+            imported.raw_records[0].text_content(),
+            raw_records[0].text_content()
+        );
     }
 
     // ─── Store filter tests ─────────────────────────────────────────

@@ -32,26 +32,43 @@ import type {
   DecayTickResponse,
   EncodeBatchRequest,
   EncodeBatchResponse,
+  EncodeBatchStoreRawRequest,
+  EncodeBatchStoreRawResponse,
   EncodeStoreRequest,
   EncodeStoreResponse,
+  EncodeStoreRawRequest,
+  EncodeStoreRawResponse,
   EncodeUpdateRequest,
+  DreamTickRequest,
+  DreamTickResponse,
   EvolutionMetrics,
+  ExportArchiveResponse,
+  ExportRequest,
   ForgetOptions,
   ForgetRequest,
   ForgetResponse,
   HealthResponse,
   MemoryContent,
   MemoryRecord,
+  RawJournalRecord,
+  RawSource,
+  RawSpeaker,
+  RawVisibility,
   RecallAssociateRequest,
   RecallAssociateResponse,
   RecallGraphRequest,
   RecallGraphResponse,
+  RecallRawQueryRequest,
+  RecallRawQueryResponse,
   RecallOptions,
   RecallQueryRequest,
   RecallQueryResponse,
   RecallTimelineRequest,
   RecallTimelineResponse,
   RecalledMemory,
+  ImportRequest,
+  ImportResponse,
+  SecrecyLevel,
   SetModeRequest,
   StatsResponse,
   StoreOptions,
@@ -161,7 +178,7 @@ export class CerememoryClient {
 
     const request: EncodeStoreRequest = {
       content,
-      store: options.store ?? "episodic",
+      store: options.store ?? undefined,
     };
 
     if (options.emotion) {
@@ -268,6 +285,53 @@ export class CerememoryClient {
     return this.introspectStats();
   }
 
+  async storeRaw(
+    text: string,
+    options: {
+      sessionId: string;
+      topicId?: string;
+      source?: RawSource;
+      speaker?: RawSpeaker;
+      visibility?: RawVisibility;
+      secrecyLevel?: SecrecyLevel;
+    },
+  ): Promise<string> {
+    const request: EncodeStoreRawRequest = {
+      session_id: options.sessionId,
+      topic_id: options.topicId ?? null,
+      source: options.source ?? "conversation",
+      speaker: options.speaker ?? "user",
+      visibility: options.visibility ?? "normal",
+      secrecy_level: options.secrecyLevel ?? "public",
+      content: textContent(text),
+    };
+    const response = await this.encodeStoreRaw(request);
+    return response.record_id;
+  }
+
+  async recallRaw(options: {
+    query?: string;
+    sessionId?: string;
+    limit?: number;
+    includePrivateScratch?: boolean;
+    includeSealed?: boolean;
+    secrecyLevels?: SecrecyLevel[];
+  } = {}): Promise<RawJournalRecord[]> {
+    const response = await this.recallRawQuery({
+      session_id: options.sessionId ?? null,
+      query: options.query ?? null,
+      limit: options.limit ?? 10,
+      include_private_scratch: options.includePrivateScratch ?? false,
+      include_sealed: options.includeSealed ?? false,
+      secrecy_levels: options.secrecyLevels ?? null,
+    });
+    return response.records;
+  }
+
+  async dreamTick(options: DreamTickRequest = {}): Promise<DreamTickResponse> {
+    return this.lifecycleDreamTick(options);
+  }
+
   /**
    * Check if the server is healthy.
    *
@@ -300,6 +364,21 @@ export class CerememoryClient {
   ): Promise<EncodeBatchResponse> {
     return this.transport.post<EncodeBatchResponse>(
       "/v1/encode/batch",
+      request,
+    );
+  }
+
+  async encodeStoreRaw(
+    request: EncodeStoreRawRequest,
+  ): Promise<EncodeStoreRawResponse> {
+    return this.transport.post<EncodeStoreRawResponse>("/v1/encode/raw", request);
+  }
+
+  async encodeBatchStoreRaw(
+    request: EncodeBatchStoreRawRequest,
+  ): Promise<EncodeBatchStoreRawResponse> {
+    return this.transport.post<EncodeBatchStoreRawResponse>(
+      "/v1/encode/raw/batch",
       request,
     );
   }
@@ -384,6 +463,12 @@ export class CerememoryClient {
     );
   }
 
+  async recallRawQuery(
+    request: RecallRawQueryRequest,
+  ): Promise<RecallRawQueryResponse> {
+    return this.transport.post<RecallRawQueryResponse>("/v1/recall/raw", request);
+  }
+
   // ─── Full CMP protocol: Lifecycle ───────────────────────────────────
 
   /**
@@ -416,6 +501,15 @@ export class CerememoryClient {
     );
   }
 
+  async lifecycleDreamTick(
+    request: DreamTickRequest = {},
+  ): Promise<DreamTickResponse> {
+    return this.transport.post<DreamTickResponse>(
+      "/v1/lifecycle/dream-tick",
+      request,
+    );
+  }
+
   /**
    * Set the recall mode (CMP lifecycle.set_mode).
    *
@@ -436,6 +530,19 @@ export class CerememoryClient {
       "/v1/lifecycle/forget",
       request,
     );
+  }
+
+  async lifecycleExport(
+    request: ExportRequest = {},
+  ): Promise<ExportArchiveResponse> {
+    return this.transport.post<ExportArchiveResponse>(
+      "/v1/lifecycle/export",
+      request,
+    );
+  }
+
+  async lifecycleImport(request: ImportRequest): Promise<ImportResponse> {
+    return this.transport.post<ImportResponse>("/v1/lifecycle/import", request);
   }
 
   // ─── Full CMP protocol: Introspect ─────────────────────────────────

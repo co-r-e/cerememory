@@ -21,10 +21,18 @@ from cerememory.types import (
     DecayTickResponse,
     EncodeBatchRequest,
     EncodeBatchResponse,
+    EncodeBatchStoreRawRequest,
+    EncodeBatchStoreRawResponse,
     EncodeStoreRequest,
     EncodeStoreResponse,
+    EncodeStoreRawRequest,
+    EncodeStoreRawResponse,
     EncodeUpdateRequest,
+    DreamTickRequest,
+    DreamTickResponse,
     EvolutionMetrics,
+    ExportArchiveResponse,
+    ExportRequest,
     ForgetRequest,
     ForgetResponse,
     HealthResponse,
@@ -34,11 +42,15 @@ from cerememory.types import (
     RecallAssociateResponse,
     RecallGraphRequest,
     RecallGraphResponse,
+    RecallRawQueryRequest,
+    RecallRawQueryResponse,
     RecallQueryRequest,
     RecallQueryResponse,
     RecallTimelineRequest,
     RecallTimelineResponse,
     SetModeRequest,
+    ImportRequest,
+    ImportResponse,
     StatsResponse,
 )
 
@@ -133,6 +145,20 @@ class AsyncCerememoryClient:
         """Store multiple memory records (``POST /v1/encode/batch``)."""
         return await self._post("/v1/encode/batch", dump(request), EncodeBatchResponse)
 
+    async def encode_store_raw(
+        self, request: EncodeStoreRawRequest
+    ) -> EncodeStoreRawResponse:
+        """Store a raw journal record (``POST /v1/encode/raw``)."""
+        return await self._post("/v1/encode/raw", dump(request), EncodeStoreRawResponse)
+
+    async def encode_batch_store_raw(
+        self, request: EncodeBatchStoreRawRequest
+    ) -> EncodeBatchStoreRawResponse:
+        """Store multiple raw journal records (``POST /v1/encode/raw/batch``)."""
+        return await self._post(
+            "/v1/encode/raw/batch", dump(request), EncodeBatchStoreRawResponse
+        )
+
     async def encode_update(self, record_id: UUID, request: EncodeUpdateRequest) -> None:
         """Update an existing memory record (``PATCH /v1/encode/:record_id``)."""
         await self._transport.request(
@@ -146,6 +172,12 @@ class AsyncCerememoryClient:
     async def recall_query(self, request: RecallQueryRequest) -> RecallQueryResponse:
         """Query memories by cue (``POST /v1/recall/query``)."""
         return await self._post("/v1/recall/query", dump(request), RecallQueryResponse)
+
+    async def recall_raw_query(
+        self, request: RecallRawQueryRequest
+    ) -> RecallRawQueryResponse:
+        """Query raw journal records (``POST /v1/recall/raw``)."""
+        return await self._post("/v1/recall/raw", dump(request), RecallRawQueryResponse)
 
     async def recall_associate(
         self, record_id: UUID, request: RecallAssociateRequest
@@ -180,6 +212,10 @@ class AsyncCerememoryClient:
         """Trigger a decay tick (``POST /v1/lifecycle/decay-tick``)."""
         return await self._post("/v1/lifecycle/decay-tick", dump(request), DecayTickResponse)
 
+    async def lifecycle_dream_tick(self, request: DreamTickRequest) -> DreamTickResponse:
+        """Trigger a dream tick (``POST /v1/lifecycle/dream-tick``)."""
+        return await self._post("/v1/lifecycle/dream-tick", dump(request), DreamTickResponse)
+
     async def lifecycle_set_mode(self, request: SetModeRequest) -> None:
         """Set the recall mode (``PUT /v1/lifecycle/mode``)."""
         await self._transport.request("PUT", "/v1/lifecycle/mode", json=dump(request))
@@ -190,6 +226,14 @@ class AsyncCerememoryClient:
             "DELETE", "/v1/lifecycle/forget", json=dump(request)
         )
         return ForgetResponse.model_validate(resp.json())
+
+    async def lifecycle_export(self, request: ExportRequest) -> ExportArchiveResponse:
+        """Export an archive bundle (``POST /v1/lifecycle/export``)."""
+        return await self._post("/v1/lifecycle/export", dump(request), ExportArchiveResponse)
+
+    async def lifecycle_import(self, request: ImportRequest) -> ImportResponse:
+        """Import an archive bundle (``POST /v1/lifecycle/import``)."""
+        return await self._post("/v1/lifecycle/import", dump(request), ImportResponse)
 
     # ------------------------------------------------------------------
     # Introspect Operations

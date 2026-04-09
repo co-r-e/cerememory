@@ -116,7 +116,9 @@ impl SemanticStore {
     pub fn open_in_memory() -> Result<Self, CerememoryError> {
         let tmp =
             tempfile::NamedTempFile::new().map_err(|e| CerememoryError::Storage(e.to_string()))?;
-        Self::open(tmp.path())
+        let path = tmp.into_temp_path();
+        let _ = std::fs::remove_file(&path);
+        Self::open(&path)
     }
 
     /// Open (or create) a semantic store at `path`.

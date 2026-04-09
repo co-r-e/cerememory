@@ -55,7 +55,9 @@ export class CerememoryError extends Error {
     return (
       this.code === "RATE_LIMITED" ||
       this.code === "DECAY_ENGINE_BUSY" ||
-      this.code === "INTERNAL_ERROR"
+      this.code === "INTERNAL_ERROR" ||
+      this.code === "CONSOLIDATION_IN_PROGRESS" ||
+      this.code === "WORKING_MEMORY_FULL"
     );
   }
 }

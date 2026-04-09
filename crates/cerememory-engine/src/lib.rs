@@ -10,7 +10,7 @@
 //! - Background decay via tokio::spawn
 //! - Export/Import via cerememory-archive
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Default weight for automatically inferred sequential associations in batch encoding.
@@ -29,6 +29,14 @@ const ALL_STORES: [StoreType; 5] = [
 struct TimerGuard {
     name: &'static str,
     start: std::time::Instant,
+}
+
+struct DreamGroup {
+    session_id: String,
+    raw_topic_id: Option<String>,
+    topic_hint: Option<String>,
+    inferred_topic: bool,
+    records: Vec<RawJournalRecord>,
 }
 
 impl TimerGuard {
@@ -76,11 +84,13 @@ use cerememory_index::HippocampalCoordinator;
 use cerememory_store_emotional::EmotionalStore;
 use cerememory_store_episodic::EpisodicStore;
 use cerememory_store_procedural::ProceduralStore;
+use cerememory_store_raw::RawJournalStore;
 use cerememory_store_semantic::SemanticStore;
 use cerememory_store_working::WorkingMemoryStore;
 
 /// Configuration for engine construction.
 pub struct EngineConfig {
+    pub raw_journal_path: Option<String>,
     pub episodic_path: Option<String>,
     pub semantic_path: Option<String>,
     pub procedural_path: Option<String>,
@@ -94,6 +104,8 @@ pub struct EngineConfig {
     pub vector_index_path: Option<String>,
     /// If set, enables background decay at this interval (in seconds). None = disabled.
     pub background_decay_interval_secs: Option<u64>,
+    /// If set, enables background dream processing at this interval (in seconds). None = disabled.
+    pub background_dream_interval_secs: Option<u64>,
     /// Number of vectors at which to switch from brute-force to HNSW search.
     /// Default: 1000. Set to `usize::MAX` to always use brute-force.
     pub hnsw_threshold: usize,
@@ -105,6 +117,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            raw_journal_path: None,
             episodic_path: None,
             semantic_path: None,
             procedural_path: None,
@@ -115,6 +128,7 @@ impl Default for EngineConfig {
             index_path: None,
             vector_index_path: None,
             background_decay_interval_secs: None,
+            background_dream_interval_secs: None,
             hnsw_threshold: cerememory_index::vector_index::DEFAULT_HNSW_THRESHOLD,
             llm_provider: None,
         }
@@ -124,6 +138,7 @@ impl Default for EngineConfig {
 /// The main Cerememory engine — orchestrates all CMP operations.
 pub struct CerememoryEngine {
     // Stores
+    raw_journal: RawJournalStore,
     episodic: EpisodicStore,
     semantic: SemanticStore,
     procedural: ProceduralStore,
@@ -151,6 +166,8 @@ pub struct CerememoryEngine {
     // Background decay
     background_decay_interval_secs: Option<u64>,
     decay_state: tokio::sync::Mutex<Option<BackgroundDecayState>>,
+    background_dream_interval_secs: Option<u64>,
+    dream_state: tokio::sync::Mutex<Option<BackgroundDreamState>>,
 }
 
 /// Tracks a running background decay task for clean shutdown.
@@ -159,9 +176,20 @@ struct BackgroundDecayState {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// Tracks a running background dream task for clean shutdown.
+struct BackgroundDreamState {
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 impl CerememoryEngine {
     /// Create a new engine. Uses in-memory stores when paths are None.
     pub fn new(config: EngineConfig) -> Result<Self, CerememoryError> {
+        let raw_journal = match &config.raw_journal_path {
+            Some(p) => RawJournalStore::open(p)?,
+            None => RawJournalStore::open_in_memory()?,
+        };
+
         let episodic = match &config.episodic_path {
             Some(p) => EpisodicStore::open(p)?,
             None => EpisodicStore::open_in_memory()?,
@@ -212,11 +240,12 @@ impl CerememoryEngine {
         let activation = SpreadingActivationEngine::new(Arc::clone(&coordinator));
 
         Ok(Self {
+            raw_journal,
             episodic,
             semantic,
             procedural,
             emotional,
-            working: WorkingMemoryStore::with_capacity(config.working_capacity),
+            working: WorkingMemoryStore::with_capacity(config.working_capacity.max(1)),
             decay: PowerLawDecayEngine::new(config.decay_params),
             activation,
             evolution: EvolutionEngine::new(),
@@ -227,6 +256,8 @@ impl CerememoryEngine {
             llm_provider: config.llm_provider,
             background_decay_interval_secs: config.background_decay_interval_secs,
             decay_state: tokio::sync::Mutex::new(None),
+            background_dream_interval_secs: config.background_dream_interval_secs,
+            dream_state: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -272,7 +303,7 @@ impl CerememoryEngine {
                             _ = interval.tick() => {
                                 let req = DecayTickRequest {
                                     header: None,
-                                    tick_duration_seconds: Some(interval_secs as u32),
+                                    tick_duration_seconds: Some(interval_secs.min(u32::MAX as u64) as u32),
                                 };
                                 if let Err(e) = engine_ref.lifecycle_decay_tick(req).await {
                                     warn!(error = %e, "Background decay tick failed");
@@ -331,6 +362,110 @@ impl CerememoryEngine {
     /// Check if background decay is running.
     pub async fn is_background_decay_enabled(&self) -> bool {
         self.decay_state.lock().await.is_some()
+    }
+
+    /// Start the background dream task. Requires the engine to be wrapped in Arc.
+    /// No-op if already running or if `background_dream_interval_secs` is None.
+    pub fn start_background_dream(self: &Arc<Self>) {
+        let Some(interval_secs) = self.background_dream_interval_secs else {
+            return;
+        };
+
+        let mut guard = match self.dream_state.try_lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if guard.is_some() {
+            return;
+        }
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let engine = Arc::clone(self);
+
+        let handle = tokio::spawn(async move {
+            let mut backoff_secs = 1u64;
+            const MAX_BACKOFF_SECS: u64 = 300;
+
+            loop {
+                let engine_ref = Arc::clone(&engine);
+                let mut rx_ref = rx.clone();
+
+                let result = tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+                    interval.tick().await;
+
+                    loop {
+                        tokio::select! {
+                            _ = interval.tick() => {
+                                let req = DreamTickRequest {
+                                    header: None,
+                                    session_id: None,
+                                    dry_run: false,
+                                    max_groups: 50,
+                                    include_private_scratch: false,
+                                    include_sealed: false,
+                                    promote_semantic: true,
+                                    secrecy_levels: None,
+                                };
+                                if let Err(e) = engine_ref.lifecycle_dream_tick(req).await {
+                                    warn!(error = %e, "Background dream tick failed");
+                                }
+                            }
+                            _ = rx_ref.changed() => {
+                                if *rx_ref.borrow() {
+                                    info!("Background dream processing stopped");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                })
+                .await;
+
+                if *rx.borrow() {
+                    return;
+                }
+
+                match result {
+                    Ok(()) => return,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            backoff_secs,
+                            "Background dream task panicked, restarting"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+                    }
+                }
+            }
+        });
+
+        *guard = Some(BackgroundDreamState {
+            shutdown_tx: tx,
+            handle,
+        });
+    }
+
+    /// Stop the background dream task and wait for it to finish.
+    pub async fn stop_background_dream(&self) {
+        let state = {
+            let mut guard = self.dream_state.lock().await;
+            guard.take()
+        };
+
+        if let Some(state) = state {
+            let _ = state.shutdown_tx.send(true);
+            if let Err(e) = state.handle.await {
+                tracing::error!(error = %e, "Background dream task join failed");
+            }
+        }
+    }
+
+    /// Check if background dream processing is running.
+    pub async fn is_background_dream_enabled(&self) -> bool {
+        self.dream_state.lock().await.is_some()
     }
 
     /// Rebuild the hippocampal coordinator and all indexes from persistent stores.
@@ -780,6 +915,804 @@ impl CerememoryEngine {
             self.unindex_record(*record_id);
         }
         self.remove_deleted_targets_from_records(&deleted_ids).await
+    }
+
+    fn normalize_export_format(format: &str) -> Result<&'static str, CerememoryError> {
+        let format = format.trim();
+        if format.eq_ignore_ascii_case("cma") || format.eq_ignore_ascii_case("jsonl") {
+            Ok("cma")
+        } else {
+            Err(CerememoryError::Validation(format!(
+                "Unsupported export format '{format}'. Valid options: cma, jsonl"
+            )))
+        }
+    }
+
+    async fn delete_records(
+        &self,
+        delete_targets: Vec<(Uuid, StoreType)>,
+    ) -> Result<u32, CerememoryError> {
+        let mut deleted_records = Vec::new();
+        for (id, store_type) in delete_targets {
+            if dispatch_store!(self, store_type, delete(&id))? {
+                deleted_records.push((id, store_type));
+            }
+        }
+        let deleted = deleted_records.len() as u32;
+        self.cleanup_deleted_records(&deleted_records).await?;
+        Ok(deleted)
+    }
+
+    async fn clear_all_records(&self) -> Result<u32, CerememoryError> {
+        let mut delete_targets = Vec::new();
+        for store_type in ALL_STORES {
+            for id in dispatch_store!(self, store_type, list_ids())? {
+                delete_targets.push((id, store_type));
+            }
+        }
+        self.delete_records(delete_targets).await
+    }
+
+    async fn restore_records(&self, records: &[MemoryRecord]) -> Result<(), CerememoryError> {
+        self.clear_all_records().await?;
+        for record in records {
+            let store_type = record.store;
+            dispatch_store!(self, store_type, store(record.clone()))?;
+            self.coordinator
+                .register(record.id, store_type, record.associations.clone())
+                .await;
+            let _ = self.index_record(record);
+        }
+        Ok(())
+    }
+
+    async fn import_records_with_conflict_resolution(
+        &self,
+        records: Vec<MemoryRecord>,
+        conflict_resolution: ConflictResolution,
+    ) -> Result<u32, CerememoryError> {
+        let mut imported = 0u32;
+
+        for record in records {
+            let store_type = record.store;
+            let mut replaced_cross_store: Option<StoreType> = None;
+
+            if let Some((existing, existing_store)) = self.get_store_record(&record.id).await? {
+                match conflict_resolution {
+                    ConflictResolution::KeepExisting => continue,
+                    ConflictResolution::KeepImported => {
+                        if existing_store != store_type {
+                            replaced_cross_store = Some(existing_store);
+                        }
+                    }
+                    ConflictResolution::KeepNewer => {
+                        if record.updated_at <= existing.updated_at {
+                            continue;
+                        }
+                        if existing_store != store_type {
+                            replaced_cross_store = Some(existing_store);
+                        }
+                    }
+                }
+            }
+
+            dispatch_store!(self, store_type, store(record.clone()))?;
+            if let Some(existing_store) = replaced_cross_store {
+                if !dispatch_store!(self, existing_store, delete(&record.id))? {
+                    if let Err(e) = dispatch_store!(self, store_type, delete(&record.id)) {
+                        warn!(
+                            record_id = %record.id,
+                            store = %store_type,
+                            error = %e,
+                            "Failed to clean up newly stored record during import conflict rollback"
+                        );
+                    }
+                    return Err(CerememoryError::ImportConflict(format!(
+                        "Failed to replace cross-store record {} from {} to {}",
+                        record.id, existing_store, store_type
+                    )));
+                }
+            }
+            self.coordinator
+                .register(record.id, store_type, record.associations.clone())
+                .await;
+            if let Err(e) = self.index_record(&record) {
+                warn!(error = %e, record_id = %record.id, "Failed to index imported record");
+            }
+            imported += 1;
+        }
+
+        Ok(imported)
+    }
+
+    async fn collect_all_raw_journal_records(
+        &self,
+    ) -> Result<Vec<RawJournalRecord>, CerememoryError> {
+        self.raw_journal.get_all().await
+    }
+
+    async fn clear_raw_journal(&self) -> Result<u32, CerememoryError> {
+        let records = self.raw_journal.get_all().await?;
+        let mut deleted = 0u32;
+        for record in records {
+            if self.raw_journal.delete(&record.id).await? {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
+
+    async fn restore_raw_journal(
+        &self,
+        raw_records: &[RawJournalRecord],
+    ) -> Result<(), CerememoryError> {
+        self.clear_raw_journal().await?;
+        for record in raw_records {
+            self.raw_journal.append(record.clone()).await?;
+        }
+        Ok(())
+    }
+
+    async fn import_raw_records_with_conflict_resolution(
+        &self,
+        raw_records: Vec<RawJournalRecord>,
+        conflict_resolution: ConflictResolution,
+    ) -> Result<u32, CerememoryError> {
+        let mut imported = 0u32;
+        for record in raw_records {
+            if let Some(existing) = self.raw_journal.get(&record.id).await? {
+                match conflict_resolution {
+                    ConflictResolution::KeepExisting => continue,
+                    ConflictResolution::KeepImported => {
+                        self.raw_journal.update(record.clone()).await?;
+                        imported += 1;
+                    }
+                    ConflictResolution::KeepNewer => {
+                        if record.updated_at > existing.updated_at {
+                            self.raw_journal.update(record.clone()).await?;
+                            imported += 1;
+                        }
+                    }
+                }
+            } else {
+                self.raw_journal.append(record).await?;
+                imported += 1;
+            }
+        }
+        Ok(imported)
+    }
+
+    /// Append a verbatim preserved record to the raw journal.
+    pub async fn append_raw_journal(
+        &self,
+        record: RawJournalRecord,
+    ) -> Result<Uuid, CerememoryError> {
+        self.raw_journal.append(record).await
+    }
+
+    /// Retrieve a raw journal record by id.
+    pub async fn get_raw_journal_record(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<RawJournalRecord>, CerememoryError> {
+        self.raw_journal.get(id).await
+    }
+
+    /// Retrieve all raw journal records for a session in chronological order.
+    pub async fn query_raw_journal_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<RawJournalRecord>, CerememoryError> {
+        self.raw_journal.query_session(session_id).await
+    }
+
+    /// Retrieve raw journal records for a session within a time range.
+    pub async fn query_raw_journal_session_range(
+        &self,
+        session_id: &str,
+        start: chrono::DateTime<Utc>,
+        end: chrono::DateTime<Utc>,
+    ) -> Result<Vec<RawJournalRecord>, CerememoryError> {
+        self.raw_journal
+            .query_session_range(session_id, start, end)
+            .await
+    }
+
+    /// Return the number of raw journal records.
+    pub async fn raw_journal_count(&self) -> Result<usize, CerememoryError> {
+        self.raw_journal.count().await
+    }
+
+    fn raw_query_allowed_visibility(
+        record: &RawJournalRecord,
+        include_private_scratch: bool,
+        include_sealed: bool,
+    ) -> bool {
+        match record.visibility {
+            RawVisibility::Normal => true,
+            RawVisibility::PrivateScratch => include_private_scratch,
+            RawVisibility::Sealed => include_sealed,
+        }
+    }
+
+    fn raw_query_allowed_secrecy(
+        record: &RawJournalRecord,
+        secrecy_levels: Option<&[SecrecyLevel]>,
+    ) -> bool {
+        match secrecy_levels {
+            Some(levels) => levels.contains(&record.secrecy_level),
+            None => matches!(
+                record.secrecy_level,
+                SecrecyLevel::Public | SecrecyLevel::Sensitive
+            ),
+        }
+    }
+
+    fn raw_record_processed(record: &RawJournalRecord) -> bool {
+        record
+            .metadata
+            .get("_dream")
+            .and_then(|value| value.get("processed_at"))
+            .and_then(|value| value.as_str())
+            .is_some()
+    }
+
+    fn mark_raw_record_dream_processed(
+        record: &mut RawJournalRecord,
+        summary_id: Uuid,
+        semantic_id: Option<Uuid>,
+        dreamed_at: chrono::DateTime<Utc>,
+    ) {
+        record.updated_at = dreamed_at;
+        if !record.derived_memory_ids.contains(&summary_id) {
+            record.derived_memory_ids.push(summary_id);
+        }
+        if let Some(semantic_id) = semantic_id {
+            if !record.derived_memory_ids.contains(&semantic_id) {
+                record.derived_memory_ids.push(semantic_id);
+            }
+        }
+
+        let metadata = if let serde_json::Value::Object(map) = &mut record.metadata {
+            map
+        } else {
+            record.metadata = serde_json::json!({});
+            match &mut record.metadata {
+                serde_json::Value::Object(map) => map,
+                _ => unreachable!("metadata initialized as object"),
+            }
+        };
+
+        let dream = metadata
+            .entry("_dream".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let serde_json::Value::Object(map) = dream {
+            map.insert(
+                "processed_at".to_string(),
+                serde_json::Value::String(dreamed_at.to_rfc3339()),
+            );
+            map.insert(
+                "last_summary_id".to_string(),
+                serde_json::Value::String(summary_id.to_string()),
+            );
+        }
+
+        let derived = metadata
+            .entry("_derived".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let serde_json::Value::Object(map) = derived {
+            let summary_entry = map
+                .entry("episodic_summary_ids".to_string())
+                .or_insert_with(|| serde_json::json!([]));
+            if let serde_json::Value::Array(ids) = summary_entry {
+                let summary_value = serde_json::Value::String(summary_id.to_string());
+                if !ids.iter().any(|existing| existing == &summary_value) {
+                    ids.push(summary_value);
+                }
+            }
+            if let Some(semantic_id) = semantic_id {
+                let semantic_entry = map
+                    .entry("semantic_ids".to_string())
+                    .or_insert_with(|| serde_json::json!([]));
+                if let serde_json::Value::Array(ids) = semantic_entry {
+                    let semantic_value = serde_json::Value::String(semantic_id.to_string());
+                    if !ids.iter().any(|existing| existing == &semantic_value) {
+                        ids.push(semantic_value);
+                    }
+                }
+            }
+        }
+    }
+
+    fn dream_stat_u64(summary_stats: &serde_json::Value, key: &str) -> u64 {
+        summary_stats
+            .get(key)
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+    }
+
+    fn should_promote_dream_group(
+        raw_topic_id: Option<&str>,
+        topic_hint: Option<&str>,
+        summary_stats: &serde_json::Value,
+    ) -> bool {
+        let normal_records = Self::dream_stat_u64(summary_stats, "normal_records");
+        let has_topic_signal = raw_topic_id.filter(|topic| !topic.is_empty()).is_some()
+            || topic_hint.filter(|topic| !topic.is_empty()).is_some();
+        normal_records >= 2 && has_topic_signal
+    }
+
+    fn attach_summary_semantic_link(summary_record: &mut MemoryRecord, semantic_id: Uuid) {
+        if let serde_json::Value::Object(map) = &mut summary_record.metadata {
+            let derived = map
+                .entry("_derived".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if let serde_json::Value::Object(derived_map) = derived {
+                let semantic_ids = derived_map
+                    .entry("semantic_ids".to_string())
+                    .or_insert_with(|| serde_json::json!([]));
+                if let serde_json::Value::Array(ids) = semantic_ids {
+                    let semantic_value = serde_json::Value::String(semantic_id.to_string());
+                    if !ids.iter().any(|existing| existing == &semantic_value) {
+                        ids.push(semantic_value);
+                    }
+                }
+            }
+        }
+    }
+
+    fn prepare_dream_summary_inputs(
+        raw_records: &[RawJournalRecord],
+    ) -> (Vec<String>, serde_json::Value) {
+        let mut texts = Vec::new();
+        let mut normal_count = 0u32;
+        let mut private_scratch_redacted = 0u32;
+        let mut sealed_redacted = 0u32;
+        let mut secret_redacted = 0u32;
+
+        for record in raw_records {
+            match (record.visibility, record.secrecy_level) {
+                (_, SecrecyLevel::Secret) => {
+                    secret_redacted += 1;
+                }
+                (RawVisibility::Sealed, _) => {
+                    sealed_redacted += 1;
+                }
+                (RawVisibility::PrivateScratch, _) => {
+                    private_scratch_redacted += 1;
+                }
+                (RawVisibility::Normal, _) => {
+                    if let Some(text) = record.text_content() {
+                        texts.push(text.to_string());
+                    }
+                    normal_count += 1;
+                }
+            }
+        }
+
+        let stats = serde_json::json!({
+            "normal_records": normal_count,
+            "private_scratch_redacted": private_scratch_redacted,
+            "sealed_redacted": sealed_redacted,
+            "secret_redacted": secret_redacted,
+            "redacted_total": private_scratch_redacted + sealed_redacted + secret_redacted,
+        });
+
+        (texts, stats)
+    }
+
+    fn tokenize_topic_text(text: &str) -> HashSet<String> {
+        const STOPWORDS: &[&str] = &[
+            "the", "and", "for", "with", "that", "this", "from", "into", "only", "then", "than",
+            "have", "has", "had", "were", "was", "are", "but", "not", "you", "your", "our", "raw",
+            "note", "notes", "session", "topic", "summary", "record", "records",
+        ];
+
+        text.chars()
+            .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+            .collect::<String>()
+            .split_whitespace()
+            .map(|token| token.to_lowercase())
+            .filter(|token| token.len() >= 3)
+            .filter(|token| !STOPWORDS.iter().any(|stopword| stopword == token))
+            .collect()
+    }
+
+    fn topic_token_overlap(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
+        if left.is_empty() || right.is_empty() {
+            return 1.0;
+        }
+
+        let intersection = left.intersection(right).count() as f64;
+        let union = left.union(right).count() as f64;
+        if union == 0.0 {
+            1.0
+        } else {
+            intersection / union
+        }
+    }
+
+    fn infer_topic_hint(raw_records: &[RawJournalRecord]) -> Option<String> {
+        let mut counts: HashMap<String, u32> = HashMap::new();
+        for record in raw_records {
+            if matches!(record.visibility, RawVisibility::Normal)
+                && !matches!(record.secrecy_level, SecrecyLevel::Secret)
+            {
+                if let Some(text) = record.text_content() {
+                    for token in Self::tokenize_topic_text(text) {
+                        *counts.entry(token).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        let mut ranked: Vec<(String, u32)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let top_terms: Vec<String> = ranked.into_iter().take(3).map(|(token, _)| token).collect();
+        if top_terms.is_empty() {
+            None
+        } else {
+            Some(top_terms.join("+"))
+        }
+    }
+
+    fn infer_dream_groups(records: Vec<RawJournalRecord>) -> Vec<DreamGroup> {
+        let mut explicit_groups: BTreeMap<
+            (chrono::NaiveDate, String, String),
+            Vec<RawJournalRecord>,
+        > = BTreeMap::new();
+        let mut inferred_sources: BTreeMap<(chrono::NaiveDate, String), Vec<RawJournalRecord>> =
+            BTreeMap::new();
+
+        for record in records {
+            let date = record.created_at.date_naive();
+            if let Some(topic_id) = record
+                .topic_id
+                .as_ref()
+                .map(|topic| topic.trim())
+                .filter(|topic| !topic.is_empty())
+            {
+                explicit_groups
+                    .entry((date, record.session_id.clone(), topic_id.to_string()))
+                    .or_default()
+                    .push(record);
+            } else {
+                inferred_sources
+                    .entry((date, record.session_id.clone()))
+                    .or_default()
+                    .push(record);
+            }
+        }
+
+        let mut groups = Vec::new();
+        for ((_, session_id, topic_id), mut records) in explicit_groups {
+            records.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            groups.push(DreamGroup {
+                session_id,
+                raw_topic_id: Some(topic_id.clone()),
+                topic_hint: Some(topic_id),
+                inferred_topic: false,
+                records,
+            });
+        }
+
+        for ((date, session_id), mut records) in inferred_sources {
+            records.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+
+            let mut current: Vec<RawJournalRecord> = Vec::new();
+            let mut current_tokens: HashSet<String> = HashSet::new();
+            let mut segment_index = 0u32;
+
+            for record in records {
+                let record_tokens = record
+                    .text_content()
+                    .map(Self::tokenize_topic_text)
+                    .unwrap_or_default();
+                let should_split = current.last().is_some_and(|previous: &RawJournalRecord| {
+                    let gap = record.created_at.signed_duration_since(previous.created_at);
+                    let overlap = Self::topic_token_overlap(&current_tokens, &record_tokens);
+                    gap > chrono::Duration::minutes(45)
+                        || (gap > chrono::Duration::minutes(10) && overlap < 0.08)
+                });
+
+                if should_split && !current.is_empty() {
+                    let topic_hint = Self::infer_topic_hint(&current);
+                    groups.push(DreamGroup {
+                        session_id: session_id.clone(),
+                        raw_topic_id: None,
+                        topic_hint,
+                        inferred_topic: true,
+                        records: std::mem::take(&mut current),
+                    });
+                    current_tokens.clear();
+                    segment_index += 1;
+                }
+
+                current_tokens.extend(record_tokens);
+                current.push(record);
+            }
+
+            if !current.is_empty() {
+                let topic_hint = Self::infer_topic_hint(&current)
+                    .or_else(|| Some(format!("auto-{}-{segment_index}", date.format("%Y%m%d"))));
+                groups.push(DreamGroup {
+                    session_id: session_id.clone(),
+                    raw_topic_id: None,
+                    topic_hint,
+                    inferred_topic: true,
+                    records: current,
+                });
+            }
+        }
+
+        groups.sort_by(|left, right| {
+            let left_time = left.records.first().map(|record| record.created_at);
+            let right_time = right.records.first().map(|record| record.created_at);
+            left_time
+                .cmp(&right_time)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+                .then_with(|| left.topic_hint.cmp(&right.topic_hint))
+        });
+        groups
+    }
+
+    async fn summarize_dream_group(
+        &self,
+        session_id: &str,
+        topic_hint: Option<&str>,
+        texts: &[String],
+        summary_stats: &serde_json::Value,
+    ) -> String {
+        if let Some(provider) = &self.llm_provider {
+            match provider.summarize(texts, 300).await {
+                Ok(summary) if !summary.trim().is_empty() => {
+                    let redacted = summary_stats["redacted_total"].as_u64().unwrap_or(0);
+                    if redacted > 0 {
+                        return format!(
+                            "{summary}\n\n[{} raw record(s) redacted from summary]",
+                            redacted
+                        );
+                    }
+                    return summary;
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+
+        let heading = match topic_hint.filter(|topic| !topic.is_empty()) {
+            Some(topic) => format!("Dream summary for session {session_id} / topic {topic}:"),
+            None => format!("Dream summary for session {session_id}:"),
+        };
+        let snippets: Vec<String> = texts
+            .iter()
+            .take(8)
+            .map(|text| {
+                if text.len() > 160 {
+                    format!("{}...", truncate_str(text, 160))
+                } else {
+                    text.clone()
+                }
+            })
+            .collect();
+        let body = snippets.join(" | ");
+        let redacted_total = summary_stats["redacted_total"].as_u64().unwrap_or(0);
+        let suffix = if redacted_total > 0 {
+            format!(" [Redacted raw records: {redacted_total}]")
+        } else {
+            String::new()
+        };
+        let combined = format!("{heading} {body}{suffix}");
+        if combined.len() > 1200 {
+            format!("{}...", truncate_str(&combined, 1200))
+        } else {
+            combined
+        }
+    }
+
+    fn build_dream_summary_metadata(
+        session_id: &str,
+        raw_topic_id: Option<&str>,
+        topic_hint: Option<&str>,
+        inferred_topic: bool,
+        raw_records: &[RawJournalRecord],
+        dreamed_at: chrono::DateTime<Utc>,
+        summary_stats: serde_json::Value,
+    ) -> serde_json::Value {
+        let raw_ids: Vec<String> = raw_records
+            .iter()
+            .map(|record| record.id.to_string())
+            .collect();
+        let start = raw_records
+            .first()
+            .map(|record| record.created_at.to_rfc3339());
+        let end = raw_records
+            .last()
+            .map(|record| record.created_at.to_rfc3339());
+
+        serde_json::json!({
+            "_origin": {
+                "raw_session_id": session_id,
+                "raw_topic_id": raw_topic_id,
+                "raw_topic_hint": topic_hint,
+                "raw_topic_inferred": inferred_topic,
+                "raw_record_ids": raw_ids,
+                "dream_tick_at": dreamed_at.to_rfc3339(),
+                "raw_record_count": raw_records.len(),
+                "range_start": start,
+                "range_end": end
+            },
+            "_dream": {
+                "kind": "episodic_summary",
+                "source": "raw_journal",
+                "summary_stats": summary_stats
+            }
+        })
+    }
+
+    fn build_dream_semantic_metadata(
+        session_id: &str,
+        raw_topic_id: Option<&str>,
+        topic_hint: Option<&str>,
+        inferred_topic: bool,
+        raw_records: &[RawJournalRecord],
+        summary_record_id: Uuid,
+        dreamed_at: chrono::DateTime<Utc>,
+        summary_stats: serde_json::Value,
+    ) -> serde_json::Value {
+        let raw_ids: Vec<String> = raw_records
+            .iter()
+            .map(|record| record.id.to_string())
+            .collect();
+
+        serde_json::json!({
+            "_origin": {
+                "raw_session_id": session_id,
+                "raw_topic_id": raw_topic_id,
+                "raw_topic_hint": topic_hint,
+                "raw_topic_inferred": inferred_topic,
+                "raw_record_ids": raw_ids,
+                "dream_tick_at": dreamed_at.to_rfc3339(),
+                "raw_record_count": raw_records.len(),
+                "raw_summary_record_id": summary_record_id.to_string()
+            },
+            "_dream": {
+                "kind": "semantic_summary",
+                "source": "raw_journal",
+                "summary_stats": summary_stats
+            }
+        })
+    }
+
+    /// encode.store_raw — append a raw journal record to the preservation plane.
+    pub async fn encode_store_raw(
+        &self,
+        req: EncodeStoreRawRequest,
+    ) -> Result<EncodeStoreRawResponse, CerememoryError> {
+        let metadata = req.metadata.unwrap_or_else(|| serde_json::json!({}));
+        let record = RawJournalRecord {
+            id: Uuid::now_v7(),
+            session_id: req.session_id,
+            turn_id: req.turn_id,
+            topic_id: req.topic_id,
+            source: req.source,
+            speaker: req.speaker,
+            visibility: req.visibility,
+            secrecy_level: req.secrecy_level,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            content: req.content,
+            metadata,
+            derived_memory_ids: Vec::new(),
+            suppressed: false,
+        };
+        record.validate()?;
+        let record_id = self.raw_journal.append(record.clone()).await?;
+
+        Ok(EncodeStoreRawResponse {
+            record_id,
+            session_id: record.session_id,
+            visibility: record.visibility,
+            secrecy_level: record.secrecy_level,
+        })
+    }
+
+    /// encode.batch_raw — append multiple raw journal records.
+    pub async fn encode_batch_store_raw(
+        &self,
+        req: EncodeBatchStoreRawRequest,
+    ) -> Result<EncodeBatchStoreRawResponse, CerememoryError> {
+        let mut results = Vec::with_capacity(req.records.len());
+        for record in req.records {
+            results.push(self.encode_store_raw(record).await?);
+        }
+        Ok(EncodeBatchStoreRawResponse { results })
+    }
+
+    /// recall.raw_query — explicit retrieval from the raw journal.
+    pub async fn recall_raw_query(
+        &self,
+        req: RecallRawQueryRequest,
+    ) -> Result<RecallRawQueryResponse, CerememoryError> {
+        let secrecy_levels = req.secrecy_levels.as_deref();
+        let query_lower = req.query.as_ref().map(|query| query.trim().to_lowercase());
+        let session_filter = req
+            .session_id
+            .as_ref()
+            .map(|session_id| session_id.trim())
+            .filter(|session_id| !session_id.is_empty())
+            .map(str::to_string);
+
+        let mut records = match (req.query.as_deref(), &session_filter, &req.temporal) {
+            (Some(query), Some(session_id), _) if !query.trim().is_empty() => {
+                self.raw_journal
+                    .search_text(
+                        query,
+                        Some(session_id),
+                        (req.limit as usize).saturating_mul(5),
+                    )
+                    .await?
+            }
+            (Some(query), None, _) if !query.trim().is_empty() => {
+                self.raw_journal
+                    .search_text(query, None, (req.limit as usize).saturating_mul(5))
+                    .await?
+            }
+            (None, Some(session_id), Some(temporal)) => {
+                self.raw_journal
+                    .query_session_range(session_id, temporal.start, temporal.end)
+                    .await?
+            }
+            (None, Some(session_id), None) => self.raw_journal.query_session(session_id).await?,
+            _ => self.raw_journal.get_all().await?,
+        };
+        records.retain(|record| {
+            if record.suppressed {
+                return false;
+            }
+            if !Self::raw_query_allowed_visibility(
+                record,
+                req.include_private_scratch,
+                req.include_sealed,
+            ) {
+                return false;
+            }
+            if !Self::raw_query_allowed_secrecy(record, secrecy_levels) {
+                return false;
+            }
+            if session_filter.is_none() {
+                if let Some(ref temporal) = req.temporal {
+                    if record.created_at < temporal.start || record.created_at > temporal.end {
+                        return false;
+                    }
+                }
+            }
+            if let Some(ref query_lower) = query_lower {
+                if !record.matches_text(query_lower) {
+                    return false;
+                }
+            }
+            true
+        });
+        records.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let total_candidates = records.len() as u32;
+        records.truncate(req.limit as usize);
+
+        Ok(RecallRawQueryResponse {
+            records,
+            total_candidates,
+        })
     }
 
     // ─── CMP Encode Operations ───────────────────────────────────────
@@ -1722,6 +2655,237 @@ impl CerememoryEngine {
 
     // ─── CMP Lifecycle Operations ────────────────────────────────────
 
+    /// lifecycle.dream_tick — summarize unprocessed raw journal entries into episodic summaries.
+    pub async fn lifecycle_dream_tick(
+        &self,
+        req: DreamTickRequest,
+    ) -> Result<DreamTickResponse, CerememoryError> {
+        let secrecy_levels = req.secrecy_levels.as_deref();
+        let session_filter = req
+            .session_id
+            .as_ref()
+            .map(|session_id| session_id.trim())
+            .filter(|session_id| !session_id.is_empty())
+            .map(str::to_string);
+
+        let raw_records = self.raw_journal.get_all().await?;
+        let mut candidate_records = Vec::new();
+
+        for record in raw_records {
+            if record.suppressed || Self::raw_record_processed(&record) {
+                continue;
+            }
+            if !Self::raw_query_allowed_visibility(
+                &record,
+                req.include_private_scratch,
+                req.include_sealed,
+            ) {
+                continue;
+            }
+            if !Self::raw_query_allowed_secrecy(&record, secrecy_levels) {
+                continue;
+            }
+            if let Some(ref session_id) = session_filter {
+                if &record.session_id != session_id {
+                    continue;
+                }
+            }
+            candidate_records.push(record);
+        }
+
+        let mut groups_processed = 0u32;
+        let mut raw_records_processed = 0u32;
+        let mut episodic_summaries_created = 0u32;
+        let mut semantic_nodes_created = 0u32;
+        let max_groups = req.max_groups as usize;
+
+        for group in Self::infer_dream_groups(candidate_records)
+            .into_iter()
+            .take(max_groups)
+        {
+            if group.records.is_empty() {
+                continue;
+            }
+
+            groups_processed += 1;
+            raw_records_processed += group.records.len() as u32;
+
+            if req.dry_run {
+                episodic_summaries_created += 1;
+                continue;
+            }
+
+            let session_id = group.session_id.clone();
+            let (texts, summary_stats) = Self::prepare_dream_summary_inputs(&group.records);
+
+            let summary_text = if texts.is_empty() {
+                let redacted_total = summary_stats["redacted_total"].as_u64().unwrap_or(0);
+                format!(
+                    "Dream summary for session {}: {} raw record(s) preserved. {} redacted from summary.",
+                    session_id,
+                    group.records.len(),
+                    redacted_total
+                )
+            } else {
+                self.summarize_dream_group(
+                    &session_id,
+                    group.topic_hint.as_deref(),
+                    &texts,
+                    &summary_stats,
+                )
+                .await
+            };
+
+            let dreamed_at = Utc::now();
+            let mut summary_record =
+                MemoryRecord::new_text(StoreType::Episodic, summary_text.clone());
+            summary_record.content.summary = Some(if summary_text.len() > 160 {
+                format!("{}...", truncate_str(&summary_text, 160))
+            } else {
+                summary_text.clone()
+            });
+            summary_record.metadata = Self::build_dream_summary_metadata(
+                &session_id,
+                group.raw_topic_id.as_deref(),
+                group.topic_hint.as_deref(),
+                group.inferred_topic,
+                &group.records,
+                dreamed_at,
+                summary_stats.clone(),
+            );
+
+            let promote_semantic = req.promote_semantic
+                && Self::should_promote_dream_group(
+                    group.raw_topic_id.as_deref(),
+                    group.topic_hint.as_deref(),
+                    &summary_stats,
+                );
+            let semantic_record = if promote_semantic {
+                let mut semantic_record =
+                    MemoryRecord::new_text(StoreType::Semantic, summary_text.clone());
+                semantic_record.content.summary = summary_record.content.summary.clone();
+                semantic_record.metadata = Self::build_dream_semantic_metadata(
+                    &session_id,
+                    group.raw_topic_id.as_deref(),
+                    group.topic_hint.as_deref(),
+                    group.inferred_topic,
+                    &group.records,
+                    summary_record.id,
+                    dreamed_at,
+                    summary_stats.clone(),
+                );
+                Some(semantic_record)
+            } else {
+                None
+            };
+
+            if let Some(semantic_record) = &semantic_record {
+                let assoc = Association {
+                    target_id: semantic_record.id,
+                    association_type: AssociationType::Semantic,
+                    weight: 1.0,
+                    created_at: dreamed_at,
+                    last_co_activation: dreamed_at,
+                };
+                summary_record.associations.push(assoc);
+                Self::attach_summary_semantic_link(&mut summary_record, semantic_record.id);
+            }
+
+            let summary_id = summary_record.id;
+            dispatch_store!(self, StoreType::Episodic, store(summary_record.clone()))?;
+            self.coordinator
+                .register(
+                    summary_record.id,
+                    StoreType::Episodic,
+                    summary_record.associations.clone(),
+                )
+                .await;
+            if let Err(e) = self.index_record(&summary_record) {
+                warn!(error = %e, record_id = %summary_record.id, "Failed to index dream summary");
+            }
+
+            let semantic_id = if let Some(mut semantic_record) = semantic_record {
+                semantic_record.associations.push(Association {
+                    target_id: summary_id,
+                    association_type: AssociationType::Semantic,
+                    weight: 1.0,
+                    created_at: dreamed_at,
+                    last_co_activation: dreamed_at,
+                });
+                let semantic_id = semantic_record.id;
+                if let Err(err) =
+                    dispatch_store!(self, StoreType::Semantic, store(semantic_record.clone()))
+                {
+                    if dispatch_store!(self, StoreType::Episodic, delete(&summary_id))? {
+                        self.cleanup_deleted_records(&[(summary_id, StoreType::Episodic)])
+                            .await?;
+                    }
+                    return Err(err);
+                }
+                self.coordinator
+                    .register(
+                        semantic_record.id,
+                        StoreType::Semantic,
+                        semantic_record.associations.clone(),
+                    )
+                    .await;
+                if let Err(e) = self.index_record(&semantic_record) {
+                    warn!(error = %e, record_id = %semantic_record.id, "Failed to index dream semantic summary");
+                }
+                semantic_nodes_created += 1;
+                Some(semantic_id)
+            } else {
+                None
+            };
+
+            let original_group = group.records.clone();
+            let mut update_failed: Option<CerememoryError> = None;
+            let mut updated_group = group.records.clone();
+            for raw_record in &mut updated_group {
+                Self::mark_raw_record_dream_processed(
+                    raw_record,
+                    summary_id,
+                    semantic_id,
+                    dreamed_at,
+                );
+                if let Err(err) = self.raw_journal.update(raw_record.clone()).await {
+                    update_failed = Some(err);
+                    break;
+                }
+            }
+
+            if let Some(err) = update_failed {
+                for original in &original_group {
+                    let _ = self.raw_journal.update(original.clone()).await;
+                }
+                let mut cleanup_targets = Vec::new();
+                if dispatch_store!(self, StoreType::Episodic, delete(&summary_id))? {
+                    cleanup_targets.push((summary_id, StoreType::Episodic));
+                }
+                if let Some(semantic_id) = semantic_id {
+                    if dispatch_store!(self, StoreType::Semantic, delete(&semantic_id))? {
+                        cleanup_targets.push((semantic_id, StoreType::Semantic));
+                    }
+                }
+                if !cleanup_targets.is_empty() {
+                    self.cleanup_deleted_records(&cleanup_targets).await?;
+                }
+                return Err(CerememoryError::Internal(format!(
+                    "Dream tick failed while updating raw journal state: {err}"
+                )));
+            }
+
+            episodic_summaries_created += 1;
+        }
+
+        Ok(DreamTickResponse {
+            groups_processed,
+            raw_records_processed,
+            episodic_summaries_created,
+            semantic_nodes_created,
+        })
+    }
+
     /// lifecycle.consolidate — Smart Consolidation (CMP Spec §5.1).
     ///
     /// Phase 4 enhancements:
@@ -1737,6 +2901,7 @@ impl CerememoryEngine {
         let ids = self.episodic.list_ids().await?;
         let mut processed = 0u32;
         let mut migrated = 0u32;
+        let mut semantic_created = 0u32;
         let mut compressed = 0u32;
         let mut pruned = 0u32;
 
@@ -1891,6 +3056,7 @@ impl CerememoryEngine {
             }
 
             dispatch_store!(self, StoreType::Semantic, store(semantic_record.clone()))?;
+            semantic_created += 1;
             self.coordinator
                 .register(
                     semantic_record.id,
@@ -1923,7 +3089,7 @@ impl CerememoryEngine {
 
         info!(
             processed,
-            migrated, compressed, pruned, "Smart consolidation completed"
+            migrated, semantic_created, compressed, pruned, "Smart consolidation completed"
         );
 
         Ok(ConsolidateResponse {
@@ -1931,7 +3097,7 @@ impl CerememoryEngine {
             records_migrated: migrated,
             records_compressed: compressed,
             records_pruned: pruned,
-            semantic_nodes_created: migrated,
+            semantic_nodes_created: semantic_created,
         })
     }
 
@@ -2090,9 +3256,19 @@ impl CerememoryEngine {
         &self,
         req: ExportRequest,
     ) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
+        match Self::normalize_export_format(&req.format)? {
+            "cma" => {}
+            _ => unreachable!("normalize_export_format only returns supported formats"),
+        }
+
         let records = self
             .collect_records_for_stores(req.stores.as_deref())
             .await?;
+        let raw_records = if req.include_raw_journal {
+            self.collect_all_raw_journal_records().await?
+        } else {
+            Vec::new()
+        };
 
         let encryption_key = if req.encrypt {
             let key_str = req.encryption_key.as_deref().ok_or_else(|| {
@@ -2105,86 +3281,110 @@ impl CerememoryEngine {
             None
         };
 
-        cerememory_archive::export_filtered(
-            &records,
-            req.stores.as_deref(),
-            encryption_key.as_ref(),
-        )
+        if req.include_raw_journal {
+            cerememory_archive::export_bundle_filtered(
+                &records,
+                &raw_records,
+                req.stores.as_deref(),
+                encryption_key.as_ref(),
+            )
+        } else {
+            cerememory_archive::export_filtered(
+                &records,
+                req.stores.as_deref(),
+                encryption_key.as_ref(),
+            )
+        }
     }
 
     /// lifecycle.import — Import records from a CMA archive with optional
     /// decryption and conflict resolution.
     pub async fn lifecycle_import(&self, req: ImportRequest) -> Result<u32, CerememoryError> {
-        if req.strategy == ImportStrategy::Replace {
-            return Err(CerememoryError::Validation(
-                "ImportStrategy::Replace is not yet supported; use Merge".to_string(),
-            ));
-        }
-
         let data = req.archive_data.ok_or_else(|| {
-            CerememoryError::ImportConflict("Import requires archive_data".to_string())
+            CerememoryError::Validation("Import requires archive_data".to_string())
         })?;
 
         let decryption_key = req
             .decryption_key
             .as_deref()
             .map(cerememory_archive::crypto::derive_key);
-        let records = cerememory_archive::import_records_with_key(&data, decryption_key.as_ref())?;
-
-        let conflict_resolution = req.conflict_resolution;
-        let mut imported = 0u32;
-
-        for record in records {
-            let store_type = record.store;
-            let mut replaced_cross_store: Option<StoreType> = None;
-
-            // Check for ID conflicts
-            if let Some((existing, existing_store)) = self.get_store_record(&record.id).await? {
-                match conflict_resolution {
-                    ConflictResolution::KeepExisting => continue,
-                    ConflictResolution::KeepImported => {
-                        if existing_store != store_type {
-                            replaced_cross_store = Some(existing_store);
-                        }
-                    }
-                    ConflictResolution::KeepNewer => {
-                        if record.updated_at <= existing.updated_at {
-                            continue;
-                        }
-                        if existing_store != store_type {
-                            replaced_cross_store = Some(existing_store);
-                        }
-                    }
-                }
+        let bundle = cerememory_archive::import_bundle_with_key(&data, decryption_key.as_ref())?;
+        let imported = match req.strategy {
+            ImportStrategy::Merge => {
+                let imported_curated = self
+                    .import_records_with_conflict_resolution(
+                        bundle.records,
+                        req.conflict_resolution,
+                    )
+                    .await?;
+                let imported_raw = self
+                    .import_raw_records_with_conflict_resolution(
+                        bundle.raw_records,
+                        req.conflict_resolution,
+                    )
+                    .await?;
+                imported_curated + imported_raw
             }
+            ImportStrategy::Replace => {
+                let snapshot = self.collect_records_for_stores(None).await?;
+                let raw_snapshot = self.collect_all_raw_journal_records().await?;
 
-            dispatch_store!(self, store_type, store(record.clone()))?;
-            if let Some(existing_store) = replaced_cross_store {
-                if !dispatch_store!(self, existing_store, delete(&record.id))? {
-                    if let Err(e) = dispatch_store!(self, store_type, delete(&record.id)) {
-                        warn!(
-                            record_id = %record.id,
-                            store = %store_type,
-                            error = %e,
-                            "Failed to clean up newly stored record during import conflict rollback"
-                        );
+                if let Err(err) = self.clear_all_records().await {
+                    if let Err(restore_err) = self.restore_records(&snapshot).await {
+                        return Err(CerememoryError::ImportConflict(format!(
+                            "Replace import failed while clearing existing records: {err}. Rollback failed: {restore_err}"
+                        )));
+                    }
+                    return Err(err);
+                }
+                if let Err(err) = self.clear_raw_journal().await {
+                    let _ = self.restore_records(&snapshot).await;
+                    if let Err(restore_err) = self.restore_raw_journal(&raw_snapshot).await {
+                        return Err(CerememoryError::ImportConflict(format!(
+                            "Replace import failed while clearing raw journal: {err}. Rollback failed: {restore_err}"
+                        )));
                     }
                     return Err(CerememoryError::ImportConflict(format!(
-                        "Failed to replace cross-store record {} from {} to {}",
-                        record.id, existing_store, store_type
+                        "Replace import failed while clearing raw journal: {err}"
                     )));
                 }
-            }
-            self.coordinator
-                .register(record.id, store_type, record.associations.clone())
-                .await;
-            if let Err(e) = self.index_record(&record) {
-                warn!(error = %e, record_id = %record.id, "Failed to index imported record");
-            }
-            imported += 1;
-        }
 
-        info!(imported, "Import completed");
+                match async {
+                    let imported_curated = self
+                        .import_records_with_conflict_resolution(
+                            bundle.records,
+                            req.conflict_resolution,
+                        )
+                        .await?;
+                    let imported_raw = self
+                        .import_raw_records_with_conflict_resolution(
+                            bundle.raw_records,
+                            req.conflict_resolution,
+                        )
+                        .await?;
+                    Ok::<u32, CerememoryError>(imported_curated + imported_raw)
+                }
+                .await
+                {
+                    Ok(imported) => imported,
+                    Err(err) => {
+                        if let Err(restore_err) = self.restore_records(&snapshot).await {
+                            return Err(CerememoryError::ImportConflict(format!(
+                                "Replace import failed: {err}. Rollback failed: {restore_err}"
+                            )));
+                        }
+                        if let Err(restore_err) = self.restore_raw_journal(&raw_snapshot).await {
+                            return Err(CerememoryError::ImportConflict(format!(
+                                "Replace import failed: {err}. Raw rollback failed: {restore_err}"
+                            )));
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+        };
+
+        info!(imported, strategy = ?req.strategy, "Import completed");
         Ok(imported)
     }
 
@@ -2253,6 +3453,9 @@ impl CerememoryEngine {
         let mut avg_fidelity_by_store = HashMap::new();
         let mut total_records = 0u32;
         let mut total_fidelity = 0.0f64;
+        let mut dream_episodic_summaries = 0u32;
+        let mut dream_semantic_nodes = 0u32;
+        let mut last_dream_tick_at: Option<chrono::DateTime<Utc>> = None;
 
         for store_type in ALL_STORES {
             let count = dispatch_store!(self, store_type, count())? as u32;
@@ -2265,10 +3468,46 @@ impl CerememoryEngine {
                 for record in &records {
                     store_fidelity += record.fidelity.score;
                     total_fidelity += record.fidelity.score;
+
+                    if let Some(kind) = record
+                        .metadata
+                        .get("_dream")
+                        .and_then(|value| value.get("kind"))
+                        .and_then(|value| value.as_str())
+                    {
+                        match kind {
+                            "episodic_summary" if store_type == StoreType::Episodic => {
+                                dream_episodic_summaries += 1;
+                            }
+                            "semantic_summary" if store_type == StoreType::Semantic => {
+                                dream_semantic_nodes += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(timestamp) = record
+                        .metadata
+                        .get("_origin")
+                        .and_then(|value| value.get("dream_tick_at"))
+                        .and_then(|value| value.as_str())
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&Utc))
+                    {
+                        if last_dream_tick_at.is_none_or(|current| timestamp > current) {
+                            last_dream_tick_at = Some(timestamp);
+                        }
+                    }
                 }
                 avg_fidelity_by_store.insert(store_type, store_fidelity / count as f64);
             }
         }
+
+        let raw_journal_all = self.raw_journal.get_all().await?;
+        let raw_journal_records = raw_journal_all.len() as u32;
+        let raw_journal_pending_dream = raw_journal_all
+            .iter()
+            .filter(|record| !Self::raw_record_processed(record))
+            .count() as u32;
 
         let avg_fidelity = if total_records > 0 {
             total_fidelity / total_records as f64
@@ -2285,8 +3524,14 @@ impl CerememoryEngine {
             oldest_record: None,
             newest_record: None,
             total_recall_count: 0,
+            raw_journal_records,
+            raw_journal_pending_dream,
+            dream_episodic_summaries,
+            dream_semantic_nodes,
+            last_dream_tick_at,
             evolution_metrics: Some(self.evolution.get_metrics()),
             background_decay_enabled: self.is_background_decay_enabled().await,
+            background_dream_enabled: self.is_background_dream_enabled().await,
         })
     }
 
@@ -2453,7 +3698,7 @@ fn degrade_text(text: &str, fidelity: f64) -> String {
 
     let mut result = Vec::with_capacity(words.len());
     for (i, word) in words.iter().enumerate() {
-        if i % step == 0 && fidelity < 0.5 {
+        if i % step == 0 {
             result.push("...");
         } else {
             result.push(word);
@@ -2509,6 +3754,461 @@ mod tests {
             metadata: None,
             associations: None,
         }
+    }
+
+    fn raw_text_record(session_id: &str, text: &str) -> RawJournalRecord {
+        RawJournalRecord::new_text(
+            session_id,
+            RawSource::Conversation,
+            RawSpeaker::User,
+            RawVisibility::Normal,
+            SecrecyLevel::Public,
+            text,
+        )
+    }
+
+    fn raw_text_store_req(
+        session_id: &str,
+        text: &str,
+        visibility: RawVisibility,
+        secrecy_level: SecrecyLevel,
+    ) -> EncodeStoreRawRequest {
+        EncodeStoreRawRequest {
+            header: None,
+            session_id: session_id.to_string(),
+            turn_id: None,
+            topic_id: None,
+            source: RawSource::Conversation,
+            speaker: RawSpeaker::User,
+            visibility,
+            secrecy_level,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: text.as_bytes().to_vec(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            metadata: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_journal_append_and_get_roundtrip() {
+        let engine = make_engine().await;
+        let record = raw_text_record("sess-raw-1", "hello from raw journal");
+        let id = record.id;
+
+        let stored_id = engine.append_raw_journal(record).await.unwrap();
+        assert_eq!(stored_id, id);
+
+        let restored = engine.get_raw_journal_record(&id).await.unwrap().unwrap();
+        assert_eq!(restored.session_id, "sess-raw-1");
+        assert_eq!(restored.text_content(), Some("hello from raw journal"));
+    }
+
+    #[tokio::test]
+    async fn raw_journal_query_session_filters_records() {
+        let engine = make_engine().await;
+        engine
+            .append_raw_journal(raw_text_record("sess-a", "first"))
+            .await
+            .unwrap();
+        engine
+            .append_raw_journal(raw_text_record("sess-b", "second"))
+            .await
+            .unwrap();
+        engine
+            .append_raw_journal(raw_text_record("sess-a", "third"))
+            .await
+            .unwrap();
+
+        let records = engine.query_raw_journal_by_session("sess-a").await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| record.session_id == "sess-a"));
+    }
+
+    #[tokio::test]
+    async fn raw_journal_count_tracks_records() {
+        let engine = make_engine().await;
+        assert_eq!(engine.raw_journal_count().await.unwrap(), 0);
+
+        engine
+            .append_raw_journal(raw_text_record("sess-a", "first"))
+            .await
+            .unwrap();
+        engine
+            .append_raw_journal(raw_text_record("sess-a", "second"))
+            .await
+            .unwrap();
+
+        assert_eq!(engine.raw_journal_count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn encode_store_raw_and_recall_raw_roundtrip() {
+        let engine = make_engine().await;
+        let response = engine
+            .encode_store_raw(raw_text_store_req(
+                "sess-raw",
+                "forensic memory",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap();
+
+        let recalled = engine
+            .recall_raw_query(RecallRawQueryRequest {
+                header: None,
+                session_id: Some("sess-raw".to_string()),
+                query: Some("forensic".to_string()),
+                temporal: None,
+                limit: 10,
+                include_private_scratch: false,
+                include_sealed: false,
+                secrecy_levels: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(recalled.total_candidates, 1);
+        assert_eq!(recalled.records.len(), 1);
+        assert_eq!(recalled.records[0].id, response.record_id);
+        assert_eq!(recalled.records[0].text_content(), Some("forensic memory"));
+    }
+
+    #[tokio::test]
+    async fn recall_raw_defaults_exclude_private_scratch_and_secret() {
+        let engine = make_engine().await;
+        engine
+            .encode_batch_store_raw(EncodeBatchStoreRawRequest {
+                header: None,
+                records: vec![
+                    raw_text_store_req(
+                        "sess-secure",
+                        "public normal",
+                        RawVisibility::Normal,
+                        SecrecyLevel::Public,
+                    ),
+                    raw_text_store_req(
+                        "sess-secure",
+                        "private scratch",
+                        RawVisibility::PrivateScratch,
+                        SecrecyLevel::Sensitive,
+                    ),
+                    raw_text_store_req(
+                        "sess-secure",
+                        "sealed secret",
+                        RawVisibility::Sealed,
+                        SecrecyLevel::Secret,
+                    ),
+                ],
+            })
+            .await
+            .unwrap();
+
+        let recalled = engine
+            .recall_raw_query(RecallRawQueryRequest {
+                header: None,
+                session_id: Some("sess-secure".to_string()),
+                query: None,
+                temporal: None,
+                limit: 10,
+                include_private_scratch: false,
+                include_sealed: false,
+                secrecy_levels: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(recalled.total_candidates, 1);
+        assert_eq!(recalled.records[0].text_content(), Some("public normal"));
+    }
+
+    #[tokio::test]
+    async fn raw_journal_does_not_leak_into_normal_recall() {
+        let engine = make_engine().await;
+        engine
+            .encode_store_raw(raw_text_store_req(
+                "sess-leak",
+                "hidden raw only",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap();
+
+        let response = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("hidden raw".to_string()),
+                    ..Default::default()
+                },
+                stores: None,
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.total_candidates, 0);
+        assert!(response.memories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dream_tick_creates_episodic_summary_and_marks_raw_processed() {
+        let engine = make_engine().await;
+        let first = engine
+            .encode_store_raw(raw_text_store_req(
+                "sess-dream",
+                "Discussed API timeout policy",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap();
+        let second = engine
+            .encode_store_raw(raw_text_store_req(
+                "sess-dream",
+                "Decided to keep retries idempotent-only",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap();
+
+        let resp = engine
+            .lifecycle_dream_tick(DreamTickRequest {
+                header: None,
+                session_id: Some("sess-dream".to_string()),
+                dry_run: false,
+                max_groups: 10,
+                include_private_scratch: false,
+                include_sealed: false,
+                promote_semantic: true,
+                secrecy_levels: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.groups_processed, 1);
+        assert_eq!(resp.raw_records_processed, 2);
+        assert_eq!(resp.episodic_summaries_created, 1);
+        assert_eq!(resp.semantic_nodes_created, 1);
+
+        let summaries = engine.episodic.get_all().await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        let semantic_records = engine.semantic.get_all().await.unwrap();
+        assert_eq!(semantic_records.len(), 1);
+        let semantic = &semantic_records[0];
+        assert_eq!(summary.store, StoreType::Episodic);
+        assert_eq!(summary.metadata["_origin"]["raw_session_id"], "sess-dream");
+        assert_eq!(summary.metadata["_origin"]["raw_record_count"], 2);
+        assert_eq!(
+            summary.metadata["_origin"]["raw_record_ids"][0],
+            first.record_id.to_string()
+        );
+        assert_eq!(
+            summary.metadata["_origin"]["raw_record_ids"][1],
+            second.record_id.to_string()
+        );
+
+        let raw_one = engine
+            .get_raw_journal_record(&first.record_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let raw_two = engine
+            .get_raw_journal_record(&second.record_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw_one.derived_memory_ids, vec![summary.id, semantic.id]);
+        assert_eq!(raw_two.derived_memory_ids, vec![summary.id, semantic.id]);
+        assert_eq!(
+            raw_one.metadata["_dream"]["last_summary_id"],
+            serde_json::Value::String(summary.id.to_string())
+        );
+        assert!(raw_one.metadata["_dream"]["processed_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn dream_tick_is_idempotent_for_processed_raw_records() {
+        let engine = make_engine().await;
+        engine
+            .encode_store_raw(raw_text_store_req(
+                "sess-dream-repeat",
+                "First raw note",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap();
+
+        let first = engine
+            .lifecycle_dream_tick(DreamTickRequest {
+                header: None,
+                session_id: Some("sess-dream-repeat".to_string()),
+                dry_run: false,
+                max_groups: 10,
+                include_private_scratch: false,
+                include_sealed: false,
+                promote_semantic: true,
+                secrecy_levels: None,
+            })
+            .await
+            .unwrap();
+        let second = engine
+            .lifecycle_dream_tick(DreamTickRequest {
+                header: None,
+                session_id: Some("sess-dream-repeat".to_string()),
+                dry_run: false,
+                max_groups: 10,
+                include_private_scratch: false,
+                include_sealed: false,
+                promote_semantic: true,
+                secrecy_levels: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(first.episodic_summaries_created, 1);
+        assert_eq!(first.semantic_nodes_created, 0);
+        assert_eq!(second.episodic_summaries_created, 0);
+        assert_eq!(second.semantic_nodes_created, 0);
+        assert_eq!(engine.episodic.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn dream_tick_redacts_sealed_secret_and_private_scratch_content() {
+        let engine = make_engine().await;
+        engine
+            .encode_batch_store_raw(EncodeBatchStoreRawRequest {
+                header: None,
+                records: vec![
+                    raw_text_store_req(
+                        "sess-dream-redact",
+                        "Visible public note",
+                        RawVisibility::Normal,
+                        SecrecyLevel::Public,
+                    ),
+                    raw_text_store_req(
+                        "sess-dream-redact",
+                        "Private scratch hypothesis",
+                        RawVisibility::PrivateScratch,
+                        SecrecyLevel::Sensitive,
+                    ),
+                    raw_text_store_req(
+                        "sess-dream-redact",
+                        "Sealed customer secret",
+                        RawVisibility::Sealed,
+                        SecrecyLevel::Secret,
+                    ),
+                ],
+            })
+            .await
+            .unwrap();
+
+        let resp = engine
+            .lifecycle_dream_tick(DreamTickRequest {
+                header: None,
+                session_id: Some("sess-dream-redact".to_string()),
+                dry_run: false,
+                max_groups: 10,
+                include_private_scratch: true,
+                include_sealed: true,
+                promote_semantic: true,
+                secrecy_levels: Some(vec![
+                    SecrecyLevel::Public,
+                    SecrecyLevel::Sensitive,
+                    SecrecyLevel::Secret,
+                ]),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.groups_processed, 1);
+        assert_eq!(resp.semantic_nodes_created, 0);
+        let summaries = engine.episodic.get_all().await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+
+        let summary_text = summary.text_content().unwrap_or("");
+        assert!(summary_text.contains("Visible public note"));
+        assert!(!summary_text.contains("Private scratch hypothesis"));
+        assert!(!summary_text.contains("Sealed customer secret"));
+        assert!(summary_text.contains("Redacted raw records: 2"));
+
+        assert_eq!(
+            summary.metadata["_dream"]["summary_stats"]["normal_records"],
+            1
+        );
+        assert_eq!(
+            summary.metadata["_dream"]["summary_stats"]["private_scratch_redacted"],
+            1
+        );
+        assert_eq!(
+            summary.metadata["_dream"]["summary_stats"]["secret_redacted"],
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn dream_tick_infers_multiple_topics_with_time_gap_and_lexical_shift() {
+        let engine = make_engine().await;
+        let base = Utc::now() - chrono::Duration::hours(2);
+
+        let mut first = raw_text_record("sess-topic-infer", "API timeout retries idempotent only");
+        first.created_at = base;
+        first.updated_at = base;
+
+        let mut second = raw_text_record("sess-topic-infer", "Backoff budget and timeout policy");
+        second.created_at = base + chrono::Duration::minutes(5);
+        second.updated_at = second.created_at;
+
+        let mut third = raw_text_record("sess-topic-infer", "Landing page hero typography palette");
+        third.created_at = base + chrono::Duration::minutes(25);
+        third.updated_at = third.created_at;
+
+        engine.append_raw_journal(first).await.unwrap();
+        engine.append_raw_journal(second).await.unwrap();
+        engine.append_raw_journal(third).await.unwrap();
+
+        let resp = engine
+            .lifecycle_dream_tick(DreamTickRequest {
+                header: None,
+                session_id: Some("sess-topic-infer".to_string()),
+                dry_run: false,
+                max_groups: 10,
+                include_private_scratch: false,
+                include_sealed: false,
+                promote_semantic: true,
+                secrecy_levels: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.groups_processed, 2);
+        assert_eq!(resp.episodic_summaries_created, 2);
+        assert_eq!(resp.semantic_nodes_created, 1);
+
+        let summaries = engine.episodic.get_all().await.unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries.iter().all(|summary| {
+            summary.metadata["_origin"]["raw_topic_inferred"] == serde_json::Value::Bool(true)
+        }));
+        assert!(summaries
+            .iter()
+            .all(|summary| { summary.metadata["_origin"]["raw_topic_hint"].is_string() }));
     }
 
     #[tokio::test]
@@ -3050,12 +4750,24 @@ mod tests {
             .encode_store(text_store_req("Stats test", Some(StoreType::Episodic)))
             .await
             .unwrap();
+        engine
+            .encode_store_raw(raw_text_store_req(
+                "sess-stats",
+                "Raw stats note",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap();
 
         let stats = engine.introspect_stats().await.unwrap();
         assert_eq!(stats.total_records, 1);
         assert_eq!(stats.records_by_store[&StoreType::Episodic], 1);
         assert!((stats.avg_fidelity - 1.0).abs() < f64::EPSILON);
         assert!(!stats.background_decay_enabled);
+        assert!(!stats.background_dream_enabled);
+        assert_eq!(stats.raw_journal_records, 1);
+        assert_eq!(stats.raw_journal_pending_dream, 1);
     }
 
     #[tokio::test]
@@ -3287,6 +4999,40 @@ mod tests {
         let engine = Arc::new(make_engine().await);
         engine.start_background_decay(); // should be a no-op
         assert!(!engine.is_background_decay_enabled().await);
+    }
+
+    #[tokio::test]
+    async fn background_dream_runs() {
+        let config = EngineConfig {
+            background_dream_interval_secs: Some(1),
+            ..EngineConfig::default()
+        };
+        let engine = Arc::new(CerememoryEngine::new(config).unwrap());
+        engine
+            .encode_store_raw(raw_text_store_req(
+                "sess-bg-dream",
+                "Background dream me",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap();
+
+        engine.start_background_dream();
+        assert!(engine.is_background_dream_enabled().await);
+
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+        engine.stop_background_dream().await;
+        assert!(!engine.is_background_dream_enabled().await);
+        assert_eq!(engine.episodic.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn background_dream_disabled_by_default() {
+        let engine = Arc::new(make_engine().await);
+        engine.start_background_dream();
+        assert!(!engine.is_background_dream_enabled().await);
     }
 
     #[tokio::test]
@@ -3802,6 +5548,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: None,
+                include_raw_journal: false,
                 encrypt: false,
                 encryption_key: None,
             })
@@ -3810,6 +5557,53 @@ mod tests {
 
         assert_eq!(resp.record_count, 1);
         assert!(!bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_export_accepts_jsonl_alias() {
+        let engine = make_engine().await;
+
+        engine
+            .encode_store(text_store_req("Export me too", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        let (bytes, resp) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "jsonl".to_string(),
+                stores: None,
+                include_raw_journal: false,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.record_count, 1);
+        let records = cerememory_archive::import_records(&bytes).unwrap();
+        assert_eq!(records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_export_rejects_unsupported_format() {
+        let engine = make_engine().await;
+
+        let result = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "zip".to_string(),
+                stores: None,
+                include_raw_journal: false,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(CerememoryError::Validation(msg)) if msg.contains("Valid options: cma, jsonl")
+        ));
     }
 
     #[tokio::test]
@@ -3830,6 +5624,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: Some(vec![StoreType::Episodic]),
+                include_raw_journal: false,
                 encrypt: false,
                 encryption_key: None,
             })
@@ -3853,6 +5648,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: Some(vec![StoreType::Episodic, StoreType::Episodic]),
+                include_raw_journal: false,
                 encrypt: false,
                 encryption_key: None,
             })
@@ -3880,6 +5676,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: None,
+                include_raw_journal: false,
                 encrypt: true,
                 encryption_key: Some("my-passphrase".to_string()),
             })
@@ -3891,6 +5688,54 @@ mod tests {
         // Verify the encrypted data cannot be imported without the key
         let result = engine.import_records(&encrypted_bytes).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_export_import_with_raw_journal_roundtrip() {
+        let engine = make_engine().await;
+        engine
+            .encode_store(text_store_req("Curated memory", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+        engine
+            .encode_store_raw(raw_text_store_req(
+                "sess-export-raw",
+                "Raw transcript note",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap();
+
+        let (bytes, resp) = engine
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                include_raw_journal: true,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.record_count, 2);
+
+        let target = make_engine().await;
+        let imported = target
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "bundle-roundtrip".to_string(),
+                strategy: ImportStrategy::Merge,
+                conflict_resolution: ConflictResolution::KeepExisting,
+                decryption_key: None,
+                archive_data: Some(bytes),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 2);
+        assert_eq!(target.episodic.count().await.unwrap(), 1);
+        assert_eq!(target.raw_journal_count().await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -3908,6 +5753,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: None,
+                include_raw_journal: false,
                 encrypt: false,
                 encryption_key: None,
             })
@@ -3949,6 +5795,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: None,
+                include_raw_journal: false,
                 encrypt: false,
                 encryption_key: None,
             })
@@ -3998,6 +5845,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: None,
+                include_raw_journal: false,
                 encrypt: false,
                 encryption_key: None,
             })
@@ -4039,6 +5887,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: None,
+                include_raw_journal: false,
                 encrypt: false,
                 encryption_key: None,
             })
@@ -4109,6 +5958,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: None,
+                include_raw_journal: false,
                 encrypt: true,
                 encryption_key: Some("pass123".to_string()),
             })
@@ -4166,6 +6016,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: None,
+                include_raw_journal: false,
                 encrypt: true,
                 encryption_key: None,
             })
@@ -4196,6 +6047,7 @@ mod tests {
                 header: None,
                 format: "cma".to_string(),
                 stores: None,
+                include_raw_journal: false,
                 encrypt: false,
                 encryption_key: None,
             })
@@ -4230,23 +6082,111 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_strategy_replace_rejected() {
+    async fn import_strategy_replace_replaces_existing_dataset() {
+        let source = make_engine().await;
+
+        let imported_episode = source
+            .encode_store(text_store_req(
+                "Imported episodic",
+                Some(StoreType::Episodic),
+            ))
+            .await;
+        let imported_episode_id = imported_episode.unwrap().record_id;
+        let imported_semantic = source
+            .encode_store(text_store_req(
+                "Imported semantic",
+                Some(StoreType::Semantic),
+            ))
+            .await
+            .unwrap()
+            .record_id;
+
+        let (archive_data, _) = source
+            .lifecycle_export(ExportRequest {
+                header: None,
+                format: "cma".to_string(),
+                stores: None,
+                include_raw_journal: false,
+                encrypt: false,
+                encryption_key: None,
+            })
+            .await
+            .unwrap();
+
+        let target = make_engine().await;
+        let old_id = target
+            .encode_store(text_store_req("Old episodic", Some(StoreType::Episodic)))
+            .await
+            .unwrap()
+            .record_id;
+        target
+            .encode_store(text_store_req("Old working", Some(StoreType::Working)))
+            .await
+            .unwrap();
+
+        let imported = target
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "replace-test".to_string(),
+                strategy: ImportStrategy::Replace,
+                conflict_resolution: ConflictResolution::KeepNewer,
+                decryption_key: None,
+                archive_data: Some(archive_data),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 2);
+
+        let stats = target.introspect_stats().await.unwrap();
+        assert_eq!(stats.total_records, 2);
+        assert_eq!(stats.records_by_store[&StoreType::Episodic], 1);
+        assert_eq!(stats.records_by_store[&StoreType::Semantic], 1);
+        assert_eq!(
+            *stats
+                .records_by_store
+                .get(&StoreType::Working)
+                .unwrap_or(&0),
+            0
+        );
+
+        assert!(target.get_store_record(&old_id).await.unwrap().is_none());
+        assert!(target
+            .get_store_record(&imported_episode_id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(target
+            .get_store_record(&imported_semantic)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn import_strategy_replace_preserves_existing_data_on_invalid_archive() {
         let engine = make_engine().await;
+        let old_id = engine
+            .encode_store(text_store_req("Keep me", Some(StoreType::Episodic)))
+            .await
+            .unwrap()
+            .record_id;
 
         let result = engine
             .lifecycle_import(ImportRequest {
                 header: None,
-                archive_id: "test".to_string(),
+                archive_id: "invalid-replace".to_string(),
                 strategy: ImportStrategy::Replace,
                 conflict_resolution: ConflictResolution::KeepNewer,
                 decryption_key: None,
-                archive_data: Some(vec![]),
+                archive_data: Some(b"not-a-valid-cma-archive".to_vec()),
             })
             .await;
 
         assert!(result.is_err());
-        let err = format!("{:?}", result.unwrap_err());
-        assert!(err.contains("Replace"));
+        let stats = engine.introspect_stats().await.unwrap();
+        assert_eq!(stats.total_records, 1);
+        assert!(engine.get_store_record(&old_id).await.unwrap().is_some());
     }
 
     // ─── recall.timeline tests ───────────────────────────────────────

@@ -743,6 +743,7 @@ async fn export_import_roundtrip() {
             header: None,
             format: "cma".to_string(),
             stores: None,
+            include_raw_journal: false,
             encrypt: false,
             encryption_key: None,
         })
@@ -798,6 +799,7 @@ async fn export_store_filter() {
             header: None,
             format: "cma".to_string(),
             stores: Some(vec![StoreType::Episodic]),
+            include_raw_journal: false,
             encrypt: false,
             encryption_key: None,
         })
@@ -861,6 +863,7 @@ async fn export_encrypted_import() {
             header: None,
             format: "cma".to_string(),
             stores: None,
+            include_raw_journal: false,
             encrypt: true,
             encryption_key: Some(passphrase.to_string()),
         })
@@ -904,6 +907,73 @@ async fn export_encrypted_import() {
     assert_eq!(imported, 2, "Should import 2 records with correct key");
 }
 
+// ─── 13b. Export/import roundtrip with raw journal ───────────────────
+
+#[tokio::test]
+async fn export_import_roundtrip_with_raw_journal() {
+    let engine = make_engine();
+
+    engine
+        .encode_store(text_req("Curated note", StoreType::Episodic))
+        .await
+        .unwrap();
+    engine
+        .encode_store_raw(EncodeStoreRawRequest {
+            header: None,
+            session_id: "sess-phase2-raw".to_string(),
+            turn_id: None,
+            topic_id: None,
+            source: RawSource::Conversation,
+            speaker: RawSpeaker::User,
+            visibility: RawVisibility::Normal,
+            secrecy_level: SecrecyLevel::Public,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: b"Raw note from transcript".to_vec(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let (archive_data, export_resp) = engine
+        .lifecycle_export(ExportRequest {
+            header: None,
+            format: "cma".to_string(),
+            stores: None,
+            include_raw_journal: true,
+            encrypt: false,
+            encryption_key: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(export_resp.record_count, 2);
+
+    let engine2 = make_engine();
+    let imported = engine2
+        .lifecycle_import(ImportRequest {
+            header: None,
+            archive_id: "raw-bundle-roundtrip".to_string(),
+            strategy: ImportStrategy::Merge,
+            conflict_resolution: ConflictResolution::KeepImported,
+            decryption_key: None,
+            archive_data: Some(archive_data),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(imported, 2);
+    let stats = engine2.introspect_stats().await.unwrap();
+    assert_eq!(stats.records_by_store[&StoreType::Episodic], 1);
+    assert_eq!(stats.raw_journal_records, 1);
+}
+
 // ─── 14. Import conflict resolution ────────────────────────────────
 
 #[tokio::test]
@@ -921,6 +991,7 @@ async fn import_conflict_resolution() {
             header: None,
             format: "cma".to_string(),
             stores: None,
+            include_raw_journal: false,
             encrypt: false,
             encryption_key: None,
         })

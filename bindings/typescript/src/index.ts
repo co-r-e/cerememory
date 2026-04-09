@@ -40,6 +40,10 @@ export type {
   AssociationType,
   RecallMode,
   ConsolidationStrategy,
+  RawSource,
+  RawSpeaker,
+  RawVisibility,
+  SecrecyLevel,
   TimeGranularity,
   CMPErrorCode,
 
@@ -50,6 +54,7 @@ export type {
   EmotionVector,
   Association,
   MemoryRecord,
+  RawJournalRecord,
 
   // Protocol header
   CMPHeader,
@@ -61,6 +66,10 @@ export type {
   EncodeStoreResponse,
   EncodeBatchRequest,
   EncodeBatchResponse,
+  EncodeStoreRawRequest,
+  EncodeStoreRawResponse,
+  EncodeBatchStoreRawRequest,
+  EncodeBatchStoreRawResponse,
   EncodeUpdateRequest,
 
   // Recall operations
@@ -81,15 +90,24 @@ export type {
   GraphNode,
   GraphEdge,
   RecallGraphResponse,
+  RecallRawQueryRequest,
+  RecallRawQueryResponse,
 
   // Lifecycle operations
   ConsolidateRequest,
   ConsolidateResponse,
+  DreamTickRequest,
+  DreamTickResponse,
   DecayTickRequest,
   DecayTickResponse,
   SetModeRequest,
   ForgetRequest,
   ForgetResponse,
+  ExportRequest,
+  ExportResponse,
+  ExportArchiveResponse,
+  ImportRequest,
+  ImportResponse,
 
   // Introspect operations
   ParameterAdjustment,

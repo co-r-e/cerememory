@@ -73,6 +73,14 @@ function resolveConfig(config: TransportConfig): ResolvedConfig {
     baseUrl = baseUrl.slice(0, -1);
   }
 
+  const fetchFn = config.fetch ?? globalThis.fetch;
+  if (typeof fetchFn !== "function") {
+    throw new Error(
+      "No fetch implementation available. " +
+        "Provide a fetch function via `config.fetch` or use Node.js 18+.",
+    );
+  }
+
   return {
     baseUrl,
     apiKey: config.apiKey,
@@ -80,7 +88,7 @@ function resolveConfig(config: TransportConfig): ResolvedConfig {
     maxRetries: config.maxRetries ?? 0,
     retryMutatingRequests: config.retryMutatingRequests ?? false,
     retryBaseDelayMs: config.retryBaseDelayMs ?? 500,
-    fetchFn: config.fetch ?? globalThis.fetch,
+    fetchFn,
     headers: config.headers ?? {},
   };
 }
@@ -104,8 +112,10 @@ function canRetryMethod(
  * Calculate the delay for a given retry attempt using exponential backoff
  * with jitter. Delay = baseDelay * 2^attempt + random jitter [0, baseDelay).
  */
+const MAX_RETRY_DELAY_MS = 30_000;
+
 function retryDelay(attempt: number, baseDelayMs: number): number {
-  const exponential = baseDelayMs * Math.pow(2, attempt);
+  const exponential = Math.min(baseDelayMs * Math.pow(2, attempt), MAX_RETRY_DELAY_MS);
   const jitter = Math.random() * baseDelayMs;
   return exponential + jitter;
 }
@@ -290,7 +300,8 @@ export class Transport {
       };
 
       if (body !== undefined) {
-        headers["Content-Type"] = "application/json";
+        const jsonHeaders = init.headers as Record<string, string>;
+        jsonHeaders["Content-Type"] = "application/json";
         init.body = JSON.stringify(body);
       }
 
@@ -326,7 +337,16 @@ export class Transport {
       };
     }
 
-    const data = JSON.parse(text) as T;
+    let data: T;
+    try {
+      data = JSON.parse(text) as T;
+    } catch {
+      throw new CerememoryError(
+        "INTERNAL_ERROR",
+        `Failed to parse response JSON: ${text.slice(0, 200)}`,
+        { statusCode: response.status },
+      );
+    }
     return {
       status: response.status,
       data,
@@ -375,8 +395,8 @@ export class Transport {
    */
   private getRetryDelay(error: Error, attempt: number): number {
     if (error instanceof CerememoryError && error.retryAfter != null) {
-      // Server told us how long to wait (in seconds)
-      return error.retryAfter * 1000;
+      // Server told us how long to wait (in seconds), capped to prevent hangs
+      return Math.min(error.retryAfter * 1000, MAX_RETRY_DELAY_MS);
     }
     return retryDelay(attempt, this.config.retryBaseDelayMs);
   }

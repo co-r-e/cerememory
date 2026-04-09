@@ -115,6 +115,32 @@ impl CerememoryService for CerememoryGrpcService {
         }))
     }
 
+    async fn encode_store_raw(
+        &self,
+        request: Request<proto::EncodeStoreRawRequest>,
+    ) -> Result<Response<proto::EncodeStoreRawResponse>, Status> {
+        let req = from_json(&request.into_inner().json_payload)?;
+        let resp = self.engine.encode_store_raw(req).await.map_err(to_status)?;
+        Ok(Response::new(proto::EncodeStoreRawResponse {
+            json_payload: to_json(&resp)?,
+        }))
+    }
+
+    async fn encode_batch_store_raw(
+        &self,
+        request: Request<proto::EncodeBatchStoreRawRequest>,
+    ) -> Result<Response<proto::EncodeBatchStoreRawResponse>, Status> {
+        let req = from_json(&request.into_inner().json_payload)?;
+        let resp = self
+            .engine
+            .encode_batch_store_raw(req)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(proto::EncodeBatchStoreRawResponse {
+            json_payload: to_json(&resp)?,
+        }))
+    }
+
     async fn encode_update(
         &self,
         request: Request<proto::EncodeUpdateRequest>,
@@ -133,6 +159,17 @@ impl CerememoryService for CerememoryGrpcService {
         let req = from_json(&request.into_inner().json_payload)?;
         let resp = self.engine.recall_query(req).await.map_err(to_status)?;
         Ok(Response::new(proto::RecallQueryResponse {
+            json_payload: to_json(&resp)?,
+        }))
+    }
+
+    async fn recall_raw_query(
+        &self,
+        request: Request<proto::RecallRawQueryRequest>,
+    ) -> Result<Response<proto::RecallRawQueryResponse>, Status> {
+        let req = from_json(&request.into_inner().json_payload)?;
+        let resp = self.engine.recall_raw_query(req).await.map_err(to_status)?;
+        Ok(Response::new(proto::RecallRawQueryResponse {
             json_payload: to_json(&resp)?,
         }))
     }
@@ -183,6 +220,21 @@ impl CerememoryService for CerememoryGrpcService {
             .await
             .map_err(to_status)?;
         Ok(Response::new(proto::ConsolidateResponse {
+            json_payload: to_json(&resp)?,
+        }))
+    }
+
+    async fn dream_tick(
+        &self,
+        request: Request<proto::DreamTickRequest>,
+    ) -> Result<Response<proto::DreamTickResponse>, Status> {
+        let req = from_json(&request.into_inner().json_payload)?;
+        let resp = self
+            .engine
+            .lifecycle_dream_tick(req)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(proto::DreamTickResponse {
             json_payload: to_json(&resp)?,
         }))
     }
@@ -429,6 +481,30 @@ mod tests {
         .unwrap()
     }
 
+    fn make_raw_store_payload(session_id: &str, text: &str) -> Vec<u8> {
+        serde_json::to_vec(&EncodeStoreRawRequest {
+            header: None,
+            session_id: session_id.to_string(),
+            turn_id: None,
+            topic_id: None,
+            source: RawSource::Conversation,
+            speaker: RawSpeaker::User,
+            visibility: RawVisibility::Normal,
+            secrecy_level: SecrecyLevel::Public,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: text.as_bytes().to_vec(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            metadata: None,
+        })
+        .unwrap()
+    }
+
     /// Helper: encode a record and return its record_id.
     async fn store_one(svc: &CerememoryGrpcService) -> uuid::Uuid {
         let resp = svc
@@ -544,6 +620,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_encode_store_raw() {
+        let svc = test_service();
+        let resp = svc
+            .encode_store_raw(Request::new(proto::EncodeStoreRawRequest {
+                json_payload: make_raw_store_payload("sess-grpc-raw", "Hello raw gRPC"),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let parsed: EncodeStoreRawResponse = serde_json::from_slice(&resp.json_payload).unwrap();
+        assert_eq!(parsed.session_id, "sess-grpc-raw");
+        assert_eq!(parsed.visibility, RawVisibility::Normal);
+    }
+
+    #[tokio::test]
     async fn grpc_recall_query() {
         let svc = test_service();
         let _ = store_one(&svc).await;
@@ -573,6 +665,40 @@ mod tests {
 
         let parsed: RecallQueryResponse = serde_json::from_slice(&resp.json_payload).unwrap();
         assert!(!parsed.memories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn grpc_recall_raw_query() {
+        let svc = test_service();
+        let _ = svc
+            .encode_store_raw(Request::new(proto::EncodeStoreRawRequest {
+                json_payload: make_raw_store_payload("sess-grpc-raw", "Hello raw gRPC"),
+            }))
+            .await
+            .unwrap();
+
+        let req = RecallRawQueryRequest {
+            header: None,
+            session_id: Some("sess-grpc-raw".to_string()),
+            query: Some("raw gRPC".to_string()),
+            temporal: None,
+            limit: 10,
+            include_private_scratch: false,
+            include_sealed: false,
+            secrecy_levels: None,
+        };
+
+        let resp = svc
+            .recall_raw_query(Request::new(proto::RecallRawQueryRequest {
+                json_payload: serde_json::to_vec(&req).unwrap(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let parsed: RecallRawQueryResponse = serde_json::from_slice(&resp.json_payload).unwrap();
+        assert_eq!(parsed.total_candidates, 1);
+        assert_eq!(parsed.records[0].session_id, "sess-grpc-raw");
     }
 
     #[tokio::test]
@@ -624,6 +750,41 @@ mod tests {
 
         let parsed: ConsolidateResponse = serde_json::from_slice(&resp.json_payload).unwrap();
         assert_eq!(parsed.records_processed, 0);
+    }
+
+    #[tokio::test]
+    async fn grpc_dream_tick() {
+        let svc = test_service();
+        let _ = svc
+            .encode_store_raw(Request::new(proto::EncodeStoreRawRequest {
+                json_payload: make_raw_store_payload("sess-grpc-dream", "Dream this gRPC note"),
+            }))
+            .await
+            .unwrap();
+
+        let req = DreamTickRequest {
+            header: None,
+            session_id: Some("sess-grpc-dream".to_string()),
+            dry_run: false,
+            max_groups: 10,
+            include_private_scratch: false,
+            include_sealed: false,
+            promote_semantic: true,
+            secrecy_levels: None,
+        };
+
+        let resp = svc
+            .dream_tick(Request::new(proto::DreamTickRequest {
+                json_payload: serde_json::to_vec(&req).unwrap(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let parsed: DreamTickResponse = serde_json::from_slice(&resp.json_payload).unwrap();
+        assert_eq!(parsed.groups_processed, 1);
+        assert_eq!(parsed.episodic_summaries_created, 1);
+        assert_eq!(parsed.semantic_nodes_created, 0);
     }
 
     #[tokio::test]
@@ -801,6 +962,7 @@ mod tests {
             header: None,
             format: "cma".to_string(),
             stores: None,
+            include_raw_journal: false,
             encrypt: false,
             encryption_key: None,
         };

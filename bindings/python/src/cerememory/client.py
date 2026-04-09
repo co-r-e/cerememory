@@ -22,33 +22,51 @@ from cerememory.types import (
     DecayForecastResponse,
     DecayTickRequest,
     DecayTickResponse,
+    DreamTickRequest,
+    DreamTickResponse,
     EmotionVector,
     EncodeBatchRequest,
     EncodeBatchResponse,
+    EncodeBatchStoreRawRequest,
+    EncodeBatchStoreRawResponse,
     EncodeStoreRequest,
     EncodeStoreResponse,
+    EncodeStoreRawRequest,
+    EncodeStoreRawResponse,
     EncodeUpdateRequest,
     EvolutionMetrics,
+    ExportArchiveResponse,
+    ExportRequest,
+    ExportResponse,
     ForgetRequest,
     ForgetResponse,
     HealthResponse,
     MemoryContent,
     MemoryRecord,
     Modality,
+    RawJournalRecord,
+    RawSource,
+    RawSpeaker,
+    RawVisibility,
     ReadinessResponse,
     RecallAssociateRequest,
     RecallAssociateResponse,
     RecallCue,
     RecallGraphRequest,
     RecallGraphResponse,
+    RecallRawQueryRequest,
+    RecallRawQueryResponse,
     RecallMode,
     RecallQueryRequest,
     RecallQueryResponse,
     RecallTimelineRequest,
     RecallTimelineResponse,
+    ImportRequest,
+    ImportResponse,
     SetModeRequest,
     StatsResponse,
     StoreType,
+    SecrecyLevel,
 )
 
 
@@ -240,6 +258,92 @@ class Client:
         """
         return self._client.introspect_stats()
 
+    def store_raw(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        topic_id: str | None = None,
+        source: str | RawSource = RawSource.CONVERSATION,
+        speaker: str | RawSpeaker = RawSpeaker.USER,
+        visibility: str | RawVisibility = RawVisibility.NORMAL,
+        secrecy_level: str | SecrecyLevel = SecrecyLevel.PUBLIC,
+    ) -> UUID:
+        if isinstance(source, str):
+            source = RawSource(source)
+        if isinstance(speaker, str):
+            speaker = RawSpeaker(speaker)
+        if isinstance(visibility, str):
+            visibility = RawVisibility(visibility)
+        if isinstance(secrecy_level, str):
+            secrecy_level = SecrecyLevel(secrecy_level)
+        request = EncodeStoreRawRequest(
+            session_id=session_id,
+            topic_id=topic_id,
+            source=source,
+            speaker=speaker,
+            visibility=visibility,
+            secrecy_level=secrecy_level,
+            content=_text_content(text),
+        )
+        response = self._client.encode_store_raw(request)
+        return response.record_id
+
+    def recall_raw(
+        self,
+        *,
+        query: str | None = None,
+        session_id: str | None = None,
+        limit: int = 10,
+        include_private_scratch: bool = False,
+        include_sealed: bool = False,
+        secrecy_levels: list[str | SecrecyLevel] | None = None,
+    ) -> list[RawJournalRecord]:
+        resolved_levels = None
+        if secrecy_levels is not None:
+            resolved_levels = [
+                SecrecyLevel(level) if isinstance(level, str) else level
+                for level in secrecy_levels
+            ]
+        request = RecallRawQueryRequest(
+            session_id=session_id,
+            query=query,
+            limit=limit,
+            include_private_scratch=include_private_scratch,
+            include_sealed=include_sealed,
+            secrecy_levels=resolved_levels,
+        )
+        response = self._client.recall_raw_query(request)
+        return response.records
+
+    def dream_tick(
+        self,
+        *,
+        session_id: str | None = None,
+        dry_run: bool = False,
+        max_groups: int = 10,
+        include_private_scratch: bool = False,
+        include_sealed: bool = False,
+        promote_semantic: bool = True,
+        secrecy_levels: list[str | SecrecyLevel] | None = None,
+    ) -> DreamTickResponse:
+        resolved_levels = None
+        if secrecy_levels is not None:
+            resolved_levels = [
+                SecrecyLevel(level) if isinstance(level, str) else level
+                for level in secrecy_levels
+            ]
+        request = DreamTickRequest(
+            session_id=session_id,
+            dry_run=dry_run,
+            max_groups=max_groups,
+            include_private_scratch=include_private_scratch,
+            include_sealed=include_sealed,
+            promote_semantic=promote_semantic,
+            secrecy_levels=resolved_levels,
+        )
+        return self._client.lifecycle_dream_tick(request)
+
     def get_record(self, record_id: UUID) -> MemoryRecord:
         """Get a single memory record by ID.
 
@@ -271,6 +375,16 @@ class Client:
         """Full CMP encode.batch operation."""
         return self._client.encode_batch(request)
 
+    def encode_store_raw(self, request: EncodeStoreRawRequest) -> EncodeStoreRawResponse:
+        """Full CMP encode.store_raw operation."""
+        return self._client.encode_store_raw(request)
+
+    def encode_batch_store_raw(
+        self, request: EncodeBatchStoreRawRequest
+    ) -> EncodeBatchStoreRawResponse:
+        """Full CMP encode.batch_store_raw operation."""
+        return self._client.encode_batch_store_raw(request)
+
     def encode_update(self, record_id: UUID, request: EncodeUpdateRequest) -> None:
         """Full CMP encode.update operation."""
         self._client.encode_update(record_id, request)
@@ -293,6 +407,12 @@ class Client:
         """Full CMP recall.graph operation."""
         return self._client.recall_graph(request)
 
+    def recall_raw_query(
+        self, request: RecallRawQueryRequest
+    ) -> RecallRawQueryResponse:
+        """Full CMP recall.raw_query operation."""
+        return self._client.recall_raw_query(request)
+
     def lifecycle_consolidate(self, request: ConsolidateRequest) -> ConsolidateResponse:
         """Full CMP lifecycle.consolidate operation."""
         return self._client.lifecycle_consolidate(request)
@@ -301,6 +421,10 @@ class Client:
         """Full CMP lifecycle.decay_tick operation."""
         return self._client.lifecycle_decay_tick(request)
 
+    def lifecycle_dream_tick(self, request: DreamTickRequest) -> DreamTickResponse:
+        """Full CMP lifecycle.dream_tick operation."""
+        return self._client.lifecycle_dream_tick(request)
+
     def lifecycle_set_mode(self, request: SetModeRequest) -> None:
         """Full CMP lifecycle.set_mode operation."""
         self._client.lifecycle_set_mode(request)
@@ -308,6 +432,14 @@ class Client:
     def lifecycle_forget(self, request: ForgetRequest) -> ForgetResponse:
         """Full CMP lifecycle.forget operation."""
         return self._client.lifecycle_forget(request)
+
+    def lifecycle_export(self, request: ExportRequest) -> ExportArchiveResponse:
+        """Full CMP lifecycle.export operation."""
+        return self._client.lifecycle_export(request)
+
+    def lifecycle_import(self, request: ImportRequest) -> ImportResponse:
+        """Full CMP lifecycle.import operation."""
+        return self._client.lifecycle_import(request)
 
     def introspect_stats(self) -> StatsResponse:
         """Full CMP introspect.stats operation."""
@@ -485,6 +617,18 @@ class AsyncClient:
         """Full CMP encode.batch operation."""
         return await self._client.encode_batch(request)
 
+    async def encode_store_raw(
+        self, request: EncodeStoreRawRequest
+    ) -> EncodeStoreRawResponse:
+        """Full CMP encode.store_raw operation."""
+        return await self._client.encode_store_raw(request)
+
+    async def encode_batch_store_raw(
+        self, request: EncodeBatchStoreRawRequest
+    ) -> EncodeBatchStoreRawResponse:
+        """Full CMP encode.batch_store_raw operation."""
+        return await self._client.encode_batch_store_raw(request)
+
     async def encode_update(self, record_id: UUID, request: EncodeUpdateRequest) -> None:
         """Full CMP encode.update operation."""
         await self._client.encode_update(record_id, request)
@@ -509,6 +653,12 @@ class AsyncClient:
         """Full CMP recall.graph operation."""
         return await self._client.recall_graph(request)
 
+    async def recall_raw_query(
+        self, request: RecallRawQueryRequest
+    ) -> RecallRawQueryResponse:
+        """Full CMP recall.raw_query operation."""
+        return await self._client.recall_raw_query(request)
+
     async def lifecycle_consolidate(
         self, request: ConsolidateRequest
     ) -> ConsolidateResponse:
@@ -521,6 +671,12 @@ class AsyncClient:
         """Full CMP lifecycle.decay_tick operation."""
         return await self._client.lifecycle_decay_tick(request)
 
+    async def lifecycle_dream_tick(
+        self, request: DreamTickRequest
+    ) -> DreamTickResponse:
+        """Full CMP lifecycle.dream_tick operation."""
+        return await self._client.lifecycle_dream_tick(request)
+
     async def lifecycle_set_mode(self, request: SetModeRequest) -> None:
         """Full CMP lifecycle.set_mode operation."""
         await self._client.lifecycle_set_mode(request)
@@ -528,6 +684,14 @@ class AsyncClient:
     async def lifecycle_forget(self, request: ForgetRequest) -> ForgetResponse:
         """Full CMP lifecycle.forget operation."""
         return await self._client.lifecycle_forget(request)
+
+    async def lifecycle_export(self, request: ExportRequest) -> ExportArchiveResponse:
+        """Full CMP lifecycle.export operation."""
+        return await self._client.lifecycle_export(request)
+
+    async def lifecycle_import(self, request: ImportRequest) -> ImportResponse:
+        """Full CMP lifecycle.import operation."""
+        return await self._client.lifecycle_import(request)
 
     async def introspect_stats(self) -> StatsResponse:
         """Full CMP introspect.stats operation."""
@@ -546,6 +710,92 @@ class AsyncClient:
     async def introspect_evolution(self) -> EvolutionMetrics:
         """Full CMP introspect.evolution operation."""
         return await self._client.introspect_evolution()
+
+    async def store_raw(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        topic_id: str | None = None,
+        source: str | RawSource = RawSource.CONVERSATION,
+        speaker: str | RawSpeaker = RawSpeaker.USER,
+        visibility: str | RawVisibility = RawVisibility.NORMAL,
+        secrecy_level: str | SecrecyLevel = SecrecyLevel.PUBLIC,
+    ) -> UUID:
+        if isinstance(source, str):
+            source = RawSource(source)
+        if isinstance(speaker, str):
+            speaker = RawSpeaker(speaker)
+        if isinstance(visibility, str):
+            visibility = RawVisibility(visibility)
+        if isinstance(secrecy_level, str):
+            secrecy_level = SecrecyLevel(secrecy_level)
+        request = EncodeStoreRawRequest(
+            session_id=session_id,
+            topic_id=topic_id,
+            source=source,
+            speaker=speaker,
+            visibility=visibility,
+            secrecy_level=secrecy_level,
+            content=_text_content(text),
+        )
+        response = await self._client.encode_store_raw(request)
+        return response.record_id
+
+    async def recall_raw(
+        self,
+        *,
+        query: str | None = None,
+        session_id: str | None = None,
+        limit: int = 10,
+        include_private_scratch: bool = False,
+        include_sealed: bool = False,
+        secrecy_levels: list[str | SecrecyLevel] | None = None,
+    ) -> list[RawJournalRecord]:
+        resolved_levels = None
+        if secrecy_levels is not None:
+            resolved_levels = [
+                SecrecyLevel(level) if isinstance(level, str) else level
+                for level in secrecy_levels
+            ]
+        request = RecallRawQueryRequest(
+            session_id=session_id,
+            query=query,
+            limit=limit,
+            include_private_scratch=include_private_scratch,
+            include_sealed=include_sealed,
+            secrecy_levels=resolved_levels,
+        )
+        response = await self._client.recall_raw_query(request)
+        return response.records
+
+    async def dream_tick(
+        self,
+        *,
+        session_id: str | None = None,
+        dry_run: bool = False,
+        max_groups: int = 10,
+        include_private_scratch: bool = False,
+        include_sealed: bool = False,
+        promote_semantic: bool = True,
+        secrecy_levels: list[str | SecrecyLevel] | None = None,
+    ) -> DreamTickResponse:
+        resolved_levels = None
+        if secrecy_levels is not None:
+            resolved_levels = [
+                SecrecyLevel(level) if isinstance(level, str) else level
+                for level in secrecy_levels
+            ]
+        request = DreamTickRequest(
+            session_id=session_id,
+            dry_run=dry_run,
+            max_groups=max_groups,
+            include_private_scratch=include_private_scratch,
+            include_sealed=include_sealed,
+            promote_semantic=promote_semantic,
+            secrecy_levels=resolved_levels,
+        )
+        return await self._client.lifecycle_dream_tick(request)
 
 
 # Re-export the recalled memory type for use in return type annotations.

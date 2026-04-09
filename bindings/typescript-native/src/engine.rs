@@ -11,6 +11,7 @@ use cerememory_core::types::*;
 use cerememory_engine::EngineConfig;
 
 use crate::types::{
+    parse_raw_source, parse_raw_speaker, parse_raw_visibility, parse_secrecy_level,
     parse_store_type, parse_uuid, recall_response_to_json, record_to_json, stats_to_json,
     to_napi_error,
 };
@@ -208,5 +209,103 @@ impl CerememoryEngine {
             .map_err(to_napi_error)?;
 
         stats_to_json(&stats)
+    }
+
+    #[napi]
+    pub fn store_raw(
+        &self,
+        text: String,
+        session_id: String,
+        topic_id: Option<String>,
+        source: Option<String>,
+        speaker: Option<String>,
+        visibility: Option<String>,
+        secrecy_level: Option<String>,
+    ) -> napi::Result<String> {
+        let req = EncodeStoreRawRequest {
+            header: None,
+            session_id,
+            turn_id: None,
+            topic_id,
+            source: parse_raw_source(source.as_deref().unwrap_or("conversation"))?,
+            speaker: parse_raw_speaker(speaker.as_deref().unwrap_or("user"))?,
+            visibility: parse_raw_visibility(visibility.as_deref().unwrap_or("normal"))?,
+            secrecy_level: parse_secrecy_level(secrecy_level.as_deref().unwrap_or("public"))?,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: text.into_bytes(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            metadata: None,
+        };
+
+        let runtime = self.runtime()?;
+        let resp = runtime
+            .block_on(self.inner.encode_store_raw(req))
+            .map_err(to_napi_error)?;
+        Ok(resp.record_id.to_string())
+    }
+
+    #[napi]
+    pub fn recall_raw(
+        &self,
+        query: Option<String>,
+        session_id: Option<String>,
+        limit: Option<u32>,
+        include_private_scratch: Option<bool>,
+        include_sealed: Option<bool>,
+    ) -> napi::Result<serde_json::Value> {
+        let req = RecallRawQueryRequest {
+            header: None,
+            session_id,
+            query,
+            temporal: None,
+            limit: limit.unwrap_or(10),
+            include_private_scratch: include_private_scratch.unwrap_or(false),
+            include_sealed: include_sealed.unwrap_or(false),
+            secrecy_levels: None,
+        };
+
+        let runtime = self.runtime()?;
+        let resp = runtime
+            .block_on(self.inner.recall_raw_query(req))
+            .map_err(to_napi_error)?;
+
+        serde_json::to_value(resp)
+            .map_err(|e| napi::Error::from_reason(format!("Failed to serialize raw recall: {e}")))
+    }
+
+    #[napi]
+    pub fn dream_tick(
+        &self,
+        session_id: Option<String>,
+        dry_run: Option<bool>,
+        max_groups: Option<u32>,
+        include_private_scratch: Option<bool>,
+        include_sealed: Option<bool>,
+        promote_semantic: Option<bool>,
+    ) -> napi::Result<serde_json::Value> {
+        let req = DreamTickRequest {
+            header: None,
+            session_id,
+            dry_run: dry_run.unwrap_or(false),
+            max_groups: max_groups.unwrap_or(10),
+            include_private_scratch: include_private_scratch.unwrap_or(false),
+            include_sealed: include_sealed.unwrap_or(false),
+            promote_semantic: promote_semantic.unwrap_or(true),
+            secrecy_levels: None,
+        };
+
+        let runtime = self.runtime()?;
+        let resp = runtime
+            .block_on(self.inner.lifecycle_dream_tick(req))
+            .map_err(to_napi_error)?;
+
+        serde_json::to_value(resp)
+            .map_err(|e| napi::Error::from_reason(format!("Failed to serialize dream tick: {e}")))
     }
 }

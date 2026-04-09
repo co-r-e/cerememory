@@ -495,6 +495,7 @@ name = "cerememory-adapter-claude"
 version = "0.2.1"
 dependencies = [
  "backoff",
+ "cerememory-adapter-common",
  "cerememory-core",
  "reqwest",
  "secrecy",
@@ -507,11 +508,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cerememory-adapter-common"
+version = "0.2.1"
+dependencies = [
+ "backoff",
+ "cerememory-core",
+ "reqwest",
+]
+
+[[package]]
 name = "cerememory-adapter-gemini"
 version = "0.2.1"
 dependencies = [
  "backoff",
  "base64",
+ "cerememory-adapter-common",
  "cerememory-core",
  "reqwest",
  "secrecy",
@@ -529,6 +540,7 @@ version = "0.2.1"
 dependencies = [
  "backoff",
  "base64",
+ "cerememory-adapter-common",
  "cerememory-core",
  "reqwest",
  "secrecy",
@@ -658,6 +670,7 @@ dependencies = [
  "cerememory-store-emotional",
  "cerememory-store-episodic",
  "cerememory-store-procedural",
+ "cerememory-store-raw",
  "cerememory-store-semantic",
  "cerememory-store-working",
  "chrono",
@@ -768,10 +781,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cerememory-store-common"
+version = "0.2.1"
+dependencies = [
+ "cerememory-core",
+ "redb",
+ "rmp-serde",
+ "uuid",
+]
+
+[[package]]
 name = "cerememory-store-emotional"
 version = "0.2.1"
 dependencies = [
  "cerememory-core",
+ "cerememory-store-common",
  "chrono",
  "redb",
  "rmp-serde",
@@ -788,6 +812,7 @@ name = "cerememory-store-episodic"
 version = "0.2.1"
 dependencies = [
  "cerememory-core",
+ "cerememory-store-common",
  "chrono",
  "redb",
  "rmp-serde",
@@ -804,6 +829,7 @@ name = "cerememory-store-procedural"
 version = "0.2.1"
 dependencies = [
  "cerememory-core",
+ "cerememory-store-common",
  "chrono",
  "redb",
  "rmp-serde",
@@ -816,10 +842,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cerememory-store-raw"
+version = "0.2.1"
+dependencies = [
+ "cerememory-core",
+ "cerememory-store-common",
+ "chrono",
+ "redb",
+ "rmp-serde",
+ "serde",
+ "tantivy",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "cerememory-store-semantic"
 version = "0.2.1"
 dependencies = [
  "cerememory-core",
+ "cerememory-store-common",
  "chrono",
  "redb",
  "rmp-serde",

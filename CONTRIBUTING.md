@@ -108,6 +108,8 @@ scripts/test-rust-cool.sh -p cerememory-integration-tests --test phase3
 scripts/test-rust-workspace-cool.sh
 ```
 
+The Rust helper scripts intentionally default to a single Cargo build job and single-threaded test execution to keep local runs CPU-friendly.
+
 ### Format and Lint
 
 ```bash
@@ -133,6 +135,8 @@ npm ci
 npm run typecheck
 npm test
 ```
+
+TypeScript tests are configured to run with a single worker by default to reduce local machine load.
 
 ## Architecture Overview
 

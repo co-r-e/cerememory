@@ -45,6 +45,19 @@ export type RecallMode = "human" | "perfect";
 /** Consolidation strategy. */
 export type ConsolidationStrategy = "full" | "incremental" | "selective";
 
+export type RawSource =
+  | "conversation"
+  | "tool_io"
+  | "scratchpad"
+  | "summary"
+  | "imported";
+
+export type RawSpeaker = "user" | "assistant" | "system" | "tool";
+
+export type RawVisibility = "normal" | "private_scratch" | "sealed";
+
+export type SecrecyLevel = "public" | "sensitive" | "secret";
+
 /** Time granularity for timeline queries. */
 export type TimeGranularity = "minute" | "hour" | "day" | "week" | "month";
 
@@ -147,6 +160,23 @@ export interface MemoryRecord {
   version: number;
 }
 
+export interface RawJournalRecord {
+  id: string;
+  session_id: string;
+  turn_id?: string | null;
+  topic_id?: string | null;
+  source: RawSource;
+  speaker: RawSpeaker;
+  visibility: RawVisibility;
+  secrecy_level: SecrecyLevel;
+  created_at: string;
+  updated_at: string;
+  content: MemoryContent;
+  metadata: Record<string, unknown>;
+  derived_memory_ids: string[];
+  suppressed: boolean;
+}
+
 // ─── Protocol header ─────────────────────────────────────────────────
 
 /** Protocol version header included in all CMP messages. */
@@ -214,6 +244,35 @@ export interface EncodeUpdateRequest {
   content?: MemoryContent | null;
   emotion?: EmotionVector | null;
   metadata?: Record<string, unknown> | null;
+}
+
+export interface EncodeStoreRawRequest {
+  header?: CMPHeader | null;
+  session_id: string;
+  turn_id?: string | null;
+  topic_id?: string | null;
+  source: RawSource;
+  speaker: RawSpeaker;
+  visibility: RawVisibility;
+  secrecy_level: SecrecyLevel;
+  content: MemoryContent;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface EncodeStoreRawResponse {
+  record_id: string;
+  session_id: string;
+  visibility: RawVisibility;
+  secrecy_level: SecrecyLevel;
+}
+
+export interface EncodeBatchStoreRawRequest {
+  header?: CMPHeader | null;
+  records: EncodeStoreRawRequest[];
+}
+
+export interface EncodeBatchStoreRawResponse {
+  results: EncodeStoreRawResponse[];
 }
 
 // ─── Recall operations (CMP Spec section 4) ──────────────────────────
@@ -360,6 +419,22 @@ export interface RecallGraphResponse {
   total_nodes: number;
 }
 
+export interface RecallRawQueryRequest {
+  header?: CMPHeader | null;
+  session_id?: string | null;
+  query?: string | null;
+  temporal?: TemporalRange | null;
+  limit?: number;
+  include_private_scratch?: boolean;
+  include_sealed?: boolean;
+  secrecy_levels?: SecrecyLevel[] | null;
+}
+
+export interface RecallRawQueryResponse {
+  records: RawJournalRecord[];
+  total_candidates: number;
+}
+
 // ─── Lifecycle operations (CMP Spec section 5) ──────────────────────
 
 /** lifecycle.consolidate request (CMP Spec section 5.1). */
@@ -393,6 +468,24 @@ export interface DecayTickResponse {
   records_pruned: number;
 }
 
+export interface DreamTickRequest {
+  header?: CMPHeader | null;
+  session_id?: string | null;
+  dry_run?: boolean;
+  max_groups?: number;
+  include_private_scratch?: boolean;
+  include_sealed?: boolean;
+  promote_semantic?: boolean;
+  secrecy_levels?: SecrecyLevel[] | null;
+}
+
+export interface DreamTickResponse {
+  groups_processed: number;
+  raw_records_processed: number;
+  episodic_summaries_created: number;
+  semantic_nodes_created: number;
+}
+
 /** lifecycle.set_mode request (CMP Spec section 5.3). */
 export interface SetModeRequest {
   header?: CMPHeader | null;
@@ -413,6 +506,51 @@ export interface ForgetRequest {
 /** lifecycle.forget response. */
 export interface ForgetResponse {
   records_deleted: number;
+}
+
+export type ConflictResolution =
+  | "keep_existing"
+  | "keep_imported"
+  | "keep_newer";
+
+export type ImportStrategy = "merge" | "replace";
+
+export interface ExportRequest {
+  header?: CMPHeader | null;
+  format?: string;
+  stores?: StoreType[] | null;
+  include_raw_journal?: boolean;
+  encrypt?: boolean;
+  encryption_key?: string | null;
+}
+
+export interface ExportResponse {
+  archive_id: string;
+  size_bytes: number;
+  record_count: number;
+  checksum: string;
+}
+
+/** HTTP export response — fields are flattened (serde(flatten) in Rust). */
+export interface ExportArchiveResponse {
+  archive_id: string;
+  size_bytes: number;
+  record_count: number;
+  checksum: string;
+  archive_data: number[];
+}
+
+export interface ImportRequest {
+  header?: CMPHeader | null;
+  archive_id: string;
+  strategy?: ImportStrategy;
+  conflict_resolution?: ConflictResolution;
+  decryption_key?: string | null;
+  archive_data?: number[] | null;
+}
+
+export interface ImportResponse {
+  records_imported: number;
 }
 
 // ─── Introspect operations (CMP Spec section 6) ─────────────────────
@@ -443,8 +581,14 @@ export interface StatsResponse {
   oldest_record?: string | null;
   newest_record?: string | null;
   total_recall_count: number;
+  raw_journal_records: number;
+  raw_journal_pending_dream: number;
+  dream_episodic_summaries: number;
+  dream_semantic_nodes: number;
+  last_dream_tick_at?: string | null;
   evolution_metrics?: EvolutionMetrics | null;
   background_decay_enabled: boolean;
+  background_dream_enabled: boolean;
 }
 
 /** A single record's decay forecast. */

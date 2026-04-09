@@ -39,9 +39,14 @@ DEFAULT_BACKOFF_FACTOR = 2.0
 
 
 def _build_headers(api_key: str | None, extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Build the default request headers."""
+    """Build the default request headers.
+
+    Note: Content-Type is NOT included here because httpx automatically
+    sets it to ``application/json`` when ``json=`` is passed. Including
+    it on GET requests would violate HTTP semantics and may be rejected
+    by strict WAFs or corporate proxies.
+    """
     headers: dict[str, str] = {
-        "Content-Type": "application/json",
         "Accept": "application/json",
         "User-Agent": "cerememory-python/0.2.1",
     }
@@ -75,8 +80,10 @@ def _parse_cmp_error(response: httpx.Response) -> CerememoryError:
             status_code=status,
         )
     except Exception:
+        # Truncate body to avoid memory spikes from large proxy error pages
+        body_preview = response.text[:500] if len(response.text) > 500 else response.text
         return CerememoryError(
-            f"HTTP {status}: {response.text}",
+            f"HTTP {status}: {body_preview}",
             status_code=status,
         )
 
@@ -84,15 +91,19 @@ def _parse_cmp_error(response: httpx.Response) -> CerememoryError:
 def _compute_backoff(attempt: int, retry_after: int | None = None) -> float:
     """Compute wait time in seconds using exponential backoff with jitter.
 
-    If the server sent a ``retry_after`` hint, that takes precedence.
+    If the server sent a ``retry_after`` hint, that takes precedence (capped
+    at DEFAULT_BACKOFF_MAX to prevent process hangs from malicious values).
     """
+    import random
+
     if retry_after is not None and retry_after > 0:
-        return float(retry_after)
+        return min(float(retry_after), DEFAULT_BACKOFF_MAX)
     delay = min(
-        DEFAULT_BACKOFF_BASE * (DEFAULT_BACKOFF_FACTOR ** attempt),
+        DEFAULT_BACKOFF_BASE * (DEFAULT_BACKOFF_FACTOR**attempt),
         DEFAULT_BACKOFF_MAX,
     )
-    return delay
+    jitter = random.uniform(0, DEFAULT_BACKOFF_BASE)
+    return delay + jitter
 
 
 # ---------------------------------------------------------------------------

@@ -121,8 +121,14 @@ def make_stats_response() -> dict[str, Any]:
         "oldest_record": NOW_ISO,
         "newest_record": NOW_ISO,
         "total_recall_count": 100,
+        "raw_journal_records": 5,
+        "raw_journal_pending_dream": 2,
+        "dream_episodic_summaries": 3,
+        "dream_semantic_nodes": 1,
+        "last_dream_tick_at": NOW_ISO,
         "evolution_metrics": None,
         "background_decay_enabled": False,
+        "background_dream_enabled": True,
     }
 
 

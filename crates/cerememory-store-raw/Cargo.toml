@@ -1,0 +1,25 @@
+[package]
+name = "cerememory-store-raw"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cerememory raw journal store implementation"
+rust-version.workspace = true
+
+[dependencies]
+cerememory-core = { workspace = true }
+cerememory-store-common = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+redb = { workspace = true }
+rmp-serde = { workspace = true }
+tantivy = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }

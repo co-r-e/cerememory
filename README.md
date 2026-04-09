@@ -64,18 +64,22 @@ cargo build -p cerememory-cli --release
 }
 ```
 
-Once connected, Claude Code can use 11 memory tools:
+Once connected, Claude Code can use the core memory tools plus raw/dream workflows:
 
 | Tool | Description |
 |------|-------------|
 | `store` | Save a new memory |
+| `store_raw` | Preserve a verbatim raw journal entry |
 | `update` | Edit an existing memory by UUID |
 | `batch_store` | Save multiple memories at once |
+| `batch_store_raw` | Preserve multiple raw journal entries at once |
 | `recall` | Search memories by query (or list recent if omitted) |
+| `recall_raw` | Explicit forensic recall over preserved raw journal entries |
 | `timeline` | Browse memories by time period |
 | `associate` | Find connected memories via spreading activation |
 | `inspect` | View full details of a memory by UUID |
 | `forget` | Permanently delete memories by UUID |
+| `dream_tick` | Summarize raw journal entries into episodic/semantic memory |
 | `consolidate` | Migrate mature episodic memories to semantic store |
 | `export` | Export all memories to a CMA archive file |
 | `stats` | View system statistics and store counts |
@@ -109,6 +113,11 @@ client = Client("http://localhost:8420")
 record_id = client.store("Had coffee with Alice at the park", store="episodic")
 results = client.recall("Alice", limit=5)
 client.forget(record_id, confirm=True)
+
+# Raw journal + dream tick
+raw_id = client.store_raw("verbatim transcript note", session_id="sess-1")
+raw_records = client.recall_raw(session_id="sess-1")
+dream = client.dream_tick(session_id="sess-1")
 ```
 
 ### TypeScript SDK
@@ -126,6 +135,30 @@ const recordId = await client.store("Had coffee with Alice at the park", {
 });
 const results = await client.recall("Alice", { limit: 5 });
 await client.forget(recordId, { confirm: true });
+
+const rawId = await client.storeRaw("verbatim transcript note", {
+  sessionId: "sess-1",
+});
+const rawRecords = await client.recallRaw({ sessionId: "sess-1" });
+const dream = await client.dreamTick({ session_id: "sess-1" });
+```
+
+### CLI
+
+```bash
+# Curated memory
+cargo run -p cerememory-cli -- store "Alice prefers green tea" --store semantic
+cargo run -p cerememory-cli -- recall "Alice"
+
+# Raw journal
+cargo run -p cerememory-cli -- store-raw "verbatim transcript note" --session-id sess-1
+cargo run -p cerememory-cli -- recall-raw --session-id sess-1
+
+# Dream processing
+cargo run -p cerememory-cli -- dream-tick --session-id sess-1
+
+# Export everything including raw journal
+cargo run -p cerememory-cli -- export --include-raw-journal --output backup.cma
 ```
 
 ---
@@ -243,6 +276,9 @@ api_keys = []  # ["sk-key1", "sk-key2"]
 provider = "none"  # "openai", "claude", "gemini"
 # api_key = "sk-..."
 
+[dream]
+background_interval_secs = 86400  # once per day
+
 [log]
 level = "info"    # trace, debug, info, warn, error
 format = "pretty" # pretty, json
@@ -351,6 +387,7 @@ cerememory/
 - [Whitepaper](docs/cerememory-whitepaper.pdf): Philosophy, neuroscience foundations, and system design
 - [CMP Specification v1.0](docs/cmp-spec-v1.pdf): Complete protocol definition
 - [Architecture Decision Records](docs/adr/): Technology stack decisions with full rationale
+- [Human-Plus Memory Phase 1](docs/human-plus-memory-phase1.md): Design for raw journal, dream tick, suppression, and forensic recall
 
 ---
 

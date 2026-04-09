@@ -33,6 +33,7 @@ from cerememory import (
 )
 from tests.conftest import (
     BASE_URL,
+    NOW_ISO,
     SAMPLE_RECORD_ID,
     make_cmp_error,
     make_encode_store_response,
@@ -173,6 +174,80 @@ class TestHighLevelStats:
         stats = high_level_client.stats()
         assert stats.total_records == 42
         assert stats.avg_fidelity == 0.85
+
+
+class TestHighLevelRawAndDream:
+    def test_store_raw(self, high_level_client, mock_api):
+        mock_api.post("/v1/encode/raw").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "record_id": str(SAMPLE_RECORD_ID),
+                    "session_id": "sess-1",
+                    "visibility": "normal",
+                    "secrecy_level": "public",
+                },
+            )
+        )
+        record_id = high_level_client.store_raw("Raw note", session_id="sess-1")
+        assert record_id == SAMPLE_RECORD_ID
+
+    def test_recall_raw(self, high_level_client, mock_api):
+        mock_api.post("/v1/recall/raw").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "records": [
+                        {
+                            "id": str(SAMPLE_RECORD_ID),
+                            "session_id": "sess-1",
+                            "turn_id": None,
+                            "topic_id": None,
+                            "source": "conversation",
+                            "speaker": "user",
+                            "visibility": "normal",
+                            "secrecy_level": "public",
+                            "created_at": NOW_ISO,
+                            "updated_at": NOW_ISO,
+                            "content": {
+                                "blocks": [
+                                    {
+                                        "modality": "text",
+                                        "format": "text/plain",
+                                        "data": list(b"Raw note"),
+                                        "embedding": None,
+                                    }
+                                ],
+                                "summary": None,
+                            },
+                            "metadata": {},
+                            "derived_memory_ids": [],
+                            "suppressed": False,
+                        }
+                    ],
+                    "total_candidates": 1,
+                },
+            )
+        )
+        records = high_level_client.recall_raw(session_id="sess-1")
+        assert len(records) == 1
+        assert records[0].session_id == "sess-1"
+
+    def test_dream_tick(self, high_level_client, mock_api):
+        mock_api.post("/v1/lifecycle/dream-tick").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "groups_processed": 1,
+                    "raw_records_processed": 2,
+                    "episodic_summaries_created": 1,
+                    "semantic_nodes_created": 1,
+                },
+            )
+        )
+        resp = high_level_client.dream_tick(session_id="sess-1")
+        assert resp.groups_processed == 1
+        assert resp.semantic_nodes_created == 1
 
 
 class TestHighLevelGetRecord:

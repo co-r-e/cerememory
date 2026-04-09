@@ -8,15 +8,19 @@ use pyo3::types::{PyAnyMethods, PyDict, PyList, PyTuple};
 use pyo3::{exceptions::PyTypeError, exceptions::PyValueError, Bound};
 
 use cerememory_core::protocol::{
-    EncodeStoreRequest, EncodeStoreResponse, ForgetRequest, RecallCue, RecallQueryRequest,
-    RecordIntrospectRequest,
+    DreamTickRequest, EncodeStoreRawRequest, EncodeStoreRequest, EncodeStoreResponse,
+    ForgetRequest, RecallCue, RecallQueryRequest, RecallRawQueryRequest, RecordIntrospectRequest,
 };
-use cerememory_core::types::{ContentBlock, MemoryContent, Modality, StoreType};
+use cerememory_core::types::{
+    ContentBlock, MemoryContent, Modality, RawSource, RawSpeaker, RawVisibility, SecrecyLevel,
+    StoreType,
+};
 use cerememory_engine::{CerememoryEngine, EngineConfig};
 use uuid::Uuid;
 
 use crate::types::{
-    to_py_err, PyEncodeStoreResponse, PyMemoryRecord, PyRecallQueryResponse, PyStatsResponse,
+    json_value_to_py, to_py_err, PyEncodeStoreResponse, PyMemoryRecord, PyRecallQueryResponse,
+    PyStatsResponse,
 };
 
 /// The main Cerememory engine with native Python bindings.
@@ -411,6 +415,118 @@ impl PyCerememoryEngine {
         Ok(PyStatsResponse::from_value(val))
     }
 
+    #[pyo3(signature = (text, session_id, topic_id=None, source="conversation", speaker="user", visibility="normal", secrecy_level="public"))]
+    fn store_raw(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        session_id: &str,
+        topic_id: Option<String>,
+        source: &str,
+        speaker: &str,
+        visibility: &str,
+        secrecy_level: &str,
+    ) -> PyResult<String> {
+        let req = EncodeStoreRawRequest {
+            header: None,
+            session_id: session_id.to_string(),
+            turn_id: None,
+            topic_id,
+            source: parse_raw_source(source)?,
+            speaker: parse_raw_speaker(speaker)?,
+            visibility: parse_raw_visibility(visibility)?,
+            secrecy_level: parse_secrecy_level(secrecy_level)?,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: text.as_bytes().to_vec(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            metadata: None,
+        };
+
+        py.detach(|| {
+            let runtime = self.runtime()?;
+            let resp = runtime
+                .block_on(self.engine.encode_store_raw(req))
+                .map_err(to_py_err)?;
+            Ok(resp.record_id.to_string())
+        })
+    }
+
+    #[pyo3(signature = (query=None, session_id=None, limit=10, include_private_scratch=false, include_sealed=false))]
+    fn recall_raw(
+        &self,
+        py: Python<'_>,
+        query: Option<String>,
+        session_id: Option<String>,
+        limit: u32,
+        include_private_scratch: bool,
+        include_sealed: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let req = RecallRawQueryRequest {
+            header: None,
+            session_id,
+            query,
+            temporal: None,
+            limit,
+            include_private_scratch,
+            include_sealed,
+            secrecy_levels: None,
+        };
+
+        let resp = py.detach(|| {
+            let runtime = self.runtime()?;
+            runtime
+                .block_on(self.engine.recall_raw_query(req))
+                .map_err(to_py_err)
+        })?;
+        let val = serde_json::to_value(&resp).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to serialize raw recall response: {e}"
+            ))
+        })?;
+        json_value_to_py(py, &val)
+    }
+
+    #[pyo3(signature = (session_id=None, dry_run=false, max_groups=10, include_private_scratch=false, include_sealed=false, promote_semantic=true))]
+    fn dream_tick(
+        &self,
+        py: Python<'_>,
+        session_id: Option<String>,
+        dry_run: bool,
+        max_groups: u32,
+        include_private_scratch: bool,
+        include_sealed: bool,
+        promote_semantic: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let req = DreamTickRequest {
+            header: None,
+            session_id,
+            dry_run,
+            max_groups,
+            include_private_scratch,
+            include_sealed,
+            promote_semantic,
+            secrecy_levels: None,
+        };
+        let resp = py.detach(|| {
+            let runtime = self.runtime()?;
+            runtime
+                .block_on(self.engine.lifecycle_dream_tick(req))
+                .map_err(to_py_err)
+        })?;
+        let val = serde_json::to_value(&resp).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to serialize dream tick response: {e}"
+            ))
+        })?;
+        json_value_to_py(py, &val)
+    }
+
     fn __repr__(&self) -> String {
         "Engine(in_memory=True)".to_string()
     }
@@ -423,6 +539,53 @@ fn parse_store_type(s: &str) -> PyResult<StoreType> {
     s.to_lowercase()
         .parse::<StoreType>()
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))
+}
+
+fn parse_raw_source(s: &str) -> PyResult<RawSource> {
+    match s.trim().to_lowercase().as_str() {
+        "conversation" => Ok(RawSource::Conversation),
+        "tool_io" => Ok(RawSource::ToolIo),
+        "scratchpad" => Ok(RawSource::Scratchpad),
+        "summary" => Ok(RawSource::Summary),
+        "imported" => Ok(RawSource::Imported),
+        other => Err(PyValueError::new_err(format!(
+            "Invalid raw source: {other}"
+        ))),
+    }
+}
+
+fn parse_raw_speaker(s: &str) -> PyResult<RawSpeaker> {
+    match s.trim().to_lowercase().as_str() {
+        "user" => Ok(RawSpeaker::User),
+        "assistant" => Ok(RawSpeaker::Assistant),
+        "system" => Ok(RawSpeaker::System),
+        "tool" => Ok(RawSpeaker::Tool),
+        other => Err(PyValueError::new_err(format!(
+            "Invalid raw speaker: {other}"
+        ))),
+    }
+}
+
+fn parse_raw_visibility(s: &str) -> PyResult<RawVisibility> {
+    match s.trim().to_lowercase().as_str() {
+        "normal" => Ok(RawVisibility::Normal),
+        "private_scratch" => Ok(RawVisibility::PrivateScratch),
+        "sealed" => Ok(RawVisibility::Sealed),
+        other => Err(PyValueError::new_err(format!(
+            "Invalid raw visibility: {other}"
+        ))),
+    }
+}
+
+fn parse_secrecy_level(s: &str) -> PyResult<SecrecyLevel> {
+    match s.trim().to_lowercase().as_str() {
+        "public" => Ok(SecrecyLevel::Public),
+        "sensitive" => Ok(SecrecyLevel::Sensitive),
+        "secret" => Ok(SecrecyLevel::Secret),
+        other => Err(PyValueError::new_err(format!(
+            "Invalid secrecy level: {other}"
+        ))),
+    }
 }
 
 /// Parse a UUID string.

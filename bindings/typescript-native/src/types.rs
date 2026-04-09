@@ -44,6 +44,53 @@ pub fn parse_uuid(s: &str) -> napi::Result<uuid::Uuid> {
         .map_err(|e| napi::Error::from_reason(format!("Invalid UUID '{s}': {e}")))
 }
 
+pub fn parse_raw_source(s: &str) -> napi::Result<cerememory_core::types::RawSource> {
+    match s.trim().to_lowercase().as_str() {
+        "conversation" => Ok(cerememory_core::types::RawSource::Conversation),
+        "tool_io" => Ok(cerememory_core::types::RawSource::ToolIo),
+        "scratchpad" => Ok(cerememory_core::types::RawSource::Scratchpad),
+        "summary" => Ok(cerememory_core::types::RawSource::Summary),
+        "imported" => Ok(cerememory_core::types::RawSource::Imported),
+        other => Err(napi::Error::from_reason(format!(
+            "Invalid raw source '{other}'"
+        ))),
+    }
+}
+
+pub fn parse_raw_speaker(s: &str) -> napi::Result<cerememory_core::types::RawSpeaker> {
+    match s.trim().to_lowercase().as_str() {
+        "user" => Ok(cerememory_core::types::RawSpeaker::User),
+        "assistant" => Ok(cerememory_core::types::RawSpeaker::Assistant),
+        "system" => Ok(cerememory_core::types::RawSpeaker::System),
+        "tool" => Ok(cerememory_core::types::RawSpeaker::Tool),
+        other => Err(napi::Error::from_reason(format!(
+            "Invalid raw speaker '{other}'"
+        ))),
+    }
+}
+
+pub fn parse_raw_visibility(s: &str) -> napi::Result<cerememory_core::types::RawVisibility> {
+    match s.trim().to_lowercase().as_str() {
+        "normal" => Ok(cerememory_core::types::RawVisibility::Normal),
+        "private_scratch" => Ok(cerememory_core::types::RawVisibility::PrivateScratch),
+        "sealed" => Ok(cerememory_core::types::RawVisibility::Sealed),
+        other => Err(napi::Error::from_reason(format!(
+            "Invalid raw visibility '{other}'"
+        ))),
+    }
+}
+
+pub fn parse_secrecy_level(s: &str) -> napi::Result<cerememory_core::types::SecrecyLevel> {
+    match s.trim().to_lowercase().as_str() {
+        "public" => Ok(cerememory_core::types::SecrecyLevel::Public),
+        "sensitive" => Ok(cerememory_core::types::SecrecyLevel::Sensitive),
+        "secret" => Ok(cerememory_core::types::SecrecyLevel::Secret),
+        other => Err(napi::Error::from_reason(format!(
+            "Invalid secrecy level '{other}'"
+        ))),
+    }
+}
+
 /// Convert a `RecallQueryResponse` to a JSON value.
 pub fn recall_response_to_json(
     resp: &cerememory_core::protocol::RecallQueryResponse,

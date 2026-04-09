@@ -123,8 +123,14 @@ const STATS_RESPONSE: StatsResponse = {
   oldest_record: "2025-01-01T00:00:00Z",
   newest_record: "2025-06-15T12:00:00Z",
   total_recall_count: 100,
+  raw_journal_records: 5,
+  raw_journal_pending_dream: 2,
+  dream_episodic_summaries: 3,
+  dream_semantic_nodes: 1,
+  last_dream_tick_at: "2025-06-15T12:00:00Z",
   evolution_metrics: null,
   background_decay_enabled: true,
+  background_dream_enabled: true,
 };
 
 // ─── CerememoryProvider.tools() ──────────────────────────────────────

@@ -130,6 +130,48 @@ pub struct EncodeUpdateRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// encode.store_raw request — append a raw journal record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodeStoreRawRequest {
+    #[serde(default)]
+    pub header: Option<CMPHeader>,
+    pub session_id: String,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub topic_id: Option<String>,
+    pub source: RawSource,
+    pub speaker: RawSpeaker,
+    pub visibility: RawVisibility,
+    pub secrecy_level: SecrecyLevel,
+    pub content: MemoryContent,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// encode.store_raw response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodeStoreRawResponse {
+    pub record_id: Uuid,
+    pub session_id: String,
+    pub visibility: RawVisibility,
+    pub secrecy_level: SecrecyLevel,
+}
+
+/// encode.batch_raw request — append multiple raw journal records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodeBatchStoreRawRequest {
+    #[serde(default)]
+    pub header: Option<CMPHeader>,
+    pub records: Vec<EncodeStoreRawRequest>,
+}
+
+/// encode.batch_raw response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodeBatchStoreRawResponse {
+    pub results: Vec<EncodeStoreRawResponse>,
+}
+
 // ─── Recall Operations (CMP Spec §4) ─────────────────────────────────
 
 /// Multimodal recall cue (CMP Spec §4.1).
@@ -314,6 +356,34 @@ pub struct RecallGraphRequest {
     pub limit_nodes: u32,
 }
 
+/// recall.raw_query request — explicit retrieval from the raw journal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecallRawQueryRequest {
+    #[serde(default)]
+    pub header: Option<CMPHeader>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub temporal: Option<TemporalRange>,
+    #[serde(default = "default_recall_limit")]
+    pub limit: u32,
+    #[serde(default)]
+    pub include_private_scratch: bool,
+    #[serde(default)]
+    pub include_sealed: bool,
+    #[serde(default)]
+    pub secrecy_levels: Option<Vec<SecrecyLevel>>,
+}
+
+/// recall.raw_query response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecallRawQueryResponse {
+    pub records: Vec<RawJournalRecord>,
+    pub total_candidates: u32,
+}
+
 /// recall.timeline response (CMP Spec §4.3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecallTimelineResponse {
@@ -395,6 +465,36 @@ pub struct ConsolidateResponse {
     pub semantic_nodes_created: u32,
 }
 
+/// lifecycle.dream_tick request — process uncurated raw journal entries into episodic summaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamTickRequest {
+    #[serde(default)]
+    pub header: Option<CMPHeader>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default = "default_recall_limit")]
+    pub max_groups: u32,
+    #[serde(default)]
+    pub include_private_scratch: bool,
+    #[serde(default)]
+    pub include_sealed: bool,
+    #[serde(default = "default_true")]
+    pub promote_semantic: bool,
+    #[serde(default)]
+    pub secrecy_levels: Option<Vec<SecrecyLevel>>,
+}
+
+/// lifecycle.dream_tick response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamTickResponse {
+    pub groups_processed: u32,
+    pub raw_records_processed: u32,
+    pub episodic_summaries_created: u32,
+    pub semantic_nodes_created: u32,
+}
+
 /// lifecycle.decay_tick request (CMP Spec §5.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecayTickRequest {
@@ -454,6 +554,8 @@ pub struct ExportRequest {
     #[serde(default)]
     pub stores: Option<Vec<StoreType>>,
     #[serde(default)]
+    pub include_raw_journal: bool,
+    #[serde(default)]
     pub encrypt: bool,
     #[serde(default)]
     pub encryption_key: Option<String>,
@@ -470,6 +572,14 @@ pub struct ExportResponse {
     pub size_bytes: u64,
     pub record_count: u32,
     pub checksum: String,
+}
+
+/// HTTP-friendly export response that includes the archive payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportArchiveResponse {
+    #[serde(flatten)]
+    pub metadata: ExportResponse,
+    pub archive_data: Vec<u8>,
 }
 
 /// Import conflict resolution strategy.
@@ -507,6 +617,12 @@ pub struct ImportRequest {
     pub archive_data: Option<Vec<u8>>,
 }
 
+/// lifecycle.import response (HTTP/SDK friendly).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportResponse {
+    pub records_imported: u32,
+}
+
 fn default_import_strategy() -> ImportStrategy {
     ImportStrategy::Merge
 }
@@ -531,10 +647,23 @@ pub struct StatsResponse {
     pub newest_record: Option<DateTime<Utc>>,
     pub total_recall_count: u64,
     #[serde(default)]
+    pub raw_journal_records: u32,
+    #[serde(default)]
+    pub raw_journal_pending_dream: u32,
+    #[serde(default)]
+    pub dream_episodic_summaries: u32,
+    #[serde(default)]
+    pub dream_semantic_nodes: u32,
+    #[serde(default)]
+    pub last_dream_tick_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub evolution_metrics: Option<EvolutionMetrics>,
     /// Whether background decay is enabled and running.
     #[serde(default)]
     pub background_decay_enabled: bool,
+    /// Whether background dream processing is enabled and running.
+    #[serde(default)]
+    pub background_dream_enabled: bool,
 }
 
 /// Parameter adjustment record.
@@ -832,8 +961,14 @@ mod tests {
             oldest_record: None,
             newest_record: None,
             total_recall_count: 100,
+            raw_journal_records: 7,
+            raw_journal_pending_dream: 3,
+            dream_episodic_summaries: 2,
+            dream_semantic_nodes: 1,
+            last_dream_tick_at: None,
             evolution_metrics: None,
             background_decay_enabled: false,
+            background_dream_enabled: false,
         };
 
         let json = serde_json::to_string(&stats).unwrap();

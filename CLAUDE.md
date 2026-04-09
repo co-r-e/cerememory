@@ -14,6 +14,8 @@ cargo clippy --workspace --tests -- -D warnings  # Lint
 cargo fmt --all -- --check      # Format check
 ```
 
+The Rust helper scripts intentionally default to a single Cargo build job and single-threaded test execution, and the TypeScript SDK Vitest config runs with a single worker by default to keep local test runs quiet.
+
 ## Architecture
 
 Cerememory is a living memory database implementing the CMP (Cerememory Protocol). It is organized as a Cargo workspace:
@@ -34,6 +36,10 @@ Cerememory is a living memory database implementing the CMP (Cerememory Protocol
 - `adapters/adapter-*` — LLM provider adapters (OpenAI, Claude, Gemini)
 - `bindings/` — Python and TypeScript native bindings
 - `tests/integration/` — Cross-crate integration tests (phase1–phase5, llm_e2e)
+
+## Related Repositories
+
+- `~/Projects/dev_cerememory/cerememory-docs` — Documentation site and landing page
 
 ## Conventions
 

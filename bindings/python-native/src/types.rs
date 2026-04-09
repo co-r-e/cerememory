@@ -447,6 +447,51 @@ impl PyStatsResponse {
             .unwrap_or(false)
     }
 
+    /// Number of raw journal records.
+    #[getter]
+    fn raw_journal_records(&self) -> u32 {
+        self.inner
+            .get("raw_journal_records")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32
+    }
+
+    /// Number of raw journal records pending dream processing.
+    #[getter]
+    fn raw_journal_pending_dream(&self) -> u32 {
+        self.inner
+            .get("raw_journal_pending_dream")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32
+    }
+
+    /// Number of dream-generated episodic summaries.
+    #[getter]
+    fn dream_episodic_summaries(&self) -> u32 {
+        self.inner
+            .get("dream_episodic_summaries")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32
+    }
+
+    /// Number of dream-generated semantic nodes.
+    #[getter]
+    fn dream_semantic_nodes(&self) -> u32 {
+        self.inner
+            .get("dream_semantic_nodes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32
+    }
+
+    /// Whether background dream processing is enabled.
+    #[getter]
+    fn background_dream_enabled(&self) -> bool {
+        self.inner
+            .get("background_dream_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     /// Return the full response as a Python dict.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         json_value_to_py(py, &self.inner)

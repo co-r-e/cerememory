@@ -21,6 +21,8 @@ RUN cargo build --locked --release --bin cerememory \
 # Stage 2: Runtime (distroless for minimal attack surface)
 FROM gcr.io/distroless/cc-debian12:nonroot
 
+LABEL org.opencontainers.image.source="https://github.com/co-r-e/cerememory"
+
 COPY --from=builder --chown=nonroot:nonroot /app/target/release/cerememory /usr/local/bin/cerememory
 COPY --from=builder --chown=nonroot:nonroot /tmp/cerememory-data /data
 
