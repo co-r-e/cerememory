@@ -211,8 +211,8 @@ impl CerememoryEngine {
         stats_to_json(&stats)
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[napi]
+    #[allow(clippy::too_many_arguments)]
     pub fn store_raw(
         &self,
         text: String,

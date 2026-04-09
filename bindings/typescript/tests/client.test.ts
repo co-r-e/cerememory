@@ -801,7 +801,7 @@ describe("CerememoryClient", () => {
       expect(init.method).toBe("POST");
 
       const body = JSON.parse(init.body);
-      expect(body.store).toBe("episodic");
+      expect(body.store).toBeUndefined(); // auto-routed by server
       expect(body.content.blocks).toHaveLength(1);
       expect(body.content.blocks[0].modality).toBe("text");
       expect(body.content.blocks[0].format).toBe("text/plain");
