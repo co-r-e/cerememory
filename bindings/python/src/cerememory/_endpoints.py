@@ -11,7 +11,8 @@ from typing import Any
 
 def dump(request: Any) -> dict[str, Any]:
     """Serialize a Pydantic model for JSON transport."""
-    return request.model_dump(mode="json", exclude_none=True)
+    result: dict[str, Any] = request.model_dump(mode="json", exclude_none=True)
+    return result
 
 
 def dump_without_id(request: Any) -> dict[str, Any]:
