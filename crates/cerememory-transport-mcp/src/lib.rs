@@ -522,6 +522,7 @@ fn build_text_store_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_text_raw_store_request(
     content: String,
     session_id: String,

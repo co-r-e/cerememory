@@ -741,16 +741,18 @@ async fn main() -> Result<()> {
         };
 
         let decay_shutdown = async {
-            if let Err(_) =
-                tokio::time::timeout(shutdown_timeout, engine.stop_background_decay()).await
+            if tokio::time::timeout(shutdown_timeout, engine.stop_background_decay())
+                .await
+                .is_err()
             {
                 tracing::warn!("Background decay shutdown timed out");
             }
         };
 
         let dream_shutdown = async {
-            if let Err(_) =
-                tokio::time::timeout(shutdown_timeout, engine.stop_background_dream()).await
+            if tokio::time::timeout(shutdown_timeout, engine.stop_background_dream())
+                .await
+                .is_err()
             {
                 tracing::warn!("Background dream shutdown timed out");
             }

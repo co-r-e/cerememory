@@ -415,6 +415,7 @@ impl PyCerememoryEngine {
         Ok(PyStatsResponse::from_value(val))
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (text, session_id, topic_id=None, source="conversation", speaker="user", visibility="normal", secrecy_level="public"))]
     fn store_raw(
         &self,
@@ -492,6 +493,7 @@ impl PyCerememoryEngine {
         json_value_to_py(py, &val)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (session_id=None, dry_run=false, max_groups=10, include_private_scratch=false, include_sealed=false, promote_semantic=true))]
     fn dream_tick(
         &self,

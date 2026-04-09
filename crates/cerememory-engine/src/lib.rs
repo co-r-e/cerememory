@@ -1557,6 +1557,7 @@ impl CerememoryEngine {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_dream_semantic_metadata(
         session_id: &str,
         raw_topic_id: Option<&str>,

@@ -1,0 +1,8 @@
+# cargo-audit ignore list for Cerememory.
+# These advisories are in transitive dependencies with no direct fix available.
+
+[advisories]
+ignore = [
+    # lru 0.12.5 — IterMut unsoundness; transitive dep of tantivy 0.25
+    "RUSTSEC-2026-0002",
+]
