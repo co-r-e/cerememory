@@ -145,10 +145,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: cerememory-*
 
       - name: Extract changelog for this version
         id: changelog

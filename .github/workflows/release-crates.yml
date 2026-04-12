@@ -85,6 +85,8 @@ jobs:
 
           for crate in \
             cerememory-core \
+            cerememory-store-common \
+            cerememory-store-raw \
             cerememory-store-episodic \
             cerememory-store-semantic \
             cerememory-store-procedural \
@@ -95,13 +97,15 @@ jobs:
             cerememory-evolution \
             cerememory-index \
             cerememory-archive \
+            cerememory-engine \
+            cerememory-config \
+            cerememory-adapter-common \
             cerememory-adapter-claude \
             cerememory-adapter-openai \
             cerememory-adapter-gemini \
-            cerememory-engine \
-            cerememory-config \
             cerememory-transport-http \
             cerememory-transport-grpc \
+            cerememory-transport-mcp \
             cerememory-cli; do
             publish_crate "${crate}"
           done
