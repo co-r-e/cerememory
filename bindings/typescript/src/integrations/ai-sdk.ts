@@ -7,8 +7,7 @@
  *
  * @example
  * ```typescript
- * import { CerememoryClient } from "@cerememory/sdk";
- * import { CerememoryProvider } from "@cerememory/sdk/integrations";
+ * import { CerememoryClient, CerememoryProvider } from "@cerememory/sdk";
  * import { generateText } from "ai";
  *
  * const client = new CerememoryClient("http://localhost:8420", {

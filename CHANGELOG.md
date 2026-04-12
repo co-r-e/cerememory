@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-04-12
+
+### Changed
+
+#### SDK
+- TypeScript SDK import example now uses single-import style (`CerememoryClient` and `CerememoryProvider` from `@cerememory/sdk`)
+- Removed redundant `integrations/index.ts` barrel file; `CerememoryProvider` is re-exported from the package root
+
+#### Documentation
+- Added reference to the separate documentation site repository in README
+
 ## [0.2.1] - 2026-03-22
 
 ### Added
@@ -149,3 +160,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.0]: https://github.com/co-r-e/cerememory/releases/tag/v0.1.0
 [0.2.0]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.0
 [0.2.1]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.1
+[0.2.2]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.2

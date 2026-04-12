@@ -389,6 +389,8 @@ cerememory/
 - [Architecture Decision Records](docs/adr/): Technology stack decisions with full rationale
 - [Human-Plus Memory Phase 1](docs/human-plus-memory-phase1.md): Design for raw journal, dream tick, suppression, and forensic recall
 
+The landing page and documentation site live in a separate repository at `~/Projects/dev_cerememory/cerememory-docs`.
+
 ---
 
 ## Contributing

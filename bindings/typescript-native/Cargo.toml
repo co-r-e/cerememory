@@ -1,6 +1,6 @@
 [package]
 name = "cerememory-napi"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Native Node.js bindings for Cerememory memory engine"
 license = "MIT"
