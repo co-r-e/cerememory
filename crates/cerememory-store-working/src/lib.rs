@@ -173,7 +173,7 @@ impl Store for WorkingMemoryStore {
             .collect();
 
         // Most recently accessed first.
-        matches.sort_by(|a, b| b.last_accessed_at.cmp(&a.last_accessed_at));
+        matches.sort_by_key(|r| std::cmp::Reverse(r.last_accessed_at));
         matches.truncate(limit);
 
         Ok(matches.into_iter().cloned().collect())
