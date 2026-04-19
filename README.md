@@ -81,7 +81,7 @@ Once connected, Claude Code can use the core memory tools plus raw/dream workflo
 | `forget` | Permanently delete memories by UUID |
 | `dream_tick` | Summarize raw journal entries into episodic/semantic memory |
 | `consolidate` | Migrate mature episodic memories to semantic store |
-| `export` | Export all memories to a CMA archive file |
+| `export` | Export curated memories to a CMA archive file |
 | `stats` | View system statistics and store counts |
 
 ### HTTP Server
@@ -142,6 +142,11 @@ const rawId = await client.storeRaw("verbatim transcript note", {
 const rawRecords = await client.recallRaw({ sessionId: "sess-1" });
 const dream = await client.dreamTick({ session_id: "sess-1" });
 ```
+
+Native in-process bindings are also available when you want to embed the engine directly:
+
+- Python: `cerememory-native`
+- Node.js: `@cerememory/native`
 
 ### CLI
 
@@ -267,6 +272,14 @@ data_dir = "./data"
 [http]
 port = 8420
 bind_address = "127.0.0.1"  # localhost only. "0.0.0.0" for network access.
+cors_origins = []            # Empty = emit no CORS headers
+trusted_proxy_cidrs = []     # Optional trusted reverse proxies
+metrics_enabled = false      # Expose /metrics when true
+
+[grpc]
+# port = 8421
+# tls_cert_path = "/path/to/cert.pem"
+# tls_key_path = "/path/to/key.pem"
 
 [auth]
 enabled = false
@@ -276,8 +289,15 @@ api_keys = []  # ["sk-key1", "sk-key2"]
 provider = "none"  # "openai", "claude", "gemini"
 # api_key = "sk-..."
 
+[decay]
+background_interval_secs = 3600  # once per hour
+
 [dream]
 background_interval_secs = 86400  # once per day
+
+[rate_limit]
+requests_per_second = 100
+burst = 50
 
 [log]
 level = "info"    # trace, debug, info, warn, error
@@ -295,7 +315,7 @@ Cerememory is designed with security as a default:
 - **Localhost-only by default**: HTTP and gRPC bind to `127.0.0.1`. Network access requires explicit `bind_address = "0.0.0.0"` configuration, which triggers a warning if auth is disabled.
 - **Bearer token authentication**: Optional API key auth with constant-time comparison. Keys are wrapped in `SecretString` at runtime to prevent accidental logging.
 - **Encrypted exports**: CMA archives support ChaCha20-Poly1305 AEAD encryption with Argon2id key derivation. Derived keys are zeroized after use.
-- **Request size limits**: 2 MB body limit on HTTP API routes. Batch operations capped at 1000 records. Image/audio recall cues validated against size limits.
+- **Request size limits**: HTTP API routes accept request bodies up to 64 MB to support archive import/export workflows. Batch operations are capped at 1000 records. Image/audio recall cues are additionally validated against modality size limits.
 - **Sanitized error responses**: Internal storage paths and details are never exposed to clients. 503 responses include `Retry-After` headers.
 
 For HTTP TLS, use a reverse proxy (nginx, caddy) in front of the HTTP server. gRPC supports native TLS via cert/key configuration.
@@ -314,7 +334,7 @@ For HTTP TLS, use a reverse proxy (nginx, caddy) in front of the HTTP server. gR
 | Full-Text Search | Tantivy | Rust-native Lucene equivalent |
 | Synchronization | parking_lot | Poison-free RwLock/Mutex (no panics on lock contention) |
 | Internal Serialization | MessagePack | Compact binary, schema-less |
-| Archive Format | SQLite (CMA) | Universal, inspectable, single-file |
+| Archive Format | JSON Lines CMA bundle | Portable, inspectable, single-file archive with checksum support |
 | Archive Encryption | ChaCha20-Poly1305 + Argon2id | AEAD with memory-hard KDF, key zeroization via `zeroize` |
 | Python SDK | httpx + Pydantic | Typed HTTP client for Python applications |
 | TypeScript SDK | TypeScript + fetch | Zero-dependency HTTP client for Node.js and browser runtimes |
