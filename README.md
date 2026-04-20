@@ -45,15 +45,21 @@ Cerememory is an open-source memory architecture inspired by the human brain's m
 
 ## Quick Start
 
-### Claude Code (MCP) — Recommended
+### MCP Clients (Claude Code, Codex CLI, Cursor, and others) — Recommended
 
-Cerememory integrates directly with [Claude Code](https://claude.com/claude-code) as an MCP server:
+Cerememory ships an MCP server over stdio and works with **any MCP-compatible client**, not only Claude Code. The same binary plugs into Claude Code, OpenAI Codex CLI, Cursor, Cline, Windsurf, Zed, Continue, and anything else that speaks the Model Context Protocol.
 
 ```bash
-# Build the binary
+# Build the binary (works for every client below)
 cargo build -p cerememory-cli --release
+```
 
-# Add to Claude Code's MCP config (~/.claude/claude_desktop_config.json)
+Pick your client and add the snippet:
+
+<details>
+<summary><strong>Claude Code</strong> — <code>~/.claude/claude_desktop_config.json</code></summary>
+
+```json
 {
   "mcpServers": {
     "cerememory": {
@@ -63,8 +69,46 @@ cargo build -p cerememory-cli --release
   }
 }
 ```
+</details>
 
-Once connected, Claude Code can use the core memory tools plus raw/dream workflows:
+<details>
+<summary><strong>OpenAI Codex CLI</strong> — <code>~/.codex/config.toml</code></summary>
+
+```toml
+[mcp_servers.cerememory]
+command = "/path/to/cerememory"
+args = ["mcp"]
+```
+</details>
+
+<details>
+<summary><strong>Cursor</strong> — <code>~/.cursor/mcp.json</code> (or project <code>.cursor/mcp.json</code>)</summary>
+
+```json
+{
+  "mcpServers": {
+    "cerememory": {
+      "command": "/path/to/cerememory",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><strong>Cline / Continue / Windsurf / Zed</strong> — MCP settings UI or JSON</summary>
+
+Use the same `command` + `args` pair as above. Every MCP client accepts a stdio server definition; only the config file path differs.
+</details>
+
+<details>
+<summary><strong>Any other MCP client</strong></summary>
+
+If the client supports MCP stdio servers, point it at `/path/to/cerememory` with the single argument `mcp`. No additional daemon, port, or auth setup is required for local use.
+</details>
+
+Once connected, the client can use the core memory tools plus raw/dream workflows:
 
 | Tool | Description |
 |------|-------------|
