@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-04-22
+
+### Added
+
+#### MCP and Operations
+- Added `cerememory mcp --server-url` so multiple MCP clients can share one long-lived Cerememory HTTP server without competing for embedded `redb` and Tantivy locks
+- Added upstream MCP proxy support for store, recall, raw journal, timeline, associate, forget, consolidate, dream tick, stats, inspect, and export tools
+- Added `CEREMEMORY_SERVER_API_KEY` and `--server-timeout-secs` support for remote MCP proxy operation
+- Added MCP protocol E2E coverage for initialize, tools/list, store, and recall tool calls
+
+### Fixed
+
+#### MCP and Reliability
+- Fixed MCP tool exposure by wiring the generated tool router into the `ServerHandler`
+- Improved startup guidance when a local embedded store is already locked by another Cerememory process
+- Validated remote MCP server URLs before startup and rejected zero-second upstream timeouts
+- Made upstream non-JSON error previews UTF-8 safe
+
 ## [0.2.2] - 2026-04-12
 
 ### Changed
@@ -160,4 +178,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.0]: https://github.com/co-r-e/cerememory/releases/tag/v0.1.0
 [0.2.0]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.0
 [0.2.1]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.1
+[0.2.3]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.3
 [0.2.2]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.2
