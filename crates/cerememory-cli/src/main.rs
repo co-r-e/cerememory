@@ -644,80 +644,6 @@ fn init_logging(config: &ServerConfig) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_redb_lock_error_messages() {
-        assert!(is_storage_lock_error(
-            "Failed to open redb database: Database already open. Cannot acquire lock."
-        ));
-    }
-
-    #[test]
-    fn engine_init_lock_error_includes_actionable_guidance() {
-        let mut config = ServerConfig::default();
-        config.data_dir = "/tmp/cerememory-locktest".to_string();
-
-        let err = map_engine_init_error(
-            &config,
-            cerememory_core::error::CerememoryError::Storage(
-                "Failed to open redb database: Database already open. Cannot acquire lock."
-                    .to_string(),
-            ),
-        );
-
-        let message = err.to_string();
-        assert!(message.contains("already in use by another Cerememory process"));
-        assert!(message.contains(&config.data_dir));
-        assert!(message.contains("multiple MCP processes"));
-    }
-
-    #[test]
-    fn non_lock_storage_errors_are_preserved() {
-        let config = ServerConfig::default();
-        let err = map_engine_init_error(
-            &config,
-            cerememory_core::error::CerememoryError::Storage("disk is full".to_string()),
-        );
-
-        assert_eq!(err.to_string(), "Storage error: disk is full");
-    }
-
-    #[test]
-    fn remote_mcp_options_extracts_server_settings_without_local_config() {
-        let cli = Cli {
-            data_dir: Some("/tmp/ignored".to_string()),
-            config: Some("/tmp/ignored.toml".to_string()),
-            command: Commands::Mcp {
-                server_url: Some("http://127.0.0.1:8420".to_string()),
-                server_api_key: Some("secret".to_string()),
-                server_timeout_secs: Some(120),
-            },
-        };
-
-        let remote = remote_mcp_options(&cli).unwrap();
-        assert_eq!(remote.server_url, "http://127.0.0.1:8420");
-        assert_eq!(remote.server_api_key.as_deref(), Some("secret"));
-        assert_eq!(remote.server_timeout_secs, Some(120));
-    }
-
-    #[test]
-    fn remote_mcp_timeout_must_be_non_zero() {
-        let parsed = Cli::try_parse_from([
-            "cerememory",
-            "mcp",
-            "--server-url",
-            "http://127.0.0.1:8420",
-            "--server-timeout-secs",
-            "0",
-        ]);
-
-        assert!(parsed.is_err());
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -1367,4 +1293,80 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_redb_lock_error_messages() {
+        assert!(is_storage_lock_error(
+            "Failed to open redb database: Database already open. Cannot acquire lock."
+        ));
+    }
+
+    #[test]
+    fn engine_init_lock_error_includes_actionable_guidance() {
+        let config = ServerConfig {
+            data_dir: "/tmp/cerememory-locktest".to_string(),
+            ..ServerConfig::default()
+        };
+
+        let err = map_engine_init_error(
+            &config,
+            cerememory_core::error::CerememoryError::Storage(
+                "Failed to open redb database: Database already open. Cannot acquire lock."
+                    .to_string(),
+            ),
+        );
+
+        let message = err.to_string();
+        assert!(message.contains("already in use by another Cerememory process"));
+        assert!(message.contains(&config.data_dir));
+        assert!(message.contains("multiple MCP processes"));
+    }
+
+    #[test]
+    fn non_lock_storage_errors_are_preserved() {
+        let config = ServerConfig::default();
+        let err = map_engine_init_error(
+            &config,
+            cerememory_core::error::CerememoryError::Storage("disk is full".to_string()),
+        );
+
+        assert_eq!(err.to_string(), "Storage error: disk is full");
+    }
+
+    #[test]
+    fn remote_mcp_options_extracts_server_settings_without_local_config() {
+        let cli = Cli {
+            data_dir: Some("/tmp/ignored".to_string()),
+            config: Some("/tmp/ignored.toml".to_string()),
+            command: Commands::Mcp {
+                server_url: Some("http://127.0.0.1:8420".to_string()),
+                server_api_key: Some("secret".to_string()),
+                server_timeout_secs: Some(120),
+            },
+        };
+
+        let remote = remote_mcp_options(&cli).unwrap();
+        assert_eq!(remote.server_url, "http://127.0.0.1:8420");
+        assert_eq!(remote.server_api_key.as_deref(), Some("secret"));
+        assert_eq!(remote.server_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn remote_mcp_timeout_must_be_non_zero() {
+        let parsed = Cli::try_parse_from([
+            "cerememory",
+            "mcp",
+            "--server-url",
+            "http://127.0.0.1:8420",
+            "--server-timeout-secs",
+            "0",
+        ]);
+
+        assert!(parsed.is_err());
+    }
 }
