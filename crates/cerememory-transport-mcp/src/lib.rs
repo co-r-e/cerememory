@@ -4,14 +4,17 @@
 //! direct integration with Claude Code and other MCP-compatible clients.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, RETRY_AFTER};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::schemars;
 use rmcp::service::ServiceExt;
-use rmcp::{tool, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use cerememory_core::error::CerememoryError;
@@ -259,12 +262,214 @@ struct McpRawRecallResponse {
     total_candidates: u32,
 }
 
+#[derive(Clone)]
+enum McpBackend {
+    Local(Arc<CerememoryEngine>),
+    Remote(Arc<CerememoryHttpClient>),
+}
+
+#[derive(Clone)]
+struct CerememoryHttpClient {
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl CerememoryHttpClient {
+    fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        timeout: Option<Duration>,
+    ) -> Result<Self, CerememoryError> {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let parsed = reqwest::Url::parse(&base_url)
+            .map_err(|e| CerememoryError::Validation(format!("Invalid server URL: {e}")))?;
+        match parsed.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                return Err(CerememoryError::Validation(format!(
+                    "Invalid server URL scheme '{scheme}'. Use http or https."
+                )));
+            }
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+
+        if let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) {
+            let mut auth = HeaderValue::from_str(&format!("Bearer {api_key}"))
+                .map_err(|e| CerememoryError::Validation(format!("Invalid API key header: {e}")))?;
+            auth.set_sensitive(true);
+            headers.insert(AUTHORIZATION, auth);
+        }
+
+        let mut builder = reqwest::Client::builder()
+            .default_headers(headers)
+            .connect_timeout(Duration::from_secs(10));
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout);
+        }
+        let client = builder
+            .build()
+            .map_err(|e| CerememoryError::Internal(format!("Failed to build HTTP client: {e}")))?;
+
+        Ok(Self { base_url, client })
+    }
+
+    async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, CerememoryError> {
+        let response = self
+            .client
+            .get(self.url(path))
+            .send()
+            .await
+            .map_err(http_transport_err)?;
+        Self::decode_json_response(response).await
+    }
+
+    async fn post_json<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, CerememoryError> {
+        let response = self
+            .client
+            .post(self.url(path))
+            .json(body)
+            .send()
+            .await
+            .map_err(http_transport_err)?;
+        Self::decode_json_response(response).await
+    }
+
+    async fn patch_no_content<B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(), CerememoryError> {
+        let response = self
+            .client
+            .patch(self.url(path))
+            .json(body)
+            .send()
+            .await
+            .map_err(http_transport_err)?;
+        Self::decode_empty_response(response).await
+    }
+
+    async fn delete_json<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, CerememoryError> {
+        let response = self
+            .client
+            .delete(self.url(path))
+            .json(body)
+            .send()
+            .await
+            .map_err(http_transport_err)?;
+        Self::decode_json_response(response).await
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    async fn decode_json_response<T: DeserializeOwned>(
+        response: reqwest::Response,
+    ) -> Result<T, CerememoryError> {
+        if response.status().is_success() {
+            return response.json::<T>().await.map_err(|e| {
+                CerememoryError::Serialization(format!("HTTP JSON decode failed: {e}"))
+            });
+        }
+
+        Err(http_response_err(response).await)
+    }
+
+    async fn decode_empty_response(response: reqwest::Response) -> Result<(), CerememoryError> {
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        Err(http_response_err(response).await)
+    }
+}
+
+fn http_transport_err(err: reqwest::Error) -> CerememoryError {
+    CerememoryError::Internal(format!("Failed to reach upstream Cerememory server: {err}"))
+}
+
+async fn http_response_err(response: reqwest::Response) -> CerememoryError {
+    let retry_after = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok());
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if let Ok(cmp_error) = serde_json::from_str::<CMPError>(&body) {
+        return cmp_error_to_cerememory_error(cmp_error, retry_after);
+    }
+
+    let preview = upstream_error_preview(&body, status);
+
+    CerememoryError::Internal(format!(
+        "Upstream Cerememory server error (HTTP {}): {}",
+        status, preview
+    ))
+}
+
+fn upstream_error_preview(body: &str, status: reqwest::StatusCode) -> String {
+    if body.is_empty() {
+        return format!("HTTP {status}");
+    }
+
+    let mut chars = body.chars();
+    let preview: String = chars.by_ref().take(500).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
+fn cmp_error_to_cerememory_error(
+    cmp_error: CMPError,
+    retry_after_header: Option<u32>,
+) -> CerememoryError {
+    match cmp_error.code {
+        CMPErrorCode::RecordNotFound => CerememoryError::RecordNotFound(cmp_error.message),
+        CMPErrorCode::StoreInvalid => CerememoryError::StoreInvalid(cmp_error.message),
+        CMPErrorCode::ContentTooLarge | CMPErrorCode::ValidationError => {
+            CerememoryError::Validation(cmp_error.message)
+        }
+        CMPErrorCode::ModalityUnsupported => {
+            CerememoryError::ModalityUnsupported(cmp_error.message)
+        }
+        CMPErrorCode::WorkingMemoryFull => CerememoryError::WorkingMemoryFull,
+        CMPErrorCode::DecayEngineBusy => CerememoryError::DecayEngineBusy {
+            retry_after_secs: cmp_error.retry_after.or(retry_after_header).unwrap_or(1),
+        },
+        CMPErrorCode::ConsolidationInProgress => CerememoryError::ConsolidationInProgress,
+        CMPErrorCode::ExportFailed => CerememoryError::ExportFailed(cmp_error.message),
+        CMPErrorCode::ImportConflict => CerememoryError::ImportConflict(cmp_error.message),
+        CMPErrorCode::ForgetUnconfirmed => CerememoryError::ForgetUnconfirmed,
+        CMPErrorCode::VersionMismatch => CerememoryError::Validation(cmp_error.message),
+        CMPErrorCode::Unauthorized => CerememoryError::Unauthorized(cmp_error.message),
+        CMPErrorCode::RateLimited => CerememoryError::RateLimited {
+            retry_after_secs: cmp_error.retry_after.or(retry_after_header).unwrap_or(1),
+        },
+        CMPErrorCode::InternalError => CerememoryError::Internal(cmp_error.message),
+    }
+}
+
 // ─── Server ─────────────────────────────────────────────────────────
 
-/// MCP server backed by a shared `CerememoryEngine`.
+/// MCP server backed either by a shared local `CerememoryEngine` or an upstream HTTP server.
 #[derive(Clone)]
 pub struct CerememoryMcpServer {
-    engine: Arc<CerememoryEngine>,
+    backend: McpBackend,
     #[allow(dead_code)] // Used by rmcp tool_router macro at runtime
     tool_router: ToolRouter<Self>,
 }
@@ -577,11 +782,193 @@ fn parse_export_format(format: Option<String>) -> Result<String, McpError> {
     }
 }
 
+impl McpBackend {
+    async fn encode_store(
+        &self,
+        req: EncodeStoreRequest,
+    ) -> Result<EncodeStoreResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.encode_store(req).await,
+            Self::Remote(client) => client.post_json("/v1/encode", &req).await,
+        }
+    }
+
+    async fn encode_store_raw(
+        &self,
+        req: EncodeStoreRawRequest,
+    ) -> Result<EncodeStoreRawResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.encode_store_raw(req).await,
+            Self::Remote(client) => client.post_json("/v1/encode/raw", &req).await,
+        }
+    }
+
+    async fn encode_update(&self, req: EncodeUpdateRequest) -> Result<(), CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.encode_update(req).await,
+            Self::Remote(client) => {
+                client
+                    .patch_no_content(&format!("/v1/encode/{}", req.record_id), &req)
+                    .await
+            }
+        }
+    }
+
+    async fn encode_batch(
+        &self,
+        req: EncodeBatchRequest,
+    ) -> Result<EncodeBatchResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.encode_batch(req).await,
+            Self::Remote(client) => client.post_json("/v1/encode/batch", &req).await,
+        }
+    }
+
+    async fn encode_batch_store_raw(
+        &self,
+        req: EncodeBatchStoreRawRequest,
+    ) -> Result<EncodeBatchStoreRawResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.encode_batch_store_raw(req).await,
+            Self::Remote(client) => client.post_json("/v1/encode/raw/batch", &req).await,
+        }
+    }
+
+    async fn recall_query(
+        &self,
+        req: RecallQueryRequest,
+    ) -> Result<RecallQueryResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.recall_query(req).await,
+            Self::Remote(client) => client.post_json("/v1/recall/query", &req).await,
+        }
+    }
+
+    async fn recall_raw_query(
+        &self,
+        req: RecallRawQueryRequest,
+    ) -> Result<RecallRawQueryResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.recall_raw_query(req).await,
+            Self::Remote(client) => client.post_json("/v1/recall/raw", &req).await,
+        }
+    }
+
+    async fn recall_timeline(
+        &self,
+        req: RecallTimelineRequest,
+    ) -> Result<RecallTimelineResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.recall_timeline(req).await,
+            Self::Remote(client) => client.post_json("/v1/recall/timeline", &req).await,
+        }
+    }
+
+    async fn recall_associate(
+        &self,
+        req: RecallAssociateRequest,
+    ) -> Result<RecallAssociateResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.recall_associate(req).await,
+            Self::Remote(client) => {
+                client
+                    .post_json(&format!("/v1/recall/associate/{}", req.record_id), &req)
+                    .await
+            }
+        }
+    }
+
+    async fn lifecycle_forget(&self, req: ForgetRequest) -> Result<u32, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.lifecycle_forget(req).await,
+            Self::Remote(client) => {
+                let response: ForgetResponse =
+                    client.delete_json("/v1/lifecycle/forget", &req).await?;
+                Ok(response.records_deleted)
+            }
+        }
+    }
+
+    async fn lifecycle_consolidate(
+        &self,
+        req: ConsolidateRequest,
+    ) -> Result<ConsolidateResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.lifecycle_consolidate(req).await,
+            Self::Remote(client) => client.post_json("/v1/lifecycle/consolidate", &req).await,
+        }
+    }
+
+    async fn lifecycle_dream_tick(
+        &self,
+        req: DreamTickRequest,
+    ) -> Result<DreamTickResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.lifecycle_dream_tick(req).await,
+            Self::Remote(client) => client.post_json("/v1/lifecycle/dream-tick", &req).await,
+        }
+    }
+
+    async fn introspect_stats(&self) -> Result<StatsResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.introspect_stats().await,
+            Self::Remote(client) => client.get_json("/v1/introspect/stats").await,
+        }
+    }
+
+    async fn introspect_record(
+        &self,
+        req: RecordIntrospectRequest,
+    ) -> Result<MemoryRecord, CerememoryError> {
+        match self {
+            Self::Local(engine) => engine.introspect_record(req).await,
+            Self::Remote(client) => client
+                .get_json(&format!(
+                    "/v1/introspect/record/{}?include_history={}&include_associations={}&include_versions={}",
+                    req.record_id,
+                    req.include_history,
+                    req.include_associations,
+                    req.include_versions
+                ))
+                .await,
+        }
+    }
+
+    async fn lifecycle_export(
+        &self,
+        req: ExportRequest,
+    ) -> Result<ExportArchiveResponse, CerememoryError> {
+        match self {
+            Self::Local(engine) => {
+                let (archive_data, metadata) = engine.lifecycle_export(req).await?;
+                Ok(ExportArchiveResponse {
+                    metadata,
+                    archive_data,
+                })
+            }
+            Self::Remote(client) => client.post_json("/v1/lifecycle/export", &req).await,
+        }
+    }
+}
+
 #[tool_router]
 impl CerememoryMcpServer {
     pub fn new(engine: Arc<CerememoryEngine>) -> Self {
+        Self::with_backend(McpBackend::Local(engine))
+    }
+
+    pub fn from_http(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        timeout: Option<Duration>,
+    ) -> Result<Self, CerememoryError> {
+        let client = CerememoryHttpClient::new(base_url, api_key, timeout)?;
+        Ok(Self::with_backend(McpBackend::Remote(Arc::new(client))))
+    }
+
+    fn with_backend(backend: McpBackend) -> Self {
         Self {
-            engine,
+            backend,
             tool_router: Self::tool_router(),
         }
     }
@@ -595,7 +982,7 @@ impl CerememoryMcpServer {
         let store_type = p.store.map(|s| parse_store_type(&s)).transpose()?;
         let emotion = parse_emotion(p.emotion)?;
         let req = build_text_store_request(p.content, store_type, emotion);
-        let resp = self.engine.encode_store(req).await.map_err(engine_err)?;
+        let resp = self.backend.encode_store(req).await.map_err(engine_err)?;
         ok_json(&resp)
     }
 
@@ -627,7 +1014,7 @@ impl CerememoryMcpServer {
             parse_secrecy_level(p.secrecy_level)?,
         );
         let resp = self
-            .engine
+            .backend
             .encode_store_raw(req)
             .await
             .map_err(engine_err)?;
@@ -668,7 +1055,7 @@ impl CerememoryMcpServer {
             metadata: None,
         };
 
-        self.engine.encode_update(req).await.map_err(engine_err)?;
+        self.backend.encode_update(req).await.map_err(engine_err)?;
         ok_text(format!("Updated record {record_id}"))
     }
 
@@ -708,7 +1095,7 @@ impl CerememoryMcpServer {
             infer_associations: true,
         };
 
-        let resp = self.engine.encode_batch(req).await.map_err(engine_err)?;
+        let resp = self.backend.encode_batch(req).await.map_err(engine_err)?;
         ok_json(&resp)
     }
 
@@ -754,7 +1141,7 @@ impl CerememoryMcpServer {
         }
 
         let resp = self
-            .engine
+            .backend
             .encode_batch_store_raw(EncodeBatchStoreRawRequest {
                 header: None,
                 records: encode_records,
@@ -793,7 +1180,7 @@ impl CerememoryMcpServer {
             recall_mode: RecallMode::Perfect,
         };
 
-        let resp = self.engine.recall_query(req).await.map_err(engine_err)?;
+        let resp = self.backend.recall_query(req).await.map_err(engine_err)?;
 
         let mcp_resp = McpRecallResponse {
             memories: resp
@@ -851,7 +1238,7 @@ impl CerememoryMcpServer {
             }
         };
         let resp = self
-            .engine
+            .backend
             .recall_raw_query(RecallRawQueryRequest {
                 header: None,
                 session_id: p.session_id.filter(|value| !value.trim().is_empty()),
@@ -957,7 +1344,11 @@ impl CerememoryMcpServer {
             emotion_filter: None,
         };
 
-        let resp = self.engine.recall_timeline(req).await.map_err(engine_err)?;
+        let resp = self
+            .backend
+            .recall_timeline(req)
+            .await
+            .map_err(engine_err)?;
         ok_json(&resp)
     }
 
@@ -981,7 +1372,7 @@ impl CerememoryMcpServer {
         };
 
         let resp = self
-            .engine
+            .backend
             .recall_associate(req)
             .await
             .map_err(engine_err)?;
@@ -1015,7 +1406,7 @@ impl CerememoryMcpServer {
         };
 
         let deleted = self
-            .engine
+            .backend
             .lifecycle_forget(req)
             .await
             .map_err(engine_err)?;
@@ -1041,7 +1432,7 @@ impl CerememoryMcpServer {
         };
 
         let resp = self
-            .engine
+            .backend
             .lifecycle_consolidate(req)
             .await
             .map_err(engine_err)?;
@@ -1057,7 +1448,7 @@ impl CerememoryMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let resp = self
-            .engine
+            .backend
             .lifecycle_dream_tick(DreamTickRequest {
                 header: None,
                 session_id: p.session_id.filter(|value| !value.trim().is_empty()),
@@ -1075,7 +1466,7 @@ impl CerememoryMcpServer {
 
     #[tool(description = "Get system statistics: record counts, store sizes, decay state.")]
     async fn stats(&self) -> Result<CallToolResult, McpError> {
-        let resp = self.engine.introspect_stats().await.map_err(engine_err)?;
+        let resp = self.backend.introspect_stats().await.map_err(engine_err)?;
         ok_json(&resp)
     }
 
@@ -1094,7 +1485,7 @@ impl CerememoryMcpServer {
         };
 
         let record = self
-            .engine
+            .backend
             .introspect_record(req)
             .await
             .map_err(engine_err)?;
@@ -1122,11 +1513,12 @@ impl CerememoryMcpServer {
             encryption_key: p.encryption_key,
         };
 
-        let (bytes, resp) = self
-            .engine
+        let resp = self
+            .backend
             .lifecycle_export(req)
             .await
             .map_err(engine_err)?;
+        let bytes = resp.archive_data.clone();
 
         let path = std::path::PathBuf::from(&p.output_path);
         // Resolve to an absolute path and validate it is not a symlink or
@@ -1149,7 +1541,7 @@ impl CerememoryMcpServer {
             McpError::internal_error(format!("Failed to write archive file: {e}"), None)
         })?;
 
-        let summary = serde_json::to_string_pretty(&resp).map_err(internal_err)?;
+        let summary = serde_json::to_string_pretty(&resp.metadata).map_err(internal_err)?;
         ok_text(format!(
             "{summary}\n\nArchive written to: {}\nArchive size: {} bytes",
             resolved.display(),
@@ -1158,6 +1550,7 @@ impl CerememoryMcpServer {
     }
 }
 
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for CerememoryMcpServer {
     fn get_info(&self) -> ServerInfo {
         let capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -1191,7 +1584,22 @@ impl ServerHandler for CerememoryMcpServer {
 pub async fn serve_stdio(engine: Arc<CerememoryEngine>) -> anyhow::Result<()> {
     tracing::info!("Starting Cerememory MCP server on stdio");
     let server = CerememoryMcpServer::new(engine);
+    serve_server_stdio(server).await
+}
 
+/// Start the MCP server on stdio while proxying requests to an upstream Cerememory HTTP server.
+pub async fn serve_stdio_http(
+    base_url: impl Into<String>,
+    api_key: Option<String>,
+    timeout: Option<Duration>,
+) -> anyhow::Result<()> {
+    let base_url = base_url.into();
+    tracing::info!(%base_url, "Starting Cerememory MCP HTTP proxy on stdio");
+    let server = CerememoryMcpServer::from_http(base_url, api_key, timeout)?;
+    serve_server_stdio(server).await
+}
+
+async fn serve_server_stdio(server: CerememoryMcpServer) -> anyhow::Result<()> {
     let service = server
         .serve(rmcp::transport::io::stdio())
         .await
@@ -1209,6 +1617,7 @@ pub async fn serve_stdio(engine: Arc<CerememoryEngine>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::{model::CallToolRequestParams, ServiceExt};
 
     #[test]
     fn server_creates_successfully() {
@@ -1216,6 +1625,38 @@ mod tests {
         let server = CerememoryMcpServer::new(engine);
         let info = server.get_info();
         assert_eq!(info.server_info.name, "cerememory");
+    }
+
+    #[test]
+    fn http_proxy_server_creates_successfully() {
+        let server = CerememoryMcpServer::from_http(
+            "http://127.0.0.1:8420/",
+            None,
+            Some(Duration::from_secs(90)),
+        )
+        .unwrap();
+        let info = server.get_info();
+        assert_eq!(info.server_info.name, "cerememory");
+
+        match &server.backend {
+            McpBackend::Remote(client) => assert_eq!(client.base_url, "http://127.0.0.1:8420"),
+            McpBackend::Local(_) => panic!("expected remote backend"),
+        }
+    }
+
+    #[test]
+    fn http_proxy_rejects_invalid_server_urls() {
+        let err = match CerememoryMcpServer::from_http("127.0.0.1:8420", None, None) {
+            Ok(_) => panic!("expected invalid URL error"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, CerememoryError::Validation(_)));
+
+        let err = match CerememoryMcpServer::from_http("file:///tmp/cerememory.sock", None, None) {
+            Ok(_) => panic!("expected invalid scheme error"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, CerememoryError::Validation(_)));
     }
 
     #[test]
@@ -1306,6 +1747,34 @@ mod tests {
     }
 
     #[test]
+    fn cmp_error_retry_after_maps_to_rate_limited_error() {
+        let err = cmp_error_to_cerememory_error(
+            CMPError {
+                code: CMPErrorCode::RateLimited,
+                message: "Rate limit exceeded".to_string(),
+                details: None,
+                retry_after: Some(9),
+                request_id: None,
+            },
+            None,
+        );
+
+        match err {
+            CerememoryError::RateLimited { retry_after_secs } => assert_eq!(retry_after_secs, 9),
+            other => panic!("expected rate limited error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_json_upstream_error_preview_is_utf8_safe() {
+        let body = "あ".repeat(600);
+        let preview = upstream_error_preview(&body, reqwest::StatusCode::BAD_GATEWAY);
+
+        assert!(preview.ends_with("..."));
+        assert!(preview.starts_with('あ'));
+    }
+
+    #[test]
     fn store_rejects_empty_content_validation() {
         // This validates the trim().is_empty() logic used in the store handler
         assert!("".trim().is_empty());
@@ -1359,5 +1828,104 @@ mod tests {
                 "update".to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_initialize_list_tools_and_call_store_then_recall() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let server = CerememoryMcpServer::new(engine);
+        let (server_transport, client_transport) = tokio::io::duplex(16_384);
+
+        let server_handle = tokio::spawn(async move {
+            let running = server.serve(server_transport).await?;
+            anyhow::Ok(running)
+        });
+
+        let client = ().serve(client_transport).await.expect("client initialize");
+        let mut tools = Vec::new();
+        for _ in 0..20 {
+            tools = client.peer().list_all_tools().await.expect("list tools");
+            if !tools.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let tool_names: Vec<String> = tools.iter().map(|tool| tool.name.to_string()).collect();
+        assert!(
+            tool_names.iter().any(|name| name == "store"),
+            "{tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|name| name == "recall"),
+            "{tool_names:?}"
+        );
+
+        let store_result = client
+            .call_tool(
+                CallToolRequestParams::new("store").with_arguments(
+                    serde_json::json!({
+                        "content": "parallel mcp e2e memory",
+                        "store": "semantic",
+                        "emotion": "joy"
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("store tool call");
+
+        let store_payload = store_result
+            .content
+            .first()
+            .and_then(|content| content.raw.as_text())
+            .map(|text| text.text.clone())
+            .expect("store result text");
+        let store_json: serde_json::Value =
+            serde_json::from_str(&store_payload).expect("store result json");
+        assert_eq!(store_json["store"], "semantic");
+        assert!(store_json["record_id"].as_str().is_some());
+
+        let recall_result = client
+            .call_tool(
+                CallToolRequestParams::new("recall").with_arguments(
+                    serde_json::json!({
+                        "query": "parallel mcp e2e memory",
+                        "limit": 5
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("recall tool call");
+
+        let recall_payload = recall_result
+            .content
+            .first()
+            .and_then(|content| content.raw.as_text())
+            .map(|text| text.text.clone())
+            .expect("recall result text");
+        let recall_json: serde_json::Value =
+            serde_json::from_str(&recall_payload).expect("recall result json");
+        let memories = recall_json["memories"]
+            .as_array()
+            .expect("recall memories array");
+        assert!(!memories.is_empty());
+        assert!(memories.iter().any(|memory| {
+            memory["text"]
+                .as_str()
+                .map(|text| text.contains("parallel mcp e2e memory"))
+                .unwrap_or(false)
+        }));
+
+        client.cancel().await.expect("client cancel");
+        let running = server_handle
+            .await
+            .expect("server task")
+            .expect("server start");
+        running.cancel().await.expect("server cancel");
     }
 }

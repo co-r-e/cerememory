@@ -937,10 +937,12 @@ dependencies = [
  "cerememory-core",
  "cerememory-engine",
  "chrono",
+ "reqwest",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -3469,6 +3471,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
 ]

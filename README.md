@@ -49,6 +49,8 @@ Cerememory is an open-source memory architecture inspired by the human brain's m
 
 Cerememory ships an MCP server over stdio and works with **any MCP-compatible client**, not only Claude Code. The same binary plugs into Claude Code, OpenAI Codex CLI, Cursor, Cline, Windsurf, Zed, Continue, and anything else that speaks the Model Context Protocol.
 
+For **multiple terminal sessions / multiple MCP clients in parallel**, run a single `cerememory serve` process for the shared `data_dir`, and point each MCP client at that server with `mcp --server-url ...`. This keeps `redb` and Tantivy single-owned while allowing many MCP processes to operate concurrently.
+
 ```bash
 # Build the binary (works for every client below)
 cargo build -p cerememory-cli --release
@@ -79,6 +81,16 @@ Pick your client and add the snippet:
 command = "/path/to/cerememory"
 args = ["mcp"]
 ```
+
+Parallel-safe shared-memory setup:
+
+```toml
+[mcp_servers.cerememory]
+command = "/path/to/cerememory"
+args = ["mcp", "--server-url", "http://127.0.0.1:8420"]
+```
+
+If the shared HTTP server requires auth, prefer setting `CEREMEMORY_SERVER_API_KEY` in the client environment instead of passing `--server-api-key` on the command line. For long-running upstream operations, `--server-timeout-secs` can be used to set an explicit request timeout; if omitted, per-request timeout is disabled.
 </details>
 
 <details>
@@ -105,8 +117,11 @@ Use the same `command` + `args` pair as above. Every MCP client accepts a stdio 
 <details>
 <summary><strong>Any other MCP client</strong></summary>
 
-If the client supports MCP stdio servers, point it at `/path/to/cerememory` with the single argument `mcp`. No additional daemon, port, or auth setup is required for local use.
+If the client supports MCP stdio servers, point it at `/path/to/cerememory` with the single argument `mcp`. No additional daemon, port, or auth setup is required for single-client local use.
 </details>
+
+> [!WARNING]
+> `cerememory mcp` without `--server-url` opens the embedded `redb` and Tantivy stores directly. Only one Cerememory process can use the same `data_dir` at a time. For shared multi-client access, run one long-lived `cerememory serve` process and point every MCP client at it with `mcp --server-url http://127.0.0.1:8420`.
 
 Once connected, the client can use the core memory tools plus raw/dream workflows:
 

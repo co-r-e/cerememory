@@ -5,7 +5,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{value_parser, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -31,6 +31,13 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteMcpOptions {
+    server_url: String,
+    server_api_key: Option<String>,
+    server_timeout_secs: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -282,7 +289,19 @@ enum Commands {
     },
 
     /// Start the MCP (Model Context Protocol) server on stdio
-    Mcp,
+    Mcp {
+        /// Proxy MCP requests to an existing Cerememory HTTP server instead of opening local storage.
+        #[arg(long)]
+        server_url: Option<String>,
+
+        /// Bearer token for the upstream Cerememory HTTP server. Falls back to CEREMEMORY_SERVER_API_KEY when omitted.
+        #[arg(long)]
+        server_api_key: Option<String>,
+
+        /// Optional request timeout for the upstream Cerememory HTTP server in seconds. Omit to disable per-request timeout.
+        #[arg(long, value_parser = value_parser!(u64).range(1..))]
+        server_timeout_secs: Option<u64>,
+    },
 }
 
 fn parse_store_type(s: &str) -> Result<StoreType> {
@@ -520,11 +539,85 @@ fn build_llm_provider(
     }
 }
 
+fn is_storage_lock_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "database already open",
+        "cannot acquire lock",
+        "failed to acquire lockfile",
+        "lockfile",
+        "resource temporarily unavailable",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
+}
+
+fn map_engine_init_error(
+    config: &ServerConfig,
+    err: cerememory_core::error::CerememoryError,
+) -> anyhow::Error {
+    match err {
+        cerememory_core::error::CerememoryError::Storage(message)
+            if is_storage_lock_error(&message) =>
+        {
+            anyhow::anyhow!(
+                "Data directory '{}' is already in use by another Cerememory process.\n\
+                 Cerememory opens embedded redb and Tantivy stores directly, so only one \
+                 `cerememory serve` or `cerememory mcp` process can use the same data directory \
+                 at a time.\n\
+                 Stop the other process, use a different `--data-dir`, or share a single \
+                 long-lived Cerememory server instead of launching multiple MCP processes \
+                 against the same directory.\n\
+                 Original storage error: {}",
+                config.data_dir,
+                message
+            )
+        }
+        other => anyhow::Error::new(other),
+    }
+}
+
 fn create_engine_from_config(config: &ServerConfig) -> Result<CerememoryEngine> {
     std::fs::create_dir_all(&config.data_dir).context("Failed to create data directory")?;
     let mut engine_config = config.to_engine_config();
     engine_config.llm_provider = build_llm_provider(config)?;
-    Ok(CerememoryEngine::new(engine_config)?)
+    CerememoryEngine::new(engine_config).map_err(|err| map_engine_init_error(config, err))
+}
+
+fn remote_mcp_options(cli: &Cli) -> Option<RemoteMcpOptions> {
+    match &cli.command {
+        Commands::Mcp {
+            server_url: Some(server_url),
+            server_api_key,
+            server_timeout_secs,
+        } => Some(RemoteMcpOptions {
+            server_url: server_url.clone(),
+            server_api_key: server_api_key
+                .clone()
+                .or_else(|| std::env::var("CEREMEMORY_SERVER_API_KEY").ok())
+                .filter(|value| !value.trim().is_empty()),
+            server_timeout_secs: *server_timeout_secs,
+        }),
+        _ => None,
+    }
+}
+
+fn install_panic_hook() {
+    // Install global panic handler to capture panics in structured logs
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        tracing::error!(location = %location, payload = %payload, "Panic occurred");
+    }));
 }
 
 /// Initialize tracing subscriber from config.
@@ -551,27 +644,101 @@ fn init_logging(config: &ServerConfig) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_redb_lock_error_messages() {
+        assert!(is_storage_lock_error(
+            "Failed to open redb database: Database already open. Cannot acquire lock."
+        ));
+    }
+
+    #[test]
+    fn engine_init_lock_error_includes_actionable_guidance() {
+        let mut config = ServerConfig::default();
+        config.data_dir = "/tmp/cerememory-locktest".to_string();
+
+        let err = map_engine_init_error(
+            &config,
+            cerememory_core::error::CerememoryError::Storage(
+                "Failed to open redb database: Database already open. Cannot acquire lock."
+                    .to_string(),
+            ),
+        );
+
+        let message = err.to_string();
+        assert!(message.contains("already in use by another Cerememory process"));
+        assert!(message.contains(&config.data_dir));
+        assert!(message.contains("multiple MCP processes"));
+    }
+
+    #[test]
+    fn non_lock_storage_errors_are_preserved() {
+        let config = ServerConfig::default();
+        let err = map_engine_init_error(
+            &config,
+            cerememory_core::error::CerememoryError::Storage("disk is full".to_string()),
+        );
+
+        assert_eq!(err.to_string(), "Storage error: disk is full");
+    }
+
+    #[test]
+    fn remote_mcp_options_extracts_server_settings_without_local_config() {
+        let cli = Cli {
+            data_dir: Some("/tmp/ignored".to_string()),
+            config: Some("/tmp/ignored.toml".to_string()),
+            command: Commands::Mcp {
+                server_url: Some("http://127.0.0.1:8420".to_string()),
+                server_api_key: Some("secret".to_string()),
+                server_timeout_secs: Some(120),
+            },
+        };
+
+        let remote = remote_mcp_options(&cli).unwrap();
+        assert_eq!(remote.server_url, "http://127.0.0.1:8420");
+        assert_eq!(remote.server_api_key.as_deref(), Some("secret"));
+        assert_eq!(remote.server_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn remote_mcp_timeout_must_be_non_zero() {
+        let parsed = Cli::try_parse_from([
+            "cerememory",
+            "mcp",
+            "--server-url",
+            "http://127.0.0.1:8420",
+            "--server-timeout-secs",
+            "0",
+        ]);
+
+        assert!(parsed.is_err());
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(remote) = remote_mcp_options(&cli) {
+        init_logging(&ServerConfig::default());
+        install_panic_hook();
+        cerememory_transport_mcp::serve_stdio_http(
+            remote.server_url,
+            remote.server_api_key,
+            remote
+                .server_timeout_secs
+                .map(std::time::Duration::from_secs),
+        )
+        .await?;
+        return Ok(());
+    }
+
     let config = load_config(&cli)?;
     init_logging(&config);
-
-    // Install global panic handler to capture panics in structured logs
-    std::panic::set_hook(Box::new(|info| {
-        let location = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "unknown".to_string());
-        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
-            s.to_string()
-        } else if let Some(s) = info.payload().downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic payload".to_string()
-        };
-        tracing::error!(location = %location, payload = %payload, "Panic occurred");
-    }));
+    install_panic_hook();
 
     // Serve uses its own engine lifecycle with background decay + graceful shutdown
     if let Commands::Serve { .. } = &cli.command {
@@ -764,7 +931,12 @@ async fn main() -> Result<()> {
     }
 
     // MCP: stdio server, needs engine but no HTTP/gRPC
-    if matches!(cli.command, Commands::Mcp) {
+    if let Commands::Mcp {
+        server_url: None,
+        server_api_key: _,
+        server_timeout_secs: _,
+    } = &cli.command
+    {
         let engine = Arc::new(create_engine_from_config(&config)?);
         engine.rebuild_coordinator().await?;
         cerememory_transport_mcp::serve_stdio(engine).await?;
@@ -1191,7 +1363,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Healthcheck { .. } => unreachable!("Handled above"),
-        Commands::Mcp => unreachable!("Handled above"),
+        Commands::Mcp { .. } => unreachable!("Handled above"),
     }
 
     Ok(())
