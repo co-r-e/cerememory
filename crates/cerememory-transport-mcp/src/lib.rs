@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use cerememory_core::error::CerememoryError;
 use cerememory_core::protocol::*;
 use cerememory_core::types::*;
+#[cfg(test)]
 use cerememory_engine::CerememoryEngine;
 
 // ─── Parameter types (flat, LLM-friendly) ───────────────────────────
@@ -264,6 +265,7 @@ struct McpRawRecallResponse {
 
 #[derive(Clone)]
 enum McpBackend {
+    #[cfg(test)]
     Local(Arc<CerememoryEngine>),
     Remote(Arc<CerememoryHttpClient>),
 }
@@ -788,6 +790,7 @@ impl McpBackend {
         req: EncodeStoreRequest,
     ) -> Result<EncodeStoreResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.encode_store(req).await,
             Self::Remote(client) => client.post_json("/v1/encode", &req).await,
         }
@@ -798,6 +801,7 @@ impl McpBackend {
         req: EncodeStoreRawRequest,
     ) -> Result<EncodeStoreRawResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.encode_store_raw(req).await,
             Self::Remote(client) => client.post_json("/v1/encode/raw", &req).await,
         }
@@ -805,6 +809,7 @@ impl McpBackend {
 
     async fn encode_update(&self, req: EncodeUpdateRequest) -> Result<(), CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.encode_update(req).await,
             Self::Remote(client) => {
                 client
@@ -819,6 +824,7 @@ impl McpBackend {
         req: EncodeBatchRequest,
     ) -> Result<EncodeBatchResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.encode_batch(req).await,
             Self::Remote(client) => client.post_json("/v1/encode/batch", &req).await,
         }
@@ -829,6 +835,7 @@ impl McpBackend {
         req: EncodeBatchStoreRawRequest,
     ) -> Result<EncodeBatchStoreRawResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.encode_batch_store_raw(req).await,
             Self::Remote(client) => client.post_json("/v1/encode/raw/batch", &req).await,
         }
@@ -839,6 +846,7 @@ impl McpBackend {
         req: RecallQueryRequest,
     ) -> Result<RecallQueryResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.recall_query(req).await,
             Self::Remote(client) => client.post_json("/v1/recall/query", &req).await,
         }
@@ -849,6 +857,7 @@ impl McpBackend {
         req: RecallRawQueryRequest,
     ) -> Result<RecallRawQueryResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.recall_raw_query(req).await,
             Self::Remote(client) => client.post_json("/v1/recall/raw", &req).await,
         }
@@ -859,6 +868,7 @@ impl McpBackend {
         req: RecallTimelineRequest,
     ) -> Result<RecallTimelineResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.recall_timeline(req).await,
             Self::Remote(client) => client.post_json("/v1/recall/timeline", &req).await,
         }
@@ -869,6 +879,7 @@ impl McpBackend {
         req: RecallAssociateRequest,
     ) -> Result<RecallAssociateResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.recall_associate(req).await,
             Self::Remote(client) => {
                 client
@@ -880,6 +891,7 @@ impl McpBackend {
 
     async fn lifecycle_forget(&self, req: ForgetRequest) -> Result<u32, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.lifecycle_forget(req).await,
             Self::Remote(client) => {
                 let response: ForgetResponse =
@@ -894,6 +906,7 @@ impl McpBackend {
         req: ConsolidateRequest,
     ) -> Result<ConsolidateResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.lifecycle_consolidate(req).await,
             Self::Remote(client) => client.post_json("/v1/lifecycle/consolidate", &req).await,
         }
@@ -904,6 +917,7 @@ impl McpBackend {
         req: DreamTickRequest,
     ) -> Result<DreamTickResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.lifecycle_dream_tick(req).await,
             Self::Remote(client) => client.post_json("/v1/lifecycle/dream-tick", &req).await,
         }
@@ -911,6 +925,7 @@ impl McpBackend {
 
     async fn introspect_stats(&self) -> Result<StatsResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.introspect_stats().await,
             Self::Remote(client) => client.get_json("/v1/introspect/stats").await,
         }
@@ -921,6 +936,7 @@ impl McpBackend {
         req: RecordIntrospectRequest,
     ) -> Result<MemoryRecord, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => engine.introspect_record(req).await,
             Self::Remote(client) => client
                 .get_json(&format!(
@@ -939,6 +955,7 @@ impl McpBackend {
         req: ExportRequest,
     ) -> Result<ExportArchiveResponse, CerememoryError> {
         match self {
+            #[cfg(test)]
             Self::Local(engine) => {
                 let (archive_data, metadata) = engine.lifecycle_export(req).await?;
                 Ok(ExportArchiveResponse {
@@ -953,7 +970,8 @@ impl McpBackend {
 
 #[tool_router]
 impl CerememoryMcpServer {
-    pub fn new(engine: Arc<CerememoryEngine>) -> Self {
+    #[cfg(test)]
+    fn new(engine: Arc<CerememoryEngine>) -> Self {
         Self::with_backend(McpBackend::Local(engine))
     }
 
@@ -1576,15 +1594,6 @@ impl ServerHandler for CerememoryMcpServer {
                  - stats: View system statistics and store counts",
             )
     }
-}
-
-/// Start the MCP server on stdio (standard input/output).
-///
-/// This is the primary entry point for Claude Code integration via `cerememory mcp`.
-pub async fn serve_stdio(engine: Arc<CerememoryEngine>) -> anyhow::Result<()> {
-    tracing::info!("Starting Cerememory MCP server on stdio");
-    let server = CerememoryMcpServer::new(engine);
-    serve_server_stdio(server).await
 }
 
 /// Start the MCP server on stdio while proxying requests to an upstream Cerememory HTTP server.

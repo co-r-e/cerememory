@@ -9,9 +9,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/co-r-e/cerememory/releases">
-    <img src="https://img.shields.io/github/v/release/co-r-e/cerememory?label=version" alt="Version">
-  </a>
   <a href="https://github.com/co-r-e/cerememory/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
   </a>
@@ -45,83 +42,29 @@ Cerememory is an open-source memory architecture inspired by the human brain's m
 
 ## Quick Start
 
-### MCP Clients (Claude Code, Codex CLI, Cursor, and others) — Recommended
-
-Cerememory ships an MCP server over stdio and works with **any MCP-compatible client**, not only Claude Code. The same binary plugs into Claude Code, OpenAI Codex CLI, Cursor, Cline, Windsurf, Zed, Continue, and anything else that speaks the Model Context Protocol.
-
-For **multiple terminal sessions / multiple MCP clients in parallel**, run a single `cerememory serve` process for the shared `data_dir`, and point each MCP client at that server with `mcp --server-url ...`. This keeps `redb` and Tantivy single-owned while allowing many MCP processes to operate concurrently.
+Cerememory is distributed as source. Build the `cerememory` binary locally:
 
 ```bash
-# Build the binary (works for every client below)
 cargo build -p cerememory-cli --release
 ```
 
-Pick your client and add the snippet:
+Run exactly one long-lived server for the data directory:
 
-<details>
-<summary><strong>Claude Code</strong> — <code>~/.claude/claude_desktop_config.json</code></summary>
-
-```json
-{
-  "mcpServers": {
-    "cerememory": {
-      "command": "/path/to/cerememory",
-      "args": ["mcp"]
-    }
-  }
-}
+```bash
+target/release/cerememory serve --data-dir ~/.cerememory/data
 ```
-</details>
 
-<details>
-<summary><strong>OpenAI Codex CLI</strong> — <code>~/.codex/config.toml</code></summary>
+Then point every MCP client at that shared server. This is the only supported MCP operating mode:
 
 ```toml
 [mcp_servers.cerememory]
-command = "/path/to/cerememory"
-args = ["mcp"]
-```
-
-Parallel-safe shared-memory setup:
-
-```toml
-[mcp_servers.cerememory]
-command = "/path/to/cerememory"
+command = "/absolute/path/to/target/release/cerememory"
 args = ["mcp", "--server-url", "http://127.0.0.1:8420"]
 ```
 
-If the shared HTTP server requires auth, prefer setting `CEREMEMORY_SERVER_API_KEY` in the client environment instead of passing `--server-api-key` on the command line. For long-running upstream operations, `--server-timeout-secs` can be used to set an explicit request timeout; if omitted, per-request timeout is disabled.
-</details>
+This keeps the embedded `redb` and Tantivy stores owned by one process while allowing multiple terminal sessions and MCP clients to operate concurrently.
 
-<details>
-<summary><strong>Cursor</strong> — <code>~/.cursor/mcp.json</code> (or project <code>.cursor/mcp.json</code>)</summary>
-
-```json
-{
-  "mcpServers": {
-    "cerememory": {
-      "command": "/path/to/cerememory",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><strong>Cline / Continue / Windsurf / Zed</strong> — MCP settings UI or JSON</summary>
-
-Use the same `command` + `args` pair as above. Every MCP client accepts a stdio server definition; only the config file path differs.
-</details>
-
-<details>
-<summary><strong>Any other MCP client</strong></summary>
-
-If the client supports MCP stdio servers, point it at `/path/to/cerememory` with the single argument `mcp`. No additional daemon, port, or auth setup is required for single-client local use.
-</details>
-
-> [!WARNING]
-> `cerememory mcp` without `--server-url` opens the embedded `redb` and Tantivy stores directly. Only one Cerememory process can use the same `data_dir` at a time. For shared multi-client access, run one long-lived `cerememory serve` process and point every MCP client at it with `mcp --server-url http://127.0.0.1:8420`.
+If the shared HTTP server requires auth, set `CEREMEMORY_SERVER_API_KEY` in the MCP client environment instead of passing secrets on the command line. For long-running upstream operations, `--server-timeout-secs` can be used to set an explicit request timeout; if omitted, per-request timeout is disabled.
 
 Once connected, the client can use the core memory tools plus raw/dream workflows:
 
@@ -142,88 +85,6 @@ Once connected, the client can use the core memory tools plus raw/dream workflow
 | `consolidate` | Migrate mature episodic memories to semantic store |
 | `export` | Export curated memories to a CMA archive file |
 | `stats` | View system statistics and store counts |
-
-### HTTP Server
-
-```bash
-# Start the server (binds to 127.0.0.1:8420 by default)
-cargo run -p cerememory-cli -- serve
-
-# Or with custom options
-cargo run -p cerememory-cli -- serve --port 9000
-```
-
-Or run the published container:
-
-```bash
-docker run --rm -p 8420:8420 ghcr.io/co-r-e/cerememory:latest
-```
-
-### Python SDK
-
-```bash
-pip install cerememory
-```
-
-```python
-from cerememory import Client
-
-client = Client("http://localhost:8420")
-record_id = client.store("Had coffee with Alice at the park", store="episodic")
-results = client.recall("Alice", limit=5)
-client.forget(record_id, confirm=True)
-
-# Raw journal + dream tick
-raw_id = client.store_raw("verbatim transcript note", session_id="sess-1")
-raw_records = client.recall_raw(session_id="sess-1")
-dream = client.dream_tick(session_id="sess-1")
-```
-
-### TypeScript SDK
-
-```bash
-npm install @cerememory/sdk
-```
-
-```typescript
-import { CerememoryClient } from "@cerememory/sdk";
-
-const client = new CerememoryClient("http://localhost:8420");
-const recordId = await client.store("Had coffee with Alice at the park", {
-  store: "episodic",
-});
-const results = await client.recall("Alice", { limit: 5 });
-await client.forget(recordId, { confirm: true });
-
-const rawId = await client.storeRaw("verbatim transcript note", {
-  sessionId: "sess-1",
-});
-const rawRecords = await client.recallRaw({ sessionId: "sess-1" });
-const dream = await client.dreamTick({ session_id: "sess-1" });
-```
-
-Native in-process bindings are also available when you want to embed the engine directly:
-
-- Python: `cerememory-native`
-- Node.js: `@cerememory/native`
-
-### CLI
-
-```bash
-# Curated memory
-cargo run -p cerememory-cli -- store "Alice prefers green tea" --store semantic
-cargo run -p cerememory-cli -- recall "Alice"
-
-# Raw journal
-cargo run -p cerememory-cli -- store-raw "verbatim transcript note" --session-id sess-1
-cargo run -p cerememory-cli -- recall-raw --session-id sess-1
-
-# Dream processing
-cargo run -p cerememory-cli -- dream-tick --session-id sess-1
-
-# Export everything including raw journal
-cargo run -p cerememory-cli -- export --include-raw-journal --output backup.cma
-```
 
 ---
 
@@ -395,10 +256,6 @@ For HTTP TLS, use a reverse proxy (nginx, caddy) in front of the HTTP server. gR
 | Internal Serialization | MessagePack | Compact binary, schema-less |
 | Archive Format | JSON Lines CMA bundle | Portable, inspectable, single-file archive with checksum support |
 | Archive Encryption | ChaCha20-Poly1305 + Argon2id | AEAD with memory-hard KDF, key zeroization via `zeroize` |
-| Python SDK | httpx + Pydantic | Typed HTTP client for Python applications |
-| TypeScript SDK | TypeScript + fetch | Zero-dependency HTTP client for Node.js and browser runtimes |
-| Python Native Binding | PyO3 | Direct native integration without HTTP |
-| TypeScript Native Binding | napi-rs | Direct Node.js native integration without HTTP |
 
 See the [Architecture Decision Records](docs/adr/) for detailed rationale behind each decision.
 
@@ -426,11 +283,6 @@ cerememory/
     cerememory-archive/           # CMA export/import
     cerememory-cli/               # CLI tool + `cerememory` binary
     cerememory-config/            # Configuration management
-  bindings/
-    python/                       # HTTP SDK (pure Python)
-    python-native/                # Native SDK (PyO3)
-    typescript/                   # HTTP SDK (pure TypeScript)
-    typescript-native/            # Native SDK (napi-rs)
   adapters/
     adapter-claude/               # Anthropic Claude adapter
     adapter-openai/               # OpenAI GPT adapter
@@ -450,11 +302,9 @@ cerememory/
 | **Phase 2: Dynamics** | Done | Cross-modal associations, emotional metadata, reconsolidation |
 | **Phase 3: Hardening** | Done | Error handling, observability, performance optimization |
 | **Phase 4: Intelligence** | Done | Evolution engine, self-tuning parameters |
-| **Phase 5: Production** | Done | CLI, config management, Docker, CI/CD |
-| **Phase 6: SDK** | Done | Python & TypeScript HTTP SDKs |
+| **Phase 5: Production** | Done | CLI, config management, CI/CD |
 | **Phase 7: Benchmarks** | Done | Performance benchmarks (store, decay, association, index) |
 | **Phase 8: Multimodal** | Done | Image, audio, and structured data memory |
-| **Phase 9: Native Bindings** | Done | PyO3 (Python) and napi-rs (TypeScript) native bindings |
 | **Phase 10: Integrations** | Done | LLM adapter integration tests |
 | **Phase 11: Encryption** | Done | Encrypted CMA export/import |
 | **Phase 12: Best Practices** | Done | MCP UX overhaul, security hardening, reliability improvements |
@@ -481,7 +331,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 Areas where we especially need help:
 - Rust core engine development
 - LLM adapter implementations
-- Python and TypeScript SDK development
 - Neuroscience review of decay and association models
 - Documentation and translations
 

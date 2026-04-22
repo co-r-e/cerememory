@@ -259,7 +259,7 @@ enum Commands {
         encryption_key_stdin: bool,
     },
 
-    /// Health check (for Docker HEALTHCHECK / K8s liveness probe)
+    /// Health check (for service supervisors / Kubernetes liveness probes)
     Healthcheck {
         /// HTTP port to check (defaults to the configured HTTP port)
         #[arg(long)]
@@ -291,8 +291,8 @@ enum Commands {
     /// Start the MCP (Model Context Protocol) server on stdio
     Mcp {
         /// Proxy MCP requests to an existing Cerememory HTTP server instead of opening local storage.
-        #[arg(long)]
-        server_url: Option<String>,
+        #[arg(long, required = true)]
+        server_url: String,
 
         /// Bearer token for the upstream Cerememory HTTP server. Falls back to CEREMEMORY_SERVER_API_KEY when omitted.
         #[arg(long)]
@@ -587,7 +587,7 @@ fn create_engine_from_config(config: &ServerConfig) -> Result<CerememoryEngine> 
 fn remote_mcp_options(cli: &Cli) -> Option<RemoteMcpOptions> {
     match &cli.command {
         Commands::Mcp {
-            server_url: Some(server_url),
+            server_url,
             server_api_key,
             server_timeout_secs,
         } => Some(RemoteMcpOptions {
@@ -820,7 +820,7 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // Shut down gRPC and background tasks concurrently to stay within
-        // Docker's default 10-second stop timeout.
+        // common service-supervisor stop timeouts.
         let shutdown_timeout = std::time::Duration::from_secs(8);
 
         let grpc_shutdown = async {
@@ -853,19 +853,6 @@ async fn main() -> Result<()> {
 
         tokio::join!(grpc_shutdown, decay_shutdown, dream_shutdown);
         tracing::info!("Shutdown complete");
-        return Ok(());
-    }
-
-    // MCP: stdio server, needs engine but no HTTP/gRPC
-    if let Commands::Mcp {
-        server_url: None,
-        server_api_key: _,
-        server_timeout_secs: _,
-    } = &cli.command
-    {
-        let engine = Arc::new(create_engine_from_config(&config)?);
-        engine.rebuild_coordinator().await?;
-        cerememory_transport_mcp::serve_stdio(engine).await?;
         return Ok(());
     }
 
@@ -1344,7 +1331,7 @@ mod tests {
             data_dir: Some("/tmp/ignored".to_string()),
             config: Some("/tmp/ignored.toml".to_string()),
             command: Commands::Mcp {
-                server_url: Some("http://127.0.0.1:8420".to_string()),
+                server_url: "http://127.0.0.1:8420".to_string(),
                 server_api_key: Some("secret".to_string()),
                 server_timeout_secs: Some(120),
             },
@@ -1366,6 +1353,13 @@ mod tests {
             "--server-timeout-secs",
             "0",
         ]);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn remote_mcp_requires_server_url() {
+        let parsed = Cli::try_parse_from(["cerememory", "mcp"]);
 
         assert!(parsed.is_err());
     }

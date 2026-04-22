@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+#### Distribution and MCP Operations
+- Removed direct embedded-store MCP mode; `cerememory mcp` now requires `--server-url` and operates only as a proxy to a long-lived `cerememory serve` process
+- Removed package and artifact publishing workflows for GitHub Releases, Docker images, crates.io, PyPI, and npm
+- Removed Dockerfile and Docker-based CI/E2E distribution checks
+- Simplified README installation guidance to source build plus shared server MCP operation
+- Removed Python, TypeScript, and native binding directories from the active codebase
+
 ## [0.2.3] - 2026-04-22
 
 ### Added
