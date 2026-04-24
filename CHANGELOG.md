@@ -152,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cerememory Protocol (CMP) with encode, recall, lifecycle, and introspect operations
 - Hippocampal coordinator for cross-store indexing and vector search (hnsw_rs)
 - Full-text search via Tantivy integration
-- CMA archive format (SQLite-based) for export/import
+- CMA archive format (JSON Lines-based) for export/import
 
 #### Living Memory Dynamics
 - Decay engine with power-law fidelity curves and noise accumulation
