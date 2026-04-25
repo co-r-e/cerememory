@@ -95,6 +95,10 @@ enum Commands {
         /// Comma-separated embedding vector (e.g., "0.1,0.2,0.3")
         #[arg(long)]
         embedding: Option<String>,
+
+        /// Structured MetaMemory JSON describing intent, rationale, evidence, and decision context.
+        #[arg(long)]
+        meta_json: Option<String>,
     },
 
     /// Store a verbatim raw journal record
@@ -125,6 +129,10 @@ enum Commands {
         /// Secrecy level: public, sensitive, secret
         #[arg(long, default_value = "public")]
         secrecy_level: String,
+
+        /// Structured MetaMemory JSON describing why this raw record is being preserved.
+        #[arg(long)]
+        meta_json: Option<String>,
     },
 
     /// Recall memories by query
@@ -319,6 +327,17 @@ fn parse_embedding(s: &str) -> Result<Vec<f32>> {
     s.split(',')
         .map(|v| v.trim().parse::<f32>().context("Invalid embedding value"))
         .collect()
+}
+
+fn parse_meta_memory_json(value: Option<String>) -> Result<Option<MetaMemory>> {
+    value
+        .filter(|raw| !raw.trim().is_empty())
+        .map(|raw| {
+            let meta: MetaMemory = serde_json::from_str(&raw).context("Invalid MetaMemory JSON")?;
+            meta.validate().context("Invalid MetaMemory payload")?;
+            Ok(meta)
+        })
+        .transpose()
 }
 
 fn parse_recall_mode(value: &str) -> Result<RecallMode, String> {
@@ -953,9 +972,11 @@ async fn main() -> Result<()> {
             text,
             store,
             embedding,
+            meta_json,
         } => {
             let store_type = parse_store_type(&store)?;
             let emb = embedding.map(|s| parse_embedding(&s)).transpose()?;
+            let meta = parse_meta_memory_json(meta_json)?;
 
             let req = EncodeStoreRequest {
                 header: None,
@@ -972,6 +993,7 @@ async fn main() -> Result<()> {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta,
                 associations: None,
             };
 
@@ -996,7 +1018,9 @@ async fn main() -> Result<()> {
             speaker,
             visibility,
             secrecy_level,
+            meta_json,
         } => {
+            let meta = parse_meta_memory_json(meta_json)?;
             let resp = engine
                 .encode_store_raw(EncodeStoreRawRequest {
                     header: None,
@@ -1017,6 +1041,7 @@ async fn main() -> Result<()> {
                         summary: None,
                     },
                     metadata: None,
+                    meta,
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);

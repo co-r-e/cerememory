@@ -26,6 +26,7 @@ fn make_store_request(i: usize) -> EncodeStoreRequest {
         emotion: None,
         context: None,
         metadata: None,
+        meta: None,
         associations: None,
     }
 }

@@ -136,6 +136,7 @@ async fn tantivy_search_after_update() {
             }),
             emotion: None,
             metadata: None,
+            meta: None,
         })
         .await
         .unwrap();
@@ -333,6 +334,7 @@ async fn vector_search_multimodal() {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         })
         .await
@@ -526,6 +528,7 @@ async fn image_record_store_recall() {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         })
         .await
@@ -607,6 +610,7 @@ async fn mixed_modality() {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         })
         .await
@@ -629,6 +633,7 @@ async fn mixed_modality() {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         })
         .await
@@ -937,6 +942,7 @@ async fn export_import_roundtrip_with_raw_journal() {
                 summary: None,
             },
             metadata: None,
+            meta: None,
         })
         .await
         .unwrap();
@@ -1099,6 +1105,7 @@ async fn cli_store_recall_flow() {
             }),
             emotion: None,
             metadata: None,
+            meta: None,
         })
         .await
         .unwrap();

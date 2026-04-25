@@ -518,8 +518,8 @@ impl CerememoryEngine {
 
     // ─── Index helpers ─────────────────────────────────────────────
 
-    /// Returns `true` if the record has non-empty searchable text or a non-empty summary,
-    /// meaning it should be indexed in the full-text index.
+    /// Returns `true` if the record has non-empty searchable text, meta text, or a non-empty
+    /// summary, meaning it should be indexed in the full-text index.
     fn has_indexable_content(searchable_text: &str, record: &MemoryRecord) -> bool {
         !searchable_text.is_empty()
             || record
@@ -530,7 +530,73 @@ impl CerememoryEngine {
                 .is_some_and(|summary| !summary.is_empty())
     }
 
-    /// Build a single searchable text body from textual and structured blocks.
+    fn push_search_chunk(chunks: &mut Vec<String>, value: &str) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            chunks.push(trimmed.to_string());
+        }
+    }
+
+    fn append_meta_evidence_searchable_text(evidence: &MetaEvidenceRef, chunks: &mut Vec<String>) {
+        for value in [
+            evidence.label.as_deref(),
+            evidence.excerpt.as_deref(),
+            evidence.uri.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            Self::push_search_chunk(chunks, value);
+        }
+    }
+
+    fn append_meta_searchable_text(meta: &MetaMemory, chunks: &mut Vec<String>) {
+        if !matches!(
+            meta.capture_status,
+            MetaCaptureStatus::Provided | MetaCaptureStatus::Inferred
+        ) {
+            return;
+        }
+
+        for value in [
+            meta.intent.as_deref(),
+            meta.rationale.as_deref(),
+            meta.trigger.as_deref(),
+            meta.decision.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            Self::push_search_chunk(chunks, value);
+        }
+        for value in meta
+            .goals
+            .iter()
+            .chain(meta.assumptions.iter())
+            .chain(meta.tags.iter())
+        {
+            Self::push_search_chunk(chunks, value);
+        }
+        for evidence in &meta.evidence {
+            Self::append_meta_evidence_searchable_text(evidence, chunks);
+        }
+        for alternative in &meta.alternatives {
+            Self::push_search_chunk(chunks, &alternative.option);
+            if let Some(reason) = &alternative.reason {
+                Self::push_search_chunk(chunks, reason);
+            }
+        }
+        for edge in &meta.context_edges {
+            if let Some(rationale) = &edge.rationale {
+                Self::push_search_chunk(chunks, rationale);
+            }
+            for evidence in &edge.evidence {
+                Self::append_meta_evidence_searchable_text(evidence, chunks);
+            }
+        }
+    }
+
+    /// Build a single searchable text body from textual, structured, and meta-memory text.
     fn build_searchable_text(record: &MemoryRecord) -> Option<String> {
         let mut chunks = Vec::new();
 
@@ -567,6 +633,8 @@ impl CerememoryEngine {
                 _ => {}
             }
         }
+
+        Self::append_meta_searchable_text(&record.meta, &mut chunks);
 
         if chunks.is_empty() {
             None
@@ -823,6 +891,133 @@ impl CerememoryEngine {
             (None, Some(context)) => serde_json::json!({ "_context": context }),
             (None, None) => serde_json::Value::Object(serde_json::Map::new()),
         }
+    }
+
+    fn build_record_meta(meta: Option<MetaMemory>, trigger: &str) -> MetaMemory {
+        match meta {
+            Some(mut meta) => {
+                if meta.schema_version == 0 {
+                    meta.schema_version = 1;
+                }
+                if meta.capture_status == MetaCaptureStatus::Legacy {
+                    if meta.rationale.as_deref() == Some(MetaMemory::LEGACY_RATIONALE) {
+                        meta.rationale = None;
+                    }
+                    meta.capture_status = MetaCaptureStatus::Provided;
+                }
+                if meta.trigger.is_none() {
+                    meta.trigger = Some(trigger.to_string());
+                }
+                if meta.captured_at.is_none() {
+                    meta.captured_at = Some(Utc::now());
+                }
+                meta
+            }
+            None => MetaMemory::unavailable(trigger),
+        }
+    }
+
+    fn build_dream_summary_meta(
+        summary_id: Uuid,
+        raw_records: &[RawJournalRecord],
+        dreamed_at: chrono::DateTime<Utc>,
+    ) -> MetaMemory {
+        let raw_ids: Vec<Uuid> = raw_records.iter().map(|record| record.id).collect();
+        let mut meta = MetaMemory::inferred(
+            "lifecycle.dream_tick",
+            "Raw journal records were grouped and summarized into curated episodic memory.",
+            raw_ids.clone(),
+        );
+        meta.intent = Some("Preserve the meaning of raw session material as an episodic memory while retaining backlinks to the verbatim journal.".to_string());
+        meta.goals = vec![
+            "summarize_raw_journal".to_string(),
+            "preserve_traceability".to_string(),
+        ];
+        meta.tags = vec!["dream_tick".to_string(), "episodic_summary".to_string()];
+        meta.captured_at = Some(dreamed_at);
+        meta.context_edges = raw_ids
+            .iter()
+            .map(|raw_id| MetaEdge {
+                source_id: Some(summary_id),
+                target_id: *raw_id,
+                relation: MetaRelation::DerivedFrom,
+                rationale: Some(
+                    "This episodic summary was derived from the referenced raw journal record."
+                        .to_string(),
+                ),
+                evidence: vec![MetaEvidenceRef {
+                    raw_record_id: Some(*raw_id),
+                    label: Some("source_raw_record".to_string()),
+                    confidence: Some(1.0),
+                    ..Default::default()
+                }],
+                confidence: Some(1.0),
+                created_at: Some(dreamed_at),
+            })
+            .collect();
+        meta
+    }
+
+    fn build_dream_semantic_meta(
+        semantic_id: Uuid,
+        summary_id: Uuid,
+        raw_records: &[RawJournalRecord],
+        dreamed_at: chrono::DateTime<Utc>,
+    ) -> MetaMemory {
+        let raw_ids: Vec<Uuid> = raw_records.iter().map(|record| record.id).collect();
+        let mut meta = MetaMemory::inferred(
+            "lifecycle.dream_tick",
+            "The dream summary had enough topic signal to be promoted into semantic memory.",
+            raw_ids.clone(),
+        );
+        meta.intent = Some(
+            "Distill repeated or topic-coherent raw material into longer-lived semantic knowledge."
+                .to_string(),
+        );
+        meta.goals = vec![
+            "promote_topic_signal".to_string(),
+            "preserve_traceability".to_string(),
+        ];
+        meta.decision = Some("Promoted the dream group into semantic memory.".to_string());
+        meta.tags = vec!["dream_tick".to_string(), "semantic_summary".to_string()];
+        meta.captured_at = Some(dreamed_at);
+        meta.context_edges = std::iter::once(MetaEdge {
+            source_id: Some(semantic_id),
+            target_id: summary_id,
+            relation: MetaRelation::DerivedFrom,
+            rationale: Some(
+                "This semantic memory was promoted from the episodic dream summary.".to_string(),
+            ),
+            evidence: vec![MetaEvidenceRef {
+                record_id: Some(summary_id),
+                label: Some("source_episodic_summary".to_string()),
+                confidence: Some(1.0),
+                ..Default::default()
+            }],
+            confidence: Some(1.0),
+            created_at: Some(dreamed_at),
+        })
+        .chain(raw_ids.iter().map(|raw_id| {
+            MetaEdge {
+                source_id: Some(semantic_id),
+                target_id: *raw_id,
+                relation: MetaRelation::DerivedFrom,
+                rationale: Some(
+                    "This semantic memory is traceable back to the referenced raw journal record."
+                        .to_string(),
+                ),
+                evidence: vec![MetaEvidenceRef {
+                    raw_record_id: Some(*raw_id),
+                    label: Some("source_raw_record".to_string()),
+                    confidence: Some(1.0),
+                    ..Default::default()
+                }],
+                confidence: Some(1.0),
+                created_at: Some(dreamed_at),
+            }
+        }))
+        .collect();
+        meta
     }
 
     async fn persist_associations_for_record(
@@ -1598,6 +1793,7 @@ impl CerememoryEngine {
         req: EncodeStoreRawRequest,
     ) -> Result<EncodeStoreRawResponse, CerememoryError> {
         let metadata = req.metadata.unwrap_or_else(|| serde_json::json!({}));
+        let meta = Self::build_record_meta(req.meta, "encode.store_raw");
         let record = RawJournalRecord {
             id: Uuid::now_v7(),
             session_id: req.session_id,
@@ -1611,6 +1807,7 @@ impl CerememoryEngine {
             updated_at: Utc::now(),
             content: req.content,
             metadata,
+            meta,
             derived_memory_ids: Vec::new(),
             suppressed: false,
         };
@@ -1730,6 +1927,7 @@ impl CerememoryEngine {
             emotion,
             context,
             metadata,
+            meta,
             associations,
             ..
         } = req;
@@ -1747,6 +1945,7 @@ impl CerememoryEngine {
             emotion: emotion.unwrap_or_default(),
             associations: Vec::new(),
             metadata: Self::build_record_metadata(context, metadata),
+            meta: Self::build_record_meta(meta, "encode.store"),
             version: 1,
         };
 
@@ -1984,12 +2183,17 @@ impl CerememoryEngine {
             .get_store_record(&req.record_id)
             .await?
             .ok_or_else(|| CerememoryError::RecordNotFound(req.record_id.to_string()))?;
+        let update_meta = req
+            .meta
+            .clone()
+            .map(|meta| Self::build_record_meta(Some(meta), "encode.update"));
 
         // Apply updates to a clone and validate before persisting
         record.apply_updates(
             req.content.clone(),
             req.emotion.clone(),
             req.metadata.clone(),
+            update_meta.clone(),
         );
         record.validate()?;
 
@@ -2001,12 +2205,16 @@ impl CerememoryEngine {
                 &req.record_id,
                 req.content.clone(),
                 req.emotion,
-                req.metadata
+                req.metadata,
+                update_meta
             )
         )?;
 
-        // Update indexes if content changed
-        if req.content.is_some() {
+        let content_changed = req.content.is_some();
+        let meta_changed = req.meta.is_some();
+
+        // Update the text index if content or searchable meta-memory changed.
+        if content_changed || meta_changed {
             let text = Self::build_searchable_text(&record).unwrap_or_default();
             if Self::has_indexable_content(&text, &record) {
                 if let Err(e) = self.text_index.update(
@@ -2020,7 +2228,9 @@ impl CerememoryEngine {
             } else if let Err(e) = self.text_index.remove(req.record_id) {
                 warn!(error = %e, record_id = %req.record_id, "Failed to clear text index");
             }
+        }
 
+        if content_changed {
             // Remove old vector, then insert first new embedding
             let _ = self.vector_index.remove(req.record_id);
             if let Some(embedding) = Self::primary_embedding(&record) {
@@ -2559,6 +2769,7 @@ impl CerememoryEngine {
     ) -> Result<RecallGraphResponse, CerememoryError> {
         let mut nodes: Vec<GraphNode> = Vec::new();
         let mut edges: Vec<GraphEdge> = Vec::new();
+        let mut meta_edges: Vec<MetaEdge> = Vec::new();
         let mut visited: HashSet<Uuid> = HashSet::new();
         let mut queue: std::collections::VecDeque<(Uuid, u32)> = std::collections::VecDeque::new();
         let limit = req.limit_nodes as usize;
@@ -2612,7 +2823,17 @@ impl CerememoryEngine {
                         })
                     }),
                     fidelity: record.fidelity.score,
+                    meta: req.include_meta.then(|| record.meta.clone()),
                 });
+
+                if req.include_meta {
+                    meta_edges.extend(record.meta.context_edges.iter().cloned().map(|mut edge| {
+                        if edge.source_id.is_none() {
+                            edge.source_id = Some(record.id);
+                        }
+                        edge
+                    }));
+                }
 
                 if depth < req.depth {
                     let assocs = self.coordinator.get_associations(&id).await?;
@@ -2650,6 +2871,7 @@ impl CerememoryEngine {
         Ok(RecallGraphResponse {
             nodes,
             edges,
+            meta_edges,
             total_nodes,
         })
     }
@@ -2754,6 +2976,8 @@ impl CerememoryEngine {
                 dreamed_at,
                 summary_stats.clone(),
             );
+            summary_record.meta =
+                Self::build_dream_summary_meta(summary_record.id, &group.records, dreamed_at);
 
             let promote_semantic = req.promote_semantic
                 && Self::should_promote_dream_group(
@@ -2774,6 +2998,12 @@ impl CerememoryEngine {
                     summary_record.id,
                     dreamed_at,
                     summary_stats.clone(),
+                );
+                semantic_record.meta = Self::build_dream_semantic_meta(
+                    semantic_record.id,
+                    summary_record.id,
+                    &group.records,
+                    dreamed_at,
                 );
                 Some(semantic_record)
             } else {
@@ -3733,6 +3963,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         }
     }
@@ -3753,6 +3984,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         }
     }
@@ -3793,6 +4025,7 @@ mod tests {
                 summary: None,
             },
             metadata: None,
+            meta: None,
         }
     }
 
@@ -4014,6 +4247,16 @@ mod tests {
         assert_eq!(summary.store, StoreType::Episodic);
         assert_eq!(summary.metadata["_origin"]["raw_session_id"], "sess-dream");
         assert_eq!(summary.metadata["_origin"]["raw_record_count"], 2);
+        assert_eq!(summary.meta.capture_status, MetaCaptureStatus::Inferred);
+        assert_eq!(
+            summary.meta.trigger.as_deref(),
+            Some("lifecycle.dream_tick")
+        );
+        assert_eq!(
+            summary.meta.source_record_ids,
+            vec![first.record_id, second.record_id]
+        );
+        assert_eq!(summary.meta.context_edges.len(), 2);
         assert_eq!(
             summary.metadata["_origin"]["raw_record_ids"][0],
             first.record_id.to_string()
@@ -4040,6 +4283,23 @@ mod tests {
             serde_json::Value::String(summary.id.to_string())
         );
         assert!(raw_one.metadata["_dream"]["processed_at"].is_string());
+
+        let graph = engine
+            .recall_graph(RecallGraphRequest {
+                header: None,
+                center_id: Some(summary.id),
+                depth: 0,
+                edge_types: None,
+                include_meta: true,
+                limit_nodes: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            graph.nodes[0].meta.as_ref().unwrap().capture_status,
+            MetaCaptureStatus::Inferred
+        );
+        assert_eq!(graph.meta_edges.len(), 2);
     }
 
     #[tokio::test]
@@ -4274,6 +4534,7 @@ mod tests {
                     temporal: None,
                 }),
                 metadata: Some(serde_json::json!({"tag": "important"})),
+                meta: None,
                 associations: None,
             })
             .await
@@ -4292,6 +4553,250 @@ mod tests {
         assert_eq!(record.metadata["tag"], "important");
         assert_eq!(record.metadata["_context"]["source"], "chat");
         assert_eq!(record.metadata["_context"]["session_id"], "sess-1");
+    }
+
+    #[tokio::test]
+    async fn encode_store_persists_typed_meta_memory() {
+        let engine = make_engine().await;
+        let explicit_meta = MetaMemory {
+            intent: Some("Remember the reasoning behind a deployment decision".to_string()),
+            rationale: Some(
+                "The retry policy matters because unsafe retries can duplicate side effects."
+                    .to_string(),
+            ),
+            trigger: Some("deployment_review".to_string()),
+            goals: vec!["explain_future_behavior".to_string()],
+            assumptions: vec!["Only idempotent operations can be retried automatically".to_string()],
+            decision: Some("Keep retries idempotent-only".to_string()),
+            confidence: Some(0.9),
+            ..MetaMemory::legacy()
+        };
+
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryRecord::new_text(
+                    StoreType::Episodic,
+                    "Retries stay idempotent-only",
+                )
+                .content,
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                metadata: None,
+                meta: Some(explicit_meta),
+                associations: None,
+            })
+            .await
+            .unwrap();
+
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(record.meta.capture_status, MetaCaptureStatus::Provided);
+        assert_eq!(record.meta.trigger.as_deref(), Some("deployment_review"));
+        assert_eq!(
+            record.meta.decision.as_deref(),
+            Some("Keep retries idempotent-only")
+        );
+        assert_eq!(record.meta.confidence, Some(0.9));
+    }
+
+    #[tokio::test]
+    async fn encode_store_normalizes_partial_meta_memory() {
+        let engine = make_engine().await;
+        let partial_meta: MetaMemory =
+            serde_json::from_str(r#"{"intent":"remember why this was saved"}"#).unwrap();
+
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryRecord::new_text(StoreType::Episodic, "Partial meta").content,
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                metadata: None,
+                associations: None,
+                meta: Some(partial_meta),
+            })
+            .await
+            .unwrap();
+
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(record.meta.capture_status, MetaCaptureStatus::Provided);
+        assert_eq!(record.meta.trigger.as_deref(), Some("encode.store"));
+        assert_eq!(
+            record.meta.intent.as_deref(),
+            Some("remember why this was saved")
+        );
+        assert!(record.meta.rationale.is_none());
+        assert!(record.meta.captured_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn encode_store_clears_legacy_default_rationale_for_provided_meta() {
+        let engine = make_engine().await;
+        let resp = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryRecord::new_text(StoreType::Episodic, "Builder meta").content,
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                metadata: None,
+                associations: None,
+                meta: Some(MetaMemory {
+                    intent: Some("remember an explicit builder-created intent".to_string()),
+                    ..MetaMemory::legacy()
+                }),
+            })
+            .await
+            .unwrap();
+
+        let record = engine
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: resp.record_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(record.meta.capture_status, MetaCaptureStatus::Provided);
+        assert_eq!(
+            record.meta.intent.as_deref(),
+            Some("remember an explicit builder-created intent")
+        );
+        assert!(record.meta.rationale.is_none());
+    }
+
+    #[tokio::test]
+    async fn meta_memory_text_is_recall_searchable() {
+        let engine = make_engine().await;
+        let meta = MetaMemory {
+            intent: Some("Preserve the deployment rationale".to_string()),
+            rationale: Some(
+                "Duplicate side effects explain why retries must stay idempotent-only.".to_string(),
+            ),
+            tags: vec!["retry_policy".to_string()],
+            ..MetaMemory::legacy()
+        };
+
+        let stored = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryRecord::new_text(StoreType::Episodic, "Opaque deployment note")
+                    .content,
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                metadata: None,
+                associations: None,
+                meta: Some(meta),
+            })
+            .await
+            .unwrap();
+
+        let recalled = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("duplicate side effects".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Episodic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert!(recalled
+            .memories
+            .iter()
+            .any(|memory| memory.record.id == stored.record_id));
+    }
+
+    #[tokio::test]
+    async fn encode_update_meta_refreshes_text_index() {
+        let engine = make_engine().await;
+        let stored = engine
+            .encode_store(EncodeStoreRequest {
+                header: None,
+                content: MemoryRecord::new_text(StoreType::Episodic, "Opaque policy note").content,
+                store: Some(StoreType::Episodic),
+                emotion: None,
+                context: None,
+                metadata: None,
+                associations: None,
+                meta: None,
+            })
+            .await
+            .unwrap();
+
+        engine
+            .encode_update(EncodeUpdateRequest {
+                header: None,
+                record_id: stored.record_id,
+                content: None,
+                emotion: None,
+                metadata: None,
+                meta: Some(MetaMemory {
+                    rationale: Some(
+                        "Queue compaction rationale depends on tombstone retention.".to_string(),
+                    ),
+                    ..MetaMemory::legacy()
+                }),
+            })
+            .await
+            .unwrap();
+
+        let recalled = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("tombstone retention".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Episodic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert!(recalled
+            .memories
+            .iter()
+            .any(|memory| memory.record.id == stored.record_id));
     }
 
     #[tokio::test]
@@ -4350,6 +4855,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
         engine.encode_store(req).await.unwrap();
@@ -4398,6 +4904,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
         engine.encode_store(req1).await.unwrap();
@@ -4796,6 +5303,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
         let resp2 = engine.encode_store(req).await.unwrap();
@@ -4846,6 +5354,7 @@ mod tests {
                 }),
                 emotion: None,
                 metadata: None,
+                meta: None,
             })
             .await
             .unwrap();
@@ -4890,6 +5399,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -4915,6 +5425,7 @@ mod tests {
                 }),
                 emotion: None,
                 metadata: None,
+                meta: None,
             })
             .await
             .unwrap();
@@ -4947,6 +5458,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -5056,6 +5568,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
 
@@ -5116,6 +5629,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -5171,6 +5685,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -5277,6 +5792,7 @@ mod tests {
                 }),
                 emotion: None,
                 metadata: None,
+                meta: None,
             })
             .await
             .unwrap();
@@ -5346,6 +5862,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -5463,6 +5980,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -5523,6 +6041,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
 
@@ -5911,6 +6430,7 @@ mod tests {
                 }),
                 emotion: None,
                 metadata: None,
+                meta: None,
             })
             .await
             .unwrap();
@@ -6332,6 +6852,7 @@ mod tests {
             }),
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
         engine.encode_store(req).await.unwrap();
@@ -6355,6 +6876,7 @@ mod tests {
             }),
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
         engine.encode_store(req2).await.unwrap();
@@ -6453,6 +6975,7 @@ mod tests {
                 center_id: Some(r1.record_id),
                 depth: 2,
                 edge_types: None,
+                include_meta: false,
                 limit_nodes: 10,
             })
             .await
@@ -6471,6 +6994,7 @@ mod tests {
                 center_id: None,
                 depth: 1,
                 edge_types: None,
+                include_meta: false,
                 limit_nodes: 10,
             })
             .await
@@ -6493,6 +7017,7 @@ mod tests {
                 center_id: Some(r1.record_id),
                 depth: 0,
                 edge_types: None,
+                include_meta: false,
                 limit_nodes: 10,
             })
             .await
@@ -6817,6 +7342,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -6878,6 +7404,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -6965,6 +7492,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
 
@@ -7103,6 +7631,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -7156,6 +7685,7 @@ mod tests {
                 emotion: None,
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await

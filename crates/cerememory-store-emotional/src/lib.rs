@@ -19,7 +19,7 @@ use uuid::Uuid;
 use cerememory_core::error::CerememoryError;
 use cerememory_core::traits::Store;
 use cerememory_core::types::{
-    Association, EmotionVector, FidelityState, MemoryContent, MemoryRecord,
+    Association, EmotionVector, FidelityState, MemoryContent, MemoryRecord, MetaMemory,
 };
 use cerememory_store_common::{
     fidelity_bucket, fidelity_key, get_all_sync, get_record_sync, record_matches_text, storage_err,
@@ -508,6 +508,7 @@ impl Store for EmotionalStore {
         content: Option<MemoryContent>,
         emotion: Option<EmotionVector>,
         metadata: Option<serde_json::Value>,
+        meta: Option<MetaMemory>,
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
@@ -535,6 +536,9 @@ impl Store for EmotionalStore {
                 }
                 if let Some(m) = metadata {
                     record.metadata = m;
+                }
+                if let Some(meta) = meta {
+                    record.meta = meta;
                 }
                 record.updated_at = Utc::now();
                 record.version += 1;
@@ -873,7 +877,7 @@ mod tests {
             summary: Some("A summary".to_string()),
         };
         store
-            .update_record(&id, Some(new_content), None, None)
+            .update_record(&id, Some(new_content), None, None, None)
             .await
             .unwrap();
 
@@ -1033,7 +1037,7 @@ mod tests {
             .await;
         assert!(result.is_err());
 
-        let result = store.update_record(&fake_id, None, None, None).await;
+        let result = store.update_record(&fake_id, None, None, None, None).await;
         assert!(result.is_err());
     }
 
@@ -1105,7 +1109,7 @@ mod tests {
             ..Default::default()
         };
         store
-            .update_record(&id, None, Some(new_emotion), None)
+            .update_record(&id, None, Some(new_emotion), None, None)
             .await
             .unwrap();
 

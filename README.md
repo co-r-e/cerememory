@@ -86,6 +86,12 @@ Once connected, the client can use the core memory tools plus raw/dream workflow
 | `export` | Export curated memories to a CMA archive file |
 | `stats` | View system statistics and store counts |
 
+Every stored record also carries typed **MetaMemory**: intent, rationale,
+evidence, assumptions, alternatives, decisions, confidence, and context-graph
+edges that explain why the memory exists and how it relates to other memories.
+When no explicit meta-memory is supplied, Cerememory records that absence as a
+structured `unavailable` capture state instead of pretending to know the reason.
+
 ---
 
 ## The Architecture
@@ -136,6 +142,21 @@ Cerememory's design draws directly from neuroscience. The human brain does not s
 | **Procedural** | Basal Ganglia | Behavioral patterns, preferences, and skills. "How things are done." |
 | **Emotional** | Amygdala | Cross-cutting affective metadata that modulates all other stores. |
 | **Working** | Prefrontal Cortex | Volatile, limited-capacity, high-speed active context cache. |
+
+### Meta-Memory Plane
+
+Meta-memory is a cross-cutting plane attached to both curated `MemoryRecord`s
+and raw journal records. It does not behave like a sixth recall store. Instead,
+it preserves the "why" around every memory:
+
+- **Intent**: why this memory was captured or generated
+- **Rationale**: why the agent or user thought this was true or useful
+- **Evidence**: source records, raw journal entries, excerpts, or external references
+- **Decision context**: assumptions, alternatives, chosen decision, and confidence
+- **Context graph**: typed `MetaEdge`s such as `derived_from`, `motivated_by`, `supports`, and `chose_over`
+
+`recall.query` indexes provided and inferred meta-memory text for "why" queries,
+and `recall.graph` can include the full plane with `include_meta: true`.
 
 ### Living Memory Dynamics
 

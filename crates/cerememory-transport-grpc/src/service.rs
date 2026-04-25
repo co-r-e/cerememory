@@ -476,6 +476,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         })
         .unwrap()
@@ -501,6 +502,7 @@ mod tests {
                 summary: None,
             },
             metadata: None,
+            meta: None,
         })
         .unwrap()
     }
@@ -555,6 +557,7 @@ mod tests {
                     emotion: None,
                     context: None,
                     metadata: None,
+                    meta: None,
                     associations: None,
                 },
                 EncodeStoreRequest {
@@ -572,6 +575,7 @@ mod tests {
                     emotion: None,
                     context: None,
                     metadata: None,
+                    meta: None,
                     associations: None,
                 },
             ],
@@ -609,6 +613,7 @@ mod tests {
             }),
             emotion: None,
             metadata: None,
+            meta: None,
         };
 
         let resp = svc

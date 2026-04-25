@@ -116,6 +116,7 @@ async fn emotional_store_persistence() {
                 }),
                 context: None,
                 metadata: None,
+                meta: None,
                 associations: None,
             })
             .await
@@ -185,6 +186,7 @@ async fn emotional_intensity_query() {
         },
         associations: Vec::new(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        meta: MetaMemory::unavailable("test"),
         version: 1,
     };
 
@@ -205,6 +207,7 @@ async fn emotional_intensity_query() {
         },
         associations: Vec::new(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        meta: MetaMemory::unavailable("test"),
         version: 1,
     };
 
@@ -225,6 +228,7 @@ async fn emotional_intensity_query() {
         },
         associations: Vec::new(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        meta: MetaMemory::unavailable("test"),
         version: 1,
     };
 
@@ -350,6 +354,7 @@ async fn grpc_encode_recall_cycle() {
         emotion: None,
         context: None,
         metadata: None,
+        meta: None,
         associations: None,
     };
 

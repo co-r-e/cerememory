@@ -29,6 +29,7 @@ pub fn text_req(text: &str, store: StoreType) -> EncodeStoreRequest {
         emotion: None,
         context: None,
         metadata: None,
+        meta: None,
         associations: None,
     }
 }
@@ -41,6 +42,7 @@ pub fn text_with_embedding(text: &str, store: StoreType, emb: Vec<f32>) -> Encod
         emotion: None,
         context: None,
         metadata: None,
+        meta: None,
         associations: None,
     }
 }
@@ -57,6 +59,7 @@ pub fn text_with_emotion(
         emotion: Some(emotion),
         context: None,
         metadata: None,
+        meta: None,
         associations: None,
     }
 }

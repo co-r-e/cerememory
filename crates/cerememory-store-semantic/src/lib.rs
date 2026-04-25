@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use cerememory_core::{
     Association, AssociationType, CerememoryError, EmotionVector, FidelityState, MemoryContent,
-    MemoryRecord, Store,
+    MemoryRecord, MetaMemory, Store,
 };
 
 // ---------------------------------------------------------------------------
@@ -825,6 +825,7 @@ impl Store for SemanticStore {
         content: Option<MemoryContent>,
         emotion: Option<EmotionVector>,
         metadata: Option<serde_json::Value>,
+        meta: Option<MetaMemory>,
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
@@ -855,6 +856,9 @@ impl Store for SemanticStore {
                 }
                 if let Some(m) = metadata {
                     rec.metadata = m;
+                }
+                if let Some(meta) = meta {
+                    rec.meta = meta;
                 }
                 rec.updated_at = Utc::now();
                 rec.version += 1;
@@ -1079,7 +1083,7 @@ mod tests {
         };
 
         store
-            .update_record(&id, Some(new_content), None, None)
+            .update_record(&id, Some(new_content), None, None, None)
             .await
             .unwrap();
 

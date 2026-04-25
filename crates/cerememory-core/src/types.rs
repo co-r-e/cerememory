@@ -35,6 +35,8 @@ pub struct MemoryRecord {
     pub metadata: serde_json::Value,
     #[serde(default = "default_version")]
     pub version: u32,
+    #[serde(default)]
+    pub meta: MetaMemory,
 }
 
 /// A verbatim preserved record in the raw journal.
@@ -61,6 +63,8 @@ pub struct RawJournalRecord {
     pub derived_memory_ids: Vec<Uuid>,
     #[serde(default)]
     pub suppressed: bool,
+    #[serde(default)]
+    pub meta: MetaMemory,
 }
 
 /// Origin channel for a raw journal record.
@@ -111,6 +115,261 @@ pub enum StoreType {
     Procedural,
     Emotional,
     Working,
+}
+
+/// Structured meta-memory attached to every preserved or curated memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaMemory {
+    #[serde(default = "default_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub capture_status: MetaCaptureStatus,
+    #[serde(default)]
+    pub intent: Option<String>,
+    #[serde(default)]
+    pub rationale: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub goals: Vec<String>,
+    #[serde(default)]
+    pub evidence: Vec<MetaEvidenceRef>,
+    #[serde(default)]
+    pub assumptions: Vec<String>,
+    #[serde(default)]
+    pub alternatives: Vec<MetaAlternative>,
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub source_record_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub parent_meta_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub context_edges: Vec<MetaEdge>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub captured_at: Option<DateTime<Utc>>,
+}
+
+/// How a meta-memory payload was captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetaCaptureStatus {
+    Provided,
+    Inferred,
+    Legacy,
+    Unavailable,
+}
+
+/// Evidence that supports a meta-memory rationale or relation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MetaEvidenceRef {
+    pub record_id: Option<Uuid>,
+    pub raw_record_id: Option<Uuid>,
+    pub label: Option<String>,
+    pub excerpt: Option<String>,
+    pub uri: Option<String>,
+    pub confidence: Option<f64>,
+}
+
+/// An option that was considered while deciding what to do or believe.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MetaAlternative {
+    pub option: String,
+    pub reason: Option<String>,
+    pub chosen: bool,
+}
+
+/// Typed context-graph relation carried by the meta-memory plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetaEdge {
+    pub source_id: Option<Uuid>,
+    pub target_id: Uuid,
+    pub relation: MetaRelation,
+    pub rationale: Option<String>,
+    pub evidence: Vec<MetaEvidenceRef>,
+    pub confidence: Option<f64>,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Relation kinds for the meta-memory context graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetaRelation {
+    MotivatedBy,
+    CausedBy,
+    DerivedFrom,
+    Supports,
+    Contradicts,
+    ChoseOver,
+    Explains,
+    ContextOf,
+}
+
+impl Default for MetaMemory {
+    fn default() -> Self {
+        Self::legacy()
+    }
+}
+
+impl Default for MetaCaptureStatus {
+    fn default() -> Self {
+        Self::Legacy
+    }
+}
+
+impl Default for MetaEdge {
+    fn default() -> Self {
+        Self {
+            source_id: None,
+            target_id: Uuid::nil(),
+            relation: MetaRelation::ContextOf,
+            rationale: None,
+            evidence: Vec::new(),
+            confidence: None,
+            created_at: None,
+        }
+    }
+}
+
+impl Default for MetaRelation {
+    fn default() -> Self {
+        Self::ContextOf
+    }
+}
+
+impl MetaMemory {
+    pub const LEGACY_RATIONALE: &'static str =
+        "No structured meta-memory was captured for this legacy record.";
+
+    /// Meta-memory marker used for records created before the typed meta plane existed.
+    pub fn legacy() -> Self {
+        Self {
+            schema_version: 1,
+            capture_status: MetaCaptureStatus::Legacy,
+            intent: None,
+            rationale: Some(Self::LEGACY_RATIONALE.into()),
+            trigger: None,
+            goals: Vec::new(),
+            evidence: Vec::new(),
+            assumptions: Vec::new(),
+            alternatives: Vec::new(),
+            decision: None,
+            confidence: None,
+            source_record_ids: Vec::new(),
+            parent_meta_ids: Vec::new(),
+            context_edges: Vec::new(),
+            tags: Vec::new(),
+            captured_at: None,
+        }
+    }
+
+    /// Meta-memory marker for new records when no explicit rationale was supplied.
+    pub fn unavailable(trigger: impl Into<String>) -> Self {
+        Self {
+            schema_version: 1,
+            capture_status: MetaCaptureStatus::Unavailable,
+            intent: None,
+            rationale: Some("No explicit meta-rationale was provided at ingest time.".into()),
+            trigger: Some(trigger.into()),
+            goals: Vec::new(),
+            evidence: Vec::new(),
+            assumptions: Vec::new(),
+            alternatives: Vec::new(),
+            decision: None,
+            confidence: None,
+            source_record_ids: Vec::new(),
+            parent_meta_ids: Vec::new(),
+            context_edges: Vec::new(),
+            tags: Vec::new(),
+            captured_at: Some(Utc::now()),
+        }
+    }
+
+    /// Meta-memory marker for deterministic engine-derived records.
+    pub fn inferred(
+        trigger: impl Into<String>,
+        rationale: impl Into<String>,
+        source_record_ids: Vec<Uuid>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            capture_status: MetaCaptureStatus::Inferred,
+            intent: None,
+            rationale: Some(rationale.into()),
+            trigger: Some(trigger.into()),
+            goals: Vec::new(),
+            evidence: source_record_ids
+                .iter()
+                .map(|raw_record_id| MetaEvidenceRef {
+                    raw_record_id: Some(*raw_record_id),
+                    label: Some("source_raw_record".to_string()),
+                    confidence: Some(1.0),
+                    ..Default::default()
+                })
+                .collect(),
+            assumptions: Vec::new(),
+            alternatives: Vec::new(),
+            decision: None,
+            confidence: Some(1.0),
+            source_record_ids,
+            parent_meta_ids: Vec::new(),
+            context_edges: Vec::new(),
+            tags: Vec::new(),
+            captured_at: Some(Utc::now()),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), crate::error::CerememoryError> {
+        if self.schema_version == 0 {
+            return Err(crate::error::CerememoryError::Validation(
+                "MetaMemory schema_version must be at least 1".to_string(),
+            ));
+        }
+        validate_optional_confidence(self.confidence, "MetaMemory confidence")?;
+        for evidence in &self.evidence {
+            validate_optional_confidence(evidence.confidence, "MetaMemory evidence confidence")?;
+        }
+        for edge in &self.context_edges {
+            edge.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl MetaEdge {
+    pub fn validate(&self) -> Result<(), crate::error::CerememoryError> {
+        if self.target_id.is_nil() {
+            return Err(crate::error::CerememoryError::Validation(
+                "MetaEdge target_id must not be nil".to_string(),
+            ));
+        }
+        validate_optional_confidence(self.confidence, "MetaEdge confidence")?;
+        for evidence in &self.evidence {
+            validate_optional_confidence(evidence.confidence, "MetaEdge evidence confidence")?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_optional_confidence(
+    value: Option<f64>,
+    label: &str,
+) -> Result<(), crate::error::CerememoryError> {
+    if let Some(value) = value {
+        if !(0.0..=1.0).contains(&value) || value.is_nan() {
+            return Err(crate::error::CerememoryError::Validation(format!(
+                "{label} must be in [0.0, 1.0]"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The payload of a memory record.
@@ -319,6 +578,7 @@ impl MemoryRecord {
             emotion: EmotionVector::default(),
             associations: Vec::new(),
             metadata: serde_json::Value::Object(serde_json::Map::new()),
+            meta: MetaMemory::unavailable("memory_record_constructor"),
             version: 1,
         }
     }
@@ -382,6 +642,7 @@ impl MemoryRecord {
                 )));
             }
         }
+        self.meta.validate()?;
         // Modality-specific size limits and embedding validation
         for block in &self.content.blocks {
             let limit = match block.modality {
@@ -450,6 +711,7 @@ impl MemoryRecord {
         content: Option<MemoryContent>,
         emotion: Option<EmotionVector>,
         metadata: Option<serde_json::Value>,
+        meta: Option<MetaMemory>,
     ) {
         if let Some(c) = content {
             self.content = c;
@@ -459,6 +721,9 @@ impl MemoryRecord {
         }
         if let Some(m) = metadata {
             self.metadata = m;
+        }
+        if let Some(meta) = meta {
+            self.meta = meta;
         }
         self.updated_at = Utc::now();
     }
@@ -496,6 +761,7 @@ impl RawJournalRecord {
                 summary: None,
             },
             metadata: serde_json::Value::Object(serde_json::Map::new()),
+            meta: MetaMemory::unavailable("raw_journal_constructor"),
             derived_memory_ids: Vec::new(),
             suppressed: false,
         }
@@ -521,6 +787,7 @@ impl RawJournalRecord {
             emotion: EmotionVector::default(),
             associations: Vec::new(),
             metadata: self.metadata.clone(),
+            meta: self.meta.clone(),
             version: 1,
         };
         surrogate.validate()
@@ -658,12 +925,83 @@ mod tests {
     }
 
     #[test]
+    fn memory_record_legacy_json_defaults_meta() {
+        let record = MemoryRecord::new_text(StoreType::Semantic, "Legacy JSON");
+        let mut json = serde_json::to_value(&record).unwrap();
+        json.as_object_mut().unwrap().remove("meta");
+
+        let decoded: MemoryRecord = serde_json::from_value(json).unwrap();
+
+        assert_eq!(decoded.id, record.id);
+        assert_eq!(decoded.text_content(), Some("Legacy JSON"));
+        assert_eq!(decoded.meta.capture_status, MetaCaptureStatus::Legacy);
+        assert!(decoded.meta.validate().is_ok());
+    }
+
+    #[test]
     fn memory_record_msgpack_roundtrip() {
         let record = MemoryRecord::new_text(StoreType::Working, "Active thought");
         let packed = rmp_serde::to_vec(&record).unwrap();
         let decoded: MemoryRecord = rmp_serde::from_slice(&packed).unwrap();
         assert_eq!(decoded.id, record.id);
         assert_eq!(decoded.text_content(), Some("Active thought"));
+    }
+
+    #[test]
+    fn memory_record_legacy_msgpack_defaults_meta() {
+        #[derive(serde::Serialize)]
+        struct LegacyMemoryRecord {
+            id: Uuid,
+            store: StoreType,
+            created_at: chrono::DateTime<chrono::Utc>,
+            updated_at: chrono::DateTime<chrono::Utc>,
+            last_accessed_at: chrono::DateTime<chrono::Utc>,
+            access_count: u32,
+            content: MemoryContent,
+            fidelity: FidelityState,
+            emotion: EmotionVector,
+            associations: Vec<Association>,
+            metadata: serde_json::Value,
+            version: u32,
+        }
+
+        let record = MemoryRecord::new_text(StoreType::Working, "Legacy record");
+        let legacy = LegacyMemoryRecord {
+            id: record.id,
+            store: record.store,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            last_accessed_at: record.last_accessed_at,
+            access_count: record.access_count,
+            content: record.content.clone(),
+            fidelity: record.fidelity.clone(),
+            emotion: record.emotion.clone(),
+            associations: record.associations.clone(),
+            metadata: record.metadata.clone(),
+            version: record.version,
+        };
+
+        let packed = rmp_serde::to_vec(&legacy).unwrap();
+        let decoded: MemoryRecord = rmp_serde::from_slice(&packed).unwrap();
+
+        assert_eq!(decoded.id, record.id);
+        assert_eq!(decoded.text_content(), Some("Legacy record"));
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.meta.capture_status, MetaCaptureStatus::Legacy);
+        assert!(decoded.meta.validate().is_ok());
+    }
+
+    #[test]
+    fn meta_memory_partial_json_defaults_to_current_schema() {
+        let meta: MetaMemory =
+            serde_json::from_str(r#"{"intent":"remember the rationale","confidence":0.8}"#)
+                .unwrap();
+
+        assert_eq!(meta.schema_version, 1);
+        assert_eq!(meta.intent.as_deref(), Some("remember the rationale"));
+        assert!(meta.rationale.is_none());
+        assert_eq!(meta.confidence, Some(0.8));
+        assert!(meta.validate().is_ok());
     }
 
     #[test]
@@ -775,6 +1113,83 @@ mod tests {
         assert_eq!(record.text_content(), Some("raw hello"));
         assert!(!record.suppressed);
         assert!(record.validate().is_ok());
+    }
+
+    #[test]
+    fn raw_journal_legacy_json_defaults_meta() {
+        let record = RawJournalRecord::new_text(
+            "sess-json",
+            RawSource::Conversation,
+            RawSpeaker::Assistant,
+            RawVisibility::Normal,
+            SecrecyLevel::Public,
+            "raw json",
+        );
+        let mut json = serde_json::to_value(&record).unwrap();
+        json.as_object_mut().unwrap().remove("meta");
+
+        let decoded: RawJournalRecord = serde_json::from_value(json).unwrap();
+
+        assert_eq!(decoded.id, record.id);
+        assert_eq!(decoded.session_id, "sess-json");
+        assert_eq!(decoded.text_content(), Some("raw json"));
+        assert_eq!(decoded.meta.capture_status, MetaCaptureStatus::Legacy);
+        assert!(decoded.meta.validate().is_ok());
+    }
+
+    #[test]
+    fn raw_journal_legacy_msgpack_defaults_meta() {
+        #[derive(serde::Serialize)]
+        struct LegacyRawJournalRecord {
+            id: Uuid,
+            session_id: String,
+            turn_id: Option<String>,
+            topic_id: Option<String>,
+            source: RawSource,
+            speaker: RawSpeaker,
+            visibility: RawVisibility,
+            secrecy_level: SecrecyLevel,
+            created_at: chrono::DateTime<chrono::Utc>,
+            updated_at: chrono::DateTime<chrono::Utc>,
+            content: MemoryContent,
+            metadata: serde_json::Value,
+            derived_memory_ids: Vec<Uuid>,
+            suppressed: bool,
+        }
+
+        let record = RawJournalRecord::new_text(
+            "sess-legacy",
+            RawSource::Conversation,
+            RawSpeaker::Assistant,
+            RawVisibility::Normal,
+            SecrecyLevel::Public,
+            "raw legacy",
+        );
+        let legacy = LegacyRawJournalRecord {
+            id: record.id,
+            session_id: record.session_id.clone(),
+            turn_id: record.turn_id.clone(),
+            topic_id: record.topic_id.clone(),
+            source: record.source,
+            speaker: record.speaker,
+            visibility: record.visibility,
+            secrecy_level: record.secrecy_level,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            content: record.content.clone(),
+            metadata: record.metadata.clone(),
+            derived_memory_ids: record.derived_memory_ids.clone(),
+            suppressed: record.suppressed,
+        };
+
+        let packed = rmp_serde::to_vec(&legacy).unwrap();
+        let decoded: RawJournalRecord = rmp_serde::from_slice(&packed).unwrap();
+
+        assert_eq!(decoded.id, record.id);
+        assert_eq!(decoded.session_id, "sess-legacy");
+        assert_eq!(decoded.text_content(), Some("raw legacy"));
+        assert_eq!(decoded.meta.capture_status, MetaCaptureStatus::Legacy);
+        assert!(decoded.meta.validate().is_ok());
     }
 
     #[test]

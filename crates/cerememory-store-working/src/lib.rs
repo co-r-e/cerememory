@@ -202,6 +202,7 @@ impl Store for WorkingMemoryStore {
         content: Option<MemoryContent>,
         emotion: Option<EmotionVector>,
         metadata: Option<serde_json::Value>,
+        meta: Option<MetaMemory>,
     ) -> Result<(), CerememoryError> {
         let mut inner = self.inner.write().await;
 
@@ -210,7 +211,7 @@ impl Store for WorkingMemoryStore {
             .get_mut(id)
             .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
 
-        record.apply_updates(content, emotion, metadata);
+        record.apply_updates(content, emotion, metadata, meta);
         record.version = record.version.saturating_add(1);
         Ok(())
     }
@@ -524,7 +525,7 @@ mod tests {
         // Update only metadata.
         let meta = serde_json::json!({"tag": "important"});
         store
-            .update_record(&id, None, None, Some(meta.clone()))
+            .update_record(&id, None, None, Some(meta.clone()), None)
             .await
             .unwrap();
 
@@ -560,6 +561,7 @@ mod tests {
                 Some(new_content),
                 Some(new_emotion),
                 Some(new_meta.clone()),
+                None,
             )
             .await
             .unwrap();
@@ -575,7 +577,9 @@ mod tests {
     #[tokio::test]
     async fn update_record_nonexistent_errors() {
         let store = WorkingMemoryStore::new();
-        let result = store.update_record(&Uuid::now_v7(), None, None, None).await;
+        let result = store
+            .update_record(&Uuid::now_v7(), None, None, None, None)
+            .await;
         assert!(matches!(result, Err(CerememoryError::RecordNotFound(_))));
     }
 

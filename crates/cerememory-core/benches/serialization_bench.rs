@@ -1,6 +1,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
-use cerememory_core::types::{ContentBlock, MemoryContent, MemoryRecord, Modality, StoreType};
+use cerememory_core::types::{
+    ContentBlock, MemoryContent, MemoryRecord, MetaMemory, Modality, StoreType,
+};
 
 /// Create a text-only MemoryRecord.
 fn make_text_record() -> MemoryRecord {
@@ -62,6 +64,7 @@ fn make_multi_block_record() -> MemoryRecord {
         emotion: cerememory_core::types::EmotionVector::default(),
         associations: Vec::new(),
         metadata: serde_json::json!({"source": "benchmark"}),
+        meta: MetaMemory::unavailable("benchmark"),
         version: 1,
     }
 }

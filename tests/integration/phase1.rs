@@ -257,6 +257,7 @@ async fn test_forget_cascade() {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: Some(vec![cerememory_core::protocol::ManualAssociation {
                 target_id: resp_b.record_id,
                 association_type: AssociationType::Semantic,

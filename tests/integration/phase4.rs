@@ -259,6 +259,7 @@ async fn graph_traversal_with_associations() {
             center_id: Some(a_id),
             depth: 2,
             edge_types: None,
+            include_meta: false,
             limit_nodes: 10,
         })
         .await
@@ -278,6 +279,7 @@ async fn graph_traversal_with_associations() {
             center_id: Some(a_id),
             depth: 1,
             edge_types: None,
+            include_meta: false,
             limit_nodes: 10,
         })
         .await
@@ -310,6 +312,7 @@ async fn graph_edge_type_filter() {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: Some(vec![
                 ManualAssociation {
                     target_id: b.record_id,
@@ -333,6 +336,7 @@ async fn graph_edge_type_filter() {
             center_id: Some(a.record_id),
             depth: 1,
             edge_types: Some(vec!["semantic".to_string()]),
+            include_meta: false,
             limit_nodes: 10,
         })
         .await

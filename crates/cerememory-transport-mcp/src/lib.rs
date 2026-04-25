@@ -33,6 +33,8 @@ struct StoreParams {
     store: Option<String>,
     /// Emotional valence label. Options: joy, sadness, anger, fear, surprise, disgust, trust, anticipation (aliases: happy, sad, angry, anticipatory). Affects emotional memory routing.
     emotion: Option<String>,
+    /// Optional structured MetaMemory JSON describing intent, rationale, evidence, and decision context.
+    meta_json: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -43,6 +45,8 @@ struct UpdateParams {
     content: Option<String>,
     /// New emotion label. Options: joy, sadness, anger, fear, surprise, disgust, trust, anticipation.
     emotion: Option<String>,
+    /// Optional structured MetaMemory JSON to replace this record's meta-memory payload.
+    meta_json: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -63,6 +67,8 @@ struct StoreRawParams {
     visibility: Option<String>,
     /// Secrecy level: public, sensitive, secret.
     secrecy_level: Option<String>,
+    /// Optional structured MetaMemory JSON describing why this raw record is being preserved.
+    meta_json: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -82,6 +88,7 @@ struct BatchRecord {
     content: String,
     store: Option<String>,
     emotion: Option<String>,
+    meta_json: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -94,6 +101,7 @@ struct BatchRawRecord {
     speaker: Option<String>,
     visibility: Option<String>,
     secrecy_level: Option<String>,
+    meta_json: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -491,6 +499,21 @@ fn parse_store_type(s: &str) -> Result<StoreType, McpError> {
         })
 }
 
+fn parse_meta_memory_json(value: Option<String>) -> Result<Option<MetaMemory>, McpError> {
+    value
+        .filter(|raw| !raw.trim().is_empty())
+        .map(|raw| {
+            let meta: MetaMemory = serde_json::from_str(&raw).map_err(|e| {
+                McpError::invalid_params(format!("Invalid MetaMemory JSON: {e}"), None)
+            })?;
+            meta.validate().map_err(|e| {
+                McpError::invalid_params(format!("Invalid MetaMemory payload: {e}"), None)
+            })?;
+            Ok(meta)
+        })
+        .transpose()
+}
+
 fn parse_raw_source(value: Option<String>) -> Result<RawSource, McpError> {
     match value
         .unwrap_or_else(|| "conversation".to_string())
@@ -709,6 +732,7 @@ fn build_text_store_request(
     content: String,
     store: Option<StoreType>,
     emotion: Option<EmotionVector>,
+    meta: Option<MetaMemory>,
 ) -> EncodeStoreRequest {
     EncodeStoreRequest {
         header: None,
@@ -725,6 +749,7 @@ fn build_text_store_request(
         emotion,
         context: None,
         metadata: None,
+        meta,
         associations: None,
     }
 }
@@ -739,6 +764,7 @@ fn build_text_raw_store_request(
     speaker: RawSpeaker,
     visibility: RawVisibility,
     secrecy_level: SecrecyLevel,
+    meta: Option<MetaMemory>,
 ) -> EncodeStoreRawRequest {
     EncodeStoreRawRequest {
         header: None,
@@ -759,6 +785,7 @@ fn build_text_raw_store_request(
             summary: None,
         },
         metadata: None,
+        meta,
     }
 }
 
@@ -999,7 +1026,8 @@ impl CerememoryMcpServer {
         require_non_empty_content(&p.content)?;
         let store_type = p.store.map(|s| parse_store_type(&s)).transpose()?;
         let emotion = parse_emotion(p.emotion)?;
-        let req = build_text_store_request(p.content, store_type, emotion);
+        let meta = parse_meta_memory_json(p.meta_json)?;
+        let req = build_text_store_request(p.content, store_type, emotion, meta);
         let resp = self.backend.encode_store(req).await.map_err(engine_err)?;
         ok_json(&resp)
     }
@@ -1030,6 +1058,7 @@ impl CerememoryMcpServer {
             parse_raw_speaker(p.speaker)?,
             parse_raw_visibility(p.visibility)?,
             parse_secrecy_level(p.secrecy_level)?,
+            parse_meta_memory_json(p.meta_json)?,
         );
         let resp = self
             .backend
@@ -1040,13 +1069,13 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Update an existing memory record's content or emotion. Preserves UUID, associations, and fidelity history. Returns no content on success."
+        description = "Update an existing memory record's content, emotion, or meta-memory. Preserves UUID, associations, and fidelity history. Returns no content on success."
     )]
     async fn update(&self, params: Parameters<UpdateParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
-        if p.content.is_none() && p.emotion.is_none() {
+        if p.content.is_none() && p.emotion.is_none() && p.meta_json.is_none() {
             return Err(McpError::invalid_params(
-                "At least one of 'content' or 'emotion' must be provided".to_string(),
+                "At least one of 'content', 'emotion', or 'meta_json' must be provided".to_string(),
                 None,
             ));
         }
@@ -1055,6 +1084,7 @@ impl CerememoryMcpServer {
         }
         let record_id = parse_uuid(&p.record_id)?;
         let emotion = parse_emotion(p.emotion)?;
+        let meta = parse_meta_memory_json(p.meta_json)?;
         let content = p.content.map(|c| MemoryContent {
             blocks: vec![ContentBlock {
                 modality: Modality::Text,
@@ -1071,6 +1101,7 @@ impl CerememoryMcpServer {
             content,
             emotion,
             metadata: None,
+            meta,
         };
 
         self.backend.encode_update(req).await.map_err(engine_err)?;
@@ -1104,7 +1135,10 @@ impl CerememoryMcpServer {
         for r in records {
             let store_type = r.store.map(|s| parse_store_type(&s)).transpose()?;
             let emotion = parse_emotion(r.emotion)?;
-            encode_records.push(build_text_store_request(r.content, store_type, emotion));
+            let meta = parse_meta_memory_json(r.meta_json)?;
+            encode_records.push(build_text_store_request(
+                r.content, store_type, emotion, meta,
+            ));
         }
 
         let req = EncodeBatchRequest {
@@ -1155,6 +1189,7 @@ impl CerememoryMcpServer {
                 parse_raw_speaker(record.speaker)?,
                 parse_raw_visibility(record.visibility)?,
                 parse_secrecy_level(record.secrecy_level)?,
+                parse_meta_memory_json(record.meta_json)?,
             ));
         }
 

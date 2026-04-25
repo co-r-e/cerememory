@@ -58,6 +58,7 @@ pub trait Store: Send + Sync {
         content: Option<MemoryContent>,
         emotion: Option<EmotionVector>,
         metadata: Option<serde_json::Value>,
+        meta: Option<MetaMemory>,
     ) -> impl Future<Output = Result<(), CerememoryError>> + Send;
 
     /// Replace the full association list for a record.

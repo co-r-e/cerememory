@@ -88,6 +88,8 @@ pub struct EncodeStoreRequest {
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
     pub associations: Option<Vec<ManualAssociation>>,
+    #[serde(default)]
+    pub meta: Option<MetaMemory>,
 }
 
 /// encode.store response (CMP Spec §3.1).
@@ -128,6 +130,8 @@ pub struct EncodeUpdateRequest {
     pub emotion: Option<EmotionVector>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub meta: Option<MetaMemory>,
 }
 
 /// encode.store_raw request — append a raw journal record.
@@ -147,6 +151,8 @@ pub struct EncodeStoreRawRequest {
     pub content: MemoryContent,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub meta: Option<MetaMemory>,
 }
 
 /// encode.store_raw response.
@@ -354,6 +360,8 @@ pub struct RecallGraphRequest {
     pub edge_types: Option<Vec<String>>,
     #[serde(default = "default_recall_limit")]
     pub limit_nodes: u32,
+    #[serde(default)]
+    pub include_meta: bool,
 }
 
 /// recall.raw_query request — explicit retrieval from the raw journal.
@@ -405,6 +413,8 @@ pub struct RecallGraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub total_nodes: u32,
+    #[serde(default)]
+    pub meta_edges: Vec<MetaEdge>,
 }
 
 /// A node in the memory graph.
@@ -414,6 +424,8 @@ pub struct GraphNode {
     pub store: StoreType,
     pub summary: Option<String>,
     pub fidelity: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<MetaMemory>,
 }
 
 /// An edge in the memory graph.
@@ -880,6 +892,7 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
 
@@ -906,12 +919,101 @@ mod tests {
             emotion: None,
             context: None,
             metadata: None,
+            meta: None,
             associations: None,
         };
 
         let packed = rmp_serde::to_vec(&req).unwrap();
         let decoded: EncodeStoreRequest = rmp_serde::from_slice(&packed).unwrap();
         assert_eq!(decoded.content.blocks[0].data, b"Test data");
+    }
+
+    #[test]
+    fn encode_store_request_legacy_msgpack_defaults_meta() {
+        #[derive(serde::Serialize)]
+        struct LegacyEncodeStoreRequest {
+            header: Option<CMPHeader>,
+            content: MemoryContent,
+            store: Option<StoreType>,
+            emotion: Option<EmotionVector>,
+            context: Option<EncodeContext>,
+            metadata: Option<serde_json::Value>,
+            associations: Option<Vec<ManualAssociation>>,
+        }
+
+        let legacy = LegacyEncodeStoreRequest {
+            header: None,
+            content: MemoryContent {
+                blocks: vec![ContentBlock {
+                    modality: Modality::Text,
+                    format: "text/plain".to_string(),
+                    data: b"Legacy request".to_vec(),
+                    embedding: None,
+                }],
+                summary: None,
+            },
+            store: Some(StoreType::Episodic),
+            emotion: None,
+            context: None,
+            metadata: None,
+            associations: None,
+        };
+
+        let packed = rmp_serde::to_vec(&legacy).unwrap();
+        let decoded: EncodeStoreRequest = rmp_serde::from_slice(&packed).unwrap();
+
+        assert_eq!(decoded.content.blocks[0].data, b"Legacy request");
+        assert_eq!(decoded.store, Some(StoreType::Episodic));
+        assert!(decoded.meta.is_none());
+    }
+
+    #[test]
+    fn recall_graph_request_legacy_msgpack_defaults_include_meta() {
+        #[derive(serde::Serialize)]
+        struct LegacyRecallGraphRequest {
+            header: Option<CMPHeader>,
+            center_id: Option<Uuid>,
+            depth: u32,
+            edge_types: Option<Vec<String>>,
+            limit_nodes: u32,
+        }
+
+        let legacy = LegacyRecallGraphRequest {
+            header: None,
+            center_id: None,
+            depth: 1,
+            edge_types: None,
+            limit_nodes: 42,
+        };
+
+        let packed = rmp_serde::to_vec(&legacy).unwrap();
+        let decoded: RecallGraphRequest = rmp_serde::from_slice(&packed).unwrap();
+
+        assert_eq!(decoded.depth, 1);
+        assert_eq!(decoded.limit_nodes, 42);
+        assert!(!decoded.include_meta);
+    }
+
+    #[test]
+    fn recall_graph_response_legacy_msgpack_defaults_meta_edges() {
+        #[derive(serde::Serialize)]
+        struct LegacyRecallGraphResponse {
+            nodes: Vec<GraphNode>,
+            edges: Vec<GraphEdge>,
+            total_nodes: u32,
+        }
+
+        let legacy = LegacyRecallGraphResponse {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            total_nodes: 7,
+        };
+
+        let packed = rmp_serde::to_vec(&legacy).unwrap();
+        let decoded: RecallGraphResponse = rmp_serde::from_slice(&packed).unwrap();
+
+        assert_eq!(decoded.total_nodes, 7);
+        assert!(decoded.meta_edges.is_empty());
     }
 
     #[test]
