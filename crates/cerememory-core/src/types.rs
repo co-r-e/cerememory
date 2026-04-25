@@ -155,11 +155,12 @@ pub struct MetaMemory {
 }
 
 /// How a meta-memory payload was captured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MetaCaptureStatus {
     Provided,
     Inferred,
+    #[default]
     Legacy,
     Unavailable,
 }
@@ -199,7 +200,7 @@ pub struct MetaEdge {
 }
 
 /// Relation kinds for the meta-memory context graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MetaRelation {
     MotivatedBy,
@@ -209,18 +210,13 @@ pub enum MetaRelation {
     Contradicts,
     ChoseOver,
     Explains,
+    #[default]
     ContextOf,
 }
 
 impl Default for MetaMemory {
     fn default() -> Self {
         Self::legacy()
-    }
-}
-
-impl Default for MetaCaptureStatus {
-    fn default() -> Self {
-        Self::Legacy
     }
 }
 
@@ -235,12 +231,6 @@ impl Default for MetaEdge {
             confidence: None,
             created_at: None,
         }
-    }
-}
-
-impl Default for MetaRelation {
-    fn default() -> Self {
-        Self::ContextOf
     }
 }
 
