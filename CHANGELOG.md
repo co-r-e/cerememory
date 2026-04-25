@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-04-26
+
+### Added
+
+#### Meta-Memory and Context Graph
+- Added structured meta-memory metadata to memory records and raw journals, including rationale, intent, triggers, alternatives, evidence, tags, and typed context edges
+- Added meta-memory normalization for legacy, partial, inferred, provided, and unavailable capture states across JSON, MessagePack, and CMP payloads
+- Added meta-memory text indexing so recall can search why a memory exists, not only what happened
+- Exposed typed meta-memory payloads through engine store/update flows, CLI input, MCP tools, gRPC conversion, export/import, rebuild, graph, and timeline paths
+
+### Fixed
+
+#### Security and CI
+- Updated `rustls-webpki` to `0.103.13` to address `RUSTSEC-2026-0104`
+- Derived default enum implementations for meta-memory status and relation types to satisfy workspace Clippy checks
+
+#### Documentation
+- Corrected the CMA archive format description in the changelog
+
 ## [0.2.4] - 2026-04-22
 
 ### Removed
@@ -191,6 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.0]: https://github.com/co-r-e/cerememory/releases/tag/v0.1.0
 [0.2.0]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.0
 [0.2.1]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.1
+[0.2.5]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.5
 [0.2.4]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.4
 [0.2.3]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.3
 [0.2.2]: https://github.com/co-r-e/cerememory/releases/tag/v0.2.2
