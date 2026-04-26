@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use uuid::Uuid;
 
 use cerememory_core::error::CerememoryError;

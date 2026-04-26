@@ -12,7 +12,7 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use tracing::{info, warn};
 use uuid::Uuid;
 

@@ -19,6 +19,16 @@ use cerememory_core::protocol::ExportResponse;
 use cerememory_core::types::{MemoryRecord, RawJournalRecord, StoreType};
 pub use format::ArchiveBundle;
 
+pub(crate) fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
+    let bytes = bytes.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    out
+}
+
 /// Export records to CMA archive format. Returns both the archive bytes and metadata.
 pub fn export(records: &[MemoryRecord]) -> Result<(Vec<u8>, ExportResponse), CerememoryError> {
     exporter::export(records)

@@ -11,6 +11,7 @@ use crate::format::{
     ArchiveBundle, ArchiveEntry, ArchiveFooter, ArchiveHeader, ARCHIVE_VERSION,
     BUNDLE_ARCHIVE_VERSION,
 };
+use crate::hex_lower;
 
 /// Maximum archive size: 512 MB.
 const MAX_ARCHIVE_SIZE: usize = 512 * 1024 * 1024;
@@ -122,7 +123,7 @@ pub fn import_bundle_from_reader<R: BufRead>(reader: R) -> Result<ArchiveBundle,
     }
 
     // Verify checksum
-    let computed = format!("{:x}", hasher.finalize());
+    let computed = hex_lower(hasher.finalize());
     if computed != footer.checksum {
         return Err(CerememoryError::ImportConflict(format!(
             "Checksum mismatch: expected {}, got {}",

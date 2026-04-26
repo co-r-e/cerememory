@@ -1,4 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use cerememory_archive::{export_to_bytes, import_records};
 use cerememory_core::types::{MemoryRecord, StoreType};

@@ -12,6 +12,7 @@ use cerememory_core::types::{MemoryRecord, RawJournalRecord};
 use crate::format::{
     ArchiveEntry, ArchiveFooter, ArchiveHeader, ARCHIVE_VERSION, BUNDLE_ARCHIVE_VERSION,
 };
+use crate::hex_lower;
 
 fn write_err(e: std::io::Error) -> CerememoryError {
     CerememoryError::ExportFailed(format!("Write error: {e}"))
@@ -47,7 +48,7 @@ pub fn export_to_writer<W: Write>(
         bytes_written += line.len() as u64 + 1;
     }
 
-    let checksum = format!("{:x}", hasher.finalize());
+    let checksum = hex_lower(hasher.finalize());
     let footer = ArchiveFooter {
         checksum: checksum.clone(),
     };
@@ -111,7 +112,7 @@ pub fn export_bundle_to_writer<W: Write>(
         bytes_written += line.len() as u64 + 1;
     }
 
-    let checksum = format!("{:x}", hasher.finalize());
+    let checksum = hex_lower(hasher.finalize());
     let footer = ArchiveFooter {
         checksum: checksum.clone(),
     };

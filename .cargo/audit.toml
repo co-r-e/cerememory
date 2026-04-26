@@ -3,6 +3,4 @@
 
 [advisories]
 ignore = [
-    # lru 0.12.5 — IterMut unsoundness; transitive dep of tantivy 0.25
-    "RUSTSEC-2026-0002",
 ]

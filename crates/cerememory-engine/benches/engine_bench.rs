@@ -1,4 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use cerememory_core::protocol::{EncodeStoreRequest, RecallCue, RecallQueryRequest};
 use cerememory_core::types::{ContentBlock, MemoryContent, Modality, RecallMode, StoreType};

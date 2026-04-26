@@ -54,8 +54,8 @@ async-trait = "0.1"
 futures = "0.3"
 
 # Storage
-redb = "2"
-tantivy = "0.25"
+redb = "4"
+tantivy = "0.26"
 
 # Networking
 axum = "0.8"
@@ -69,7 +69,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Numeric
-ordered-float = "4"
+ordered-float = "5"
 
 # ANN (Approximate Nearest Neighbor)
 hnsw_rs = "0.3"
@@ -79,10 +79,10 @@ rmcp = { version = "1.2", features = ["server", "transport-io"] }
 schemars = "1"
 
 # Crypto
-sha2 = "0.10"
+sha2 = "0.11"
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
-rand = "0.9"
+rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 
 # CLI
@@ -116,7 +116,7 @@ metrics-exporter-prometheus = "0.18"
 
 # Testing
 tempfile = "3"
-criterion = "0.5"
+criterion = "0.8"
 wiremock = "0.6"
 
 # Internal crates

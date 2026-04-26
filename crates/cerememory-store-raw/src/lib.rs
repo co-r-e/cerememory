@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -194,7 +194,10 @@ impl RawTextIndex {
             limit * 3
         };
         let top_docs = searcher
-            .search(&parsed, &TopDocs::with_limit(search_limit.max(limit)))
+            .search(
+                &parsed,
+                &TopDocs::with_limit(search_limit.max(limit)).order_by_score(),
+            )
             .map_err(|e| CerememoryError::Storage(format!("Tantivy search: {e}")))?;
 
         let mut hits = Vec::new();

@@ -9,7 +9,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
-use rand::RngCore;
+use rand::Rng;
 use redb::ReadableTable;
 use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;

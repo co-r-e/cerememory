@@ -193,7 +193,7 @@ impl TextIndex {
             limit * 2
         };
         let top_docs = searcher
-            .search(&parsed, &TopDocs::with_limit(search_limit))
+            .search(&parsed, &TopDocs::with_limit(search_limit).order_by_score())
             .map_err(|e| CerememoryError::Storage(format!("Tantivy search: {e}")))?;
 
         let store_filter: Option<Vec<String>> =

@@ -66,7 +66,7 @@ fn diversify_key(key: &[u8; 32], salt: &[u8; 16]) -> [u8; 32] {
 /// A random salt diversifies the key for each encryption, providing
 /// unique keys even with a shared passphrase-derived base key.
 pub fn encrypt(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, CerememoryError> {
-    use rand::RngCore;
+    use rand::Rng;
 
     // Generate random salt for per-encryption key diversification
     let mut salt = [0u8; 16];
