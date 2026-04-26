@@ -2,7 +2,7 @@
 //!
 //! Constant-time API key validation used by both HTTP and gRPC transports.
 
-use subtle::ConstantTimeEq;
+use subtle::{Choice, ConstantTimeEq};
 
 /// Validate a token against a list of pre-stored API keys using constant-time comparison.
 ///
@@ -11,7 +11,11 @@ use subtle::ConstantTimeEq;
 ///
 /// Returns `true` if the token matches any of the keys.
 pub fn validate_api_key(token: &[u8], keys: &[Vec<u8>]) -> bool {
-    keys.iter().any(|key| constant_time_eq(key, token))
+    let mut matched = Choice::from(0);
+    for key in keys {
+        matched |= constant_time_eq(key, token);
+    }
+    matched.into()
 }
 
 /// Constant-time equality comparison that avoids length-based timing leaks.
@@ -19,7 +23,7 @@ pub fn validate_api_key(token: &[u8], keys: &[Vec<u8>]) -> bool {
 /// When lengths differ, pads the shorter input with zeros and compares the
 /// full length, then rejects — so all comparisons take time proportional
 /// to `max(a.len(), b.len())` regardless of whether lengths match.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+fn constant_time_eq(a: &[u8], b: &[u8]) -> Choice {
     if a.len() != b.len() {
         // Compare against zero-padded version to keep timing uniform.
         // Result is always false since lengths differ.
@@ -29,9 +33,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         padded_a[..a.len()].copy_from_slice(a);
         padded_b[..b.len()].copy_from_slice(b);
         let _ = padded_a.ct_eq(&padded_b);
-        false
+        Choice::from(0)
     } else {
-        a.ct_eq(b).into()
+        a.ct_eq(b)
     }
 }
 

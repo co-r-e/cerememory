@@ -77,7 +77,8 @@ fn bench_vector_upsert_batch(c: &mut Criterion) {
                 b.iter_with_setup(
                     || VectorIndex::open_in_memory().unwrap(),
                     |index| {
-                        black_box(index.upsert_batch(black_box(&refs)).unwrap());
+                        index.upsert_batch(black_box(&refs)).unwrap();
+                        black_box(());
                     },
                 );
             },
@@ -143,7 +144,8 @@ fn bench_text_add_batch(c: &mut Criterion) {
                 b.iter_with_setup(
                     || TextIndex::open_in_memory().unwrap(),
                     |index| {
-                        black_box(index.add_batch(black_box(&refs)).unwrap());
+                        index.add_batch(black_box(&refs)).unwrap();
+                        black_box(());
                     },
                 );
             },

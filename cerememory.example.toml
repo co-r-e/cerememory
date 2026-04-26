@@ -27,6 +27,19 @@ api_keys = []  # ["sk-key1", "sk-key2"]
 # to avoid committing secrets to version control:
 #   export CEREMEMORY_AUTH_API_KEYS="sk-key1,sk-key2"
 
+[security]
+# Optional: encrypt newly written redb store records. Prefer setting this via
+# CEREMEMORY_SECURITY__STORE_ENCRYPTION_PASSPHRASE instead of TOML.
+# Then run: cerememory migrate-store-encryption --confirm
+# store_encryption_passphrase = "change-me"
+# With store encryption enabled, persistent full-text indexes default to disabled.
+# Set true only if searchable derived text on disk is acceptable.
+# persist_search_indexes = false
+# Tamper-evident audit logging is enabled by default at data_dir/audit.jsonl.
+# Run: cerememory audit-verify
+# audit_log_enabled = true
+# audit_log_path = "/path/to/audit.jsonl"
+
 [llm]
 provider = "none"  # "openai", "claude", "gemini", or "none"
 # api_key = "sk-..."

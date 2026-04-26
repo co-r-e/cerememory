@@ -22,7 +22,8 @@ use cerememory_core::types::{
     Association, EmotionVector, FidelityState, MemoryContent, MemoryRecord, MetaMemory,
 };
 use cerememory_store_common::{
-    fidelity_bucket, fidelity_key, get_all_sync, get_record_sync, record_matches_text, storage_err,
+    fidelity_bucket, fidelity_key, get_all_sync_with_codec, get_record_sync_with_codec,
+    record_matches_text, storage_err, StoreRecordCodec, StoreRecordMigrationStats,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,15 +73,27 @@ fn uuid_from_time_key(key: &[u8]) -> Uuid {
 #[derive(Clone)]
 pub struct EpisodicStore {
     db: Arc<Database>,
+    codec: StoreRecordCodec,
 }
 
 impl EpisodicStore {
     /// Open (or create) a persistent store at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CerememoryError> {
+        Self::open_with_codec(path, StoreRecordCodec::plaintext())
+    }
+
+    /// Open (or create) a persistent store at `path` with an explicit record codec.
+    pub fn open_with_codec(
+        path: impl AsRef<Path>,
+        codec: StoreRecordCodec,
+    ) -> Result<Self, CerememoryError> {
         let db = Database::create(path.as_ref())
             .map_err(|e| CerememoryError::Storage(format!("Failed to open redb database: {e}")))?;
 
-        let store = Self { db: Arc::new(db) };
+        let store = Self {
+            db: Arc::new(db),
+            codec,
+        };
         store.ensure_tables()?;
         Ok(store)
     }
@@ -99,7 +112,10 @@ impl EpisodicStore {
             CerememoryError::Storage(format!("Failed to open in-memory redb database: {e}"))
         })?;
 
-        let store = Self { db: Arc::new(db) };
+        let store = Self {
+            db: Arc::new(db),
+            codec: StoreRecordCodec::plaintext(),
+        };
         store.ensure_tables()?;
         Ok(store)
     }
@@ -118,6 +134,60 @@ impl EpisodicStore {
         Ok(())
     }
 
+    /// Rewrite legacy plaintext record payloads using this store's encrypted codec.
+    ///
+    /// Already encrypted payloads are decoded with the active key to ensure the
+    /// configured passphrase can actually read the whole store.
+    pub async fn migrate_plaintext_records_to_encrypted(
+        &self,
+    ) -> Result<StoreRecordMigrationStats, CerememoryError> {
+        if !self.codec.encrypts_new_records() {
+            return Err(CerememoryError::Validation(
+                "store encryption passphrase is required before migrating episodic records"
+                    .to_string(),
+            ));
+        }
+
+        let db = self.db.clone();
+        let codec = self.codec.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write().map_err(storage_err)?;
+            let mut stats = StoreRecordMigrationStats::empty();
+            let mut rewrites: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+
+            {
+                let records = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
+                for entry in records.iter().map_err(storage_err)? {
+                    let (key_guard, value_guard) = entry.map_err(storage_err)?;
+                    let payload = value_guard.value();
+                    let record: MemoryRecord = codec.decode(payload)?;
+                    stats.records_total += 1;
+
+                    if StoreRecordCodec::is_encrypted_payload(payload) {
+                        stats.records_already_encrypted += 1;
+                    } else {
+                        rewrites.push((key_guard.value().to_vec(), codec.encode(&record)?));
+                        stats.records_migrated += 1;
+                    }
+                }
+            }
+
+            if !rewrites.is_empty() {
+                let mut records = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
+                for (key, payload) in rewrites {
+                    records
+                        .insert(key.as_slice(), payload.as_slice())
+                        .map_err(storage_err)?;
+                }
+            }
+
+            txn.commit().map_err(storage_err)?;
+            Ok(stats)
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
+    }
+
     // ------------------------------------------------------------------
     // Additional query methods (not part of the Store trait)
     // ------------------------------------------------------------------
@@ -129,6 +199,7 @@ impl EpisodicStore {
         end: DateTime<Utc>,
     ) -> Result<Vec<MemoryRecord>, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let time_table = txn.open_table(EPISODIC_TIME_INDEX).map_err(storage_err)?;
@@ -154,7 +225,7 @@ impl EpisodicStore {
                 let (key_guard, _) = entry.map_err(storage_err)?;
                 let key_bytes = key_guard.value();
                 let id = uuid_from_time_key(key_bytes);
-                if let Some(record) = get_record_sync(&records_table, &id)? {
+                if let Some(record) = get_record_sync_with_codec(&records_table, &id, &codec)? {
                     results.push(record);
                 }
             }
@@ -170,6 +241,7 @@ impl EpisodicStore {
         threshold: f64,
     ) -> Result<Vec<MemoryRecord>, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let fidelity_table = txn
@@ -207,7 +279,7 @@ impl EpisodicStore {
                     let mut id_bytes = [0u8; 16];
                     id_bytes.copy_from_slice(&key_bytes[1..17]);
                     let id = Uuid::from_bytes(id_bytes);
-                    if let Some(record) = get_record_sync(&records_table, &id)? {
+                    if let Some(record) = get_record_sync_with_codec(&records_table, &id, &codec)? {
                         // Double-check against the actual fidelity score, because
                         // bucket rounding can be slightly off.
                         if record.fidelity.score < threshold {
@@ -231,10 +303,10 @@ impl EpisodicStore {
 impl Store for EpisodicStore {
     async fn store(&self, record: MemoryRecord) -> Result<Uuid, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let id = record.id;
-            let packed = rmp_serde::to_vec(&record)
-                .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+            let packed = codec.encode(&record)?;
 
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -266,10 +338,11 @@ impl Store for EpisodicStore {
     async fn get(&self, id: &Uuid) -> Result<Option<MemoryRecord>, CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let table = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
-            get_record_sync(&table, &id)
+            get_record_sync_with_codec(&table, &id, &codec)
         })
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
@@ -278,6 +351,7 @@ impl Store for EpisodicStore {
     async fn delete(&self, id: &Uuid) -> Result<bool, CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             let existed = {
@@ -287,10 +361,7 @@ impl Store for EpisodicStore {
                 let existing: Option<MemoryRecord> =
                     match records.get(id.as_bytes().as_slice()).map_err(storage_err)? {
                         Some(guard) => {
-                            let record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                                .map_err(|e| {
-                                    CerememoryError::Serialization(format!("msgpack decode: {e}"))
-                                })?;
+                            let record: MemoryRecord = codec.decode(guard.value())?;
                             drop(guard);
                             Some(record)
                         }
@@ -331,6 +402,7 @@ impl Store for EpisodicStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -341,16 +413,14 @@ impl Store for EpisodicStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let mut record: MemoryRecord = codec.decode(guard.value())?;
                 drop(guard);
 
                 let old_fidelity_score = record.fidelity.score;
                 record.fidelity = fidelity;
                 record.updated_at = Utc::now();
 
-                let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+                let packed = codec.encode(&record)?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -384,6 +454,7 @@ impl Store for EpisodicStore {
             return Ok(Vec::new());
         }
         let db = self.db.clone();
+        let codec = self.codec.clone();
         let query = query.to_lowercase();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
@@ -393,8 +464,7 @@ impl Store for EpisodicStore {
             let iter = table.iter().map_err(storage_err)?;
             for entry in iter {
                 let (_, value_guard) = entry.map_err(storage_err)?;
-                let record: MemoryRecord = rmp_serde::from_slice(value_guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let record: MemoryRecord = codec.decode(value_guard.value())?;
 
                 if record_matches_text(&record, &query) {
                     results.push(record);
@@ -434,10 +504,11 @@ impl Store for EpisodicStore {
 
     async fn get_all(&self) -> Result<Vec<MemoryRecord>, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let table = txn.open_table(EPISODIC_RECORDS).map_err(storage_err)?;
-            get_all_sync(&table)
+            get_all_sync_with_codec(&table, &codec)
         })
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
@@ -465,6 +536,7 @@ impl Store for EpisodicStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -475,8 +547,7 @@ impl Store for EpisodicStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let mut record: MemoryRecord = codec.decode(guard.value())?;
                 drop(guard);
 
                 if let Some(c) = content {
@@ -494,8 +565,7 @@ impl Store for EpisodicStore {
                 record.updated_at = Utc::now();
                 record.version += 1;
 
-                let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+                let packed = codec.encode(&record)?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -514,6 +584,7 @@ impl Store for EpisodicStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -522,16 +593,14 @@ impl Store for EpisodicStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let mut record: MemoryRecord = codec.decode(guard.value())?;
                 drop(guard);
 
                 record.associations = associations;
                 record.updated_at = Utc::now();
                 record.version += 1;
 
-                let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+                let packed = codec.encode(&record)?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -551,6 +620,7 @@ impl Store for EpisodicStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -560,16 +630,14 @@ impl Store for EpisodicStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let mut record: MemoryRecord = codec.decode(guard.value())?;
                 drop(guard);
 
                 record.access_count = access_count;
                 record.last_accessed_at = last_accessed_at;
                 record.updated_at = Utc::now();
 
-                let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+                let packed = codec.encode(&record)?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -627,6 +695,98 @@ mod tests {
         // Delete again returns false
         let deleted_again = store.delete(&id).await.unwrap();
         assert!(!deleted_again);
+    }
+
+    #[tokio::test]
+    async fn encrypted_store_roundtrip_and_requires_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("episodic.redb");
+        let store = EpisodicStore::open_with_codec(
+            &path,
+            StoreRecordCodec::encrypted_from_passphrase("correct horse battery staple").unwrap(),
+        )
+        .unwrap();
+        let record = make_record("Encrypted episodic memory");
+        let id = store.store(record).await.unwrap();
+        drop(store);
+
+        let reopened = EpisodicStore::open_with_codec(
+            &path,
+            StoreRecordCodec::encrypted_from_passphrase("correct horse battery staple").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.get(&id).await.unwrap().unwrap().text_content(),
+            Some("Encrypted episodic memory")
+        );
+        drop(reopened);
+
+        let plaintext_reopen = EpisodicStore::open(&path).unwrap();
+        let err = plaintext_reopen.get(&id).await.unwrap_err();
+        assert!(matches!(err, CerememoryError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn encrypted_store_reads_legacy_plaintext_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("episodic.redb");
+        let plaintext = EpisodicStore::open(&path).unwrap();
+        let record = make_record("Legacy plaintext memory");
+        let id = plaintext.store(record).await.unwrap();
+        drop(plaintext);
+
+        let encrypted = EpisodicStore::open_with_codec(
+            &path,
+            StoreRecordCodec::encrypted_from_passphrase("new passphrase").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            encrypted.get(&id).await.unwrap().unwrap().text_content(),
+            Some("Legacy plaintext memory")
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_plaintext_records_to_encrypted_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("episodic.redb");
+        let plaintext = EpisodicStore::open(&path).unwrap();
+        let id = plaintext
+            .store(make_record("Legacy plaintext to migrate"))
+            .await
+            .unwrap();
+        drop(plaintext);
+
+        let encrypted = EpisodicStore::open_with_codec(
+            &path,
+            StoreRecordCodec::encrypted_from_passphrase("migration passphrase").unwrap(),
+        )
+        .unwrap();
+
+        let stats = encrypted
+            .migrate_plaintext_records_to_encrypted()
+            .await
+            .unwrap();
+        assert_eq!(stats.records_total, 1);
+        assert_eq!(stats.records_migrated, 1);
+        assert_eq!(stats.records_already_encrypted, 0);
+        assert_eq!(
+            encrypted.get(&id).await.unwrap().unwrap().text_content(),
+            Some("Legacy plaintext to migrate")
+        );
+
+        let stats = encrypted
+            .migrate_plaintext_records_to_encrypted()
+            .await
+            .unwrap();
+        assert_eq!(stats.records_total, 1);
+        assert_eq!(stats.records_migrated, 0);
+        assert_eq!(stats.records_already_encrypted, 1);
+        drop(encrypted);
+
+        let plaintext_reopen = EpisodicStore::open(&path).unwrap();
+        let err = plaintext_reopen.get(&id).await.unwrap_err();
+        assert!(matches!(err, CerememoryError::Unauthorized(_)));
     }
 
     // 2. MessagePack serialize integrity

@@ -226,6 +226,18 @@ metrics_enabled = false      # Expose /metrics when true
 enabled = false
 api_keys = []  # ["sk-key1", "sk-key2"]
 
+[security]
+# Prefer CEREMEMORY_SECURITY__STORE_ENCRYPTION_PASSPHRASE instead of TOML.
+# Then run: cerememory migrate-store-encryption --confirm
+# store_encryption_passphrase = "change-me"
+# When a passphrase is set, persistent full-text indexes default to disabled.
+# Set true only if searchable derived text on disk is acceptable.
+# persist_search_indexes = false
+# Tamper-evident audit logging is enabled by default at data_dir/audit.jsonl.
+# Run: cerememory audit-verify
+# audit_log_enabled = true
+# audit_log_path = "/path/to/audit.jsonl"
+
 [llm]
 provider = "none"  # "openai", "claude", "gemini"
 # api_key = "sk-..."
@@ -255,6 +267,8 @@ Cerememory is designed with security as a default:
 
 - **Localhost-only by default**: HTTP and gRPC bind to `127.0.0.1`. Network access requires explicit `bind_address = "0.0.0.0"` configuration, which triggers a warning if auth is disabled.
 - **Bearer token authentication**: Optional API key auth with constant-time comparison. Keys are wrapped in `SecretString` at runtime to prevent accidental logging.
+- **Optional store encryption**: When `security.store_encryption_passphrase` is set, newly written persistent redb payloads are encrypted with ChaCha20-Poly1305 using an Argon2id-derived key. This covers raw journal, episodic, semantic, procedural, emotional, and vector payloads. Run `cerememory migrate-store-encryption --confirm` to rewrite existing plaintext payloads with the configured key. Persistent full-text indexes are disabled by default when store encryption is enabled; set `security.persist_search_indexes = true` only if searchable derived text on disk is acceptable.
+- **Tamper-evident audit log**: Server-backed engines write a plaintext JSONL hash chain at `data_dir/audit.jsonl` by default. `cerememory audit-verify` checks sequence numbers, previous hashes, and entry hashes; persist the reported head hash externally if truncation detection is required.
 - **Encrypted exports**: CMA archives support ChaCha20-Poly1305 AEAD encryption with Argon2id key derivation. Derived keys are zeroized after use.
 - **Request size limits**: HTTP API routes accept request bodies up to 64 MB to support archive import/export workflows. Batch operations are capped at 1000 records. Image/audio recall cues are additionally validated against modality size limits.
 - **Sanitized error responses**: Internal storage paths and details are never exposed to clients. 503 responses include `Retry-After` headers.

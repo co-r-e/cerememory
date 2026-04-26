@@ -8,7 +8,7 @@
 //! redb-backed vector store on startup or when crossing the threshold.
 
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::prelude::DistCosine;
@@ -41,6 +41,7 @@ struct HnswState {
     hnsw: Hnsw<'static, f32, DistCosine>,
     uuid_to_dataid: HashMap<Uuid, usize>,
     dataid_to_uuid: HashMap<usize, Uuid>,
+    embeddings_by_uuid: HashMap<Uuid, Vec<f32>>,
     next_id: usize,
     dimension: usize,
 }
@@ -109,6 +110,7 @@ impl HnswVectorIndex {
         state.hnsw.insert((&owned, data_id));
         state.uuid_to_dataid.insert(id, data_id);
         state.dataid_to_uuid.insert(data_id, id);
+        state.embeddings_by_uuid.insert(id, owned);
 
         Ok(())
     }
@@ -122,6 +124,7 @@ impl HnswVectorIndex {
         if let Some(state) = guard.as_mut() {
             if let Some(data_id) = state.uuid_to_dataid.remove(id) {
                 state.dataid_to_uuid.remove(&data_id);
+                state.embeddings_by_uuid.remove(id);
             }
         }
     }
@@ -168,12 +171,27 @@ impl HnswVectorIndex {
             .take(limit)
             .collect();
 
+        if results.len() < limit && !state.embeddings_by_uuid.is_empty() {
+            let mut seen: HashSet<Uuid> = results.iter().map(|hit| hit.record_id).collect();
+            for (record_id, embedding) in &state.embeddings_by_uuid {
+                if seen.contains(record_id) {
+                    continue;
+                }
+                seen.insert(*record_id);
+                results.push(HnswSearchHit {
+                    record_id: *record_id,
+                    similarity: cosine_similarity(query, embedding),
+                });
+            }
+        }
+
         // Sort by similarity descending
         results.sort_by(|a, b| {
             b.similarity
                 .partial_cmp(&a.similarity)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        results.truncate(limit);
 
         Ok(results)
     }
@@ -214,11 +232,13 @@ impl HnswVectorIndex {
 
         let mut uuid_to_dataid = HashMap::with_capacity(entries.len());
         let mut dataid_to_uuid = HashMap::with_capacity(entries.len());
+        let mut embeddings_by_uuid = HashMap::with_capacity(entries.len());
 
         for (data_id, (uuid, embedding)) in entries.iter().enumerate() {
             hnsw.insert((embedding, data_id));
             uuid_to_dataid.insert(*uuid, data_id);
             dataid_to_uuid.insert(data_id, *uuid);
+            embeddings_by_uuid.insert(*uuid, embedding.clone());
         }
 
         let next_id = entries.len();
@@ -227,6 +247,7 @@ impl HnswVectorIndex {
             hnsw,
             uuid_to_dataid,
             dataid_to_uuid,
+            embeddings_by_uuid,
             next_id,
             dimension,
         });
@@ -240,6 +261,10 @@ impl HnswVectorIndex {
     pub fn deactivate(&self) {
         *self.state.write() = None;
     }
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 #[cfg(test)]

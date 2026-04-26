@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Security and Storage
+- Added optional live-store encryption for persistent redb payloads covering raw journal, episodic, semantic, procedural, emotional, and vector data
+- Added `cerememory migrate-store-encryption --confirm` to rewrite existing plaintext store payloads with the configured store encryption passphrase
+- Added a tamper-evident plaintext JSONL audit log with startup verification and `cerememory audit-verify`
+- Added `security.store_encryption_passphrase`, `security.persist_search_indexes`, `security.audit_log_enabled`, and `security.audit_log_path` configuration
+- Added ADRs for secure-at-rest scope and tamper-evident audit logging
+
+### Changed
+
+#### Security and Indexes
+- Persistent full-text search indexes now default to in-memory rebuilds when store encryption is enabled, unless `security.persist_search_indexes = true` is set
+- Security documentation now distinguishes live-store encryption, encrypted CMA archives, plaintext derived indexes, and audit-log integrity guarantees
+
+### Fixed
+
+#### Reliability and Security
+- Hardened API key validation so configured keys are scanned without early-exit match behavior
+- Fixed HNSW search fallback behavior after vector removals
+- Removed stale SQLite/archive wording from docs and crate metadata
+
 ## [0.2.5] - 2026-04-26
 
 ### Added

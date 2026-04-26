@@ -10,6 +10,8 @@
 //! - Background decay via tokio::spawn
 //! - Export/Import via cerememory-archive
 
+mod audit;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -81,12 +83,15 @@ use cerememory_evolution::EvolutionEngine;
 use cerememory_index::text_index::TextIndex;
 use cerememory_index::vector_index::VectorIndex;
 use cerememory_index::HippocampalCoordinator;
+use cerememory_store_common::StoreRecordMigrationStats;
 use cerememory_store_emotional::EmotionalStore;
 use cerememory_store_episodic::EpisodicStore;
 use cerememory_store_procedural::ProceduralStore;
 use cerememory_store_raw::RawJournalStore;
 use cerememory_store_semantic::SemanticStore;
 use cerememory_store_working::WorkingMemoryStore;
+
+pub use audit::{AuditLog, AuditLogEntry, AuditLogVerification};
 
 /// Configuration for engine construction.
 pub struct EngineConfig {
@@ -112,6 +117,14 @@ pub struct EngineConfig {
     /// Optional LLM provider for auto-embedding, summarization, and relation extraction.
     /// When None, the engine operates without LLM capabilities (manual embeddings only).
     pub llm_provider: Option<Arc<dyn LLMProvider>>,
+    /// Optional passphrase used to encrypt newly written persistent redb payloads.
+    ///
+    /// Legacy plaintext records remain readable for migration compatibility.
+    pub store_encryption_passphrase: Option<String>,
+    /// Whether full-text search indexes are persisted to disk.
+    pub persist_search_indexes: bool,
+    /// Optional path for the tamper-evident JSONL audit log.
+    pub audit_log_path: Option<String>,
 }
 
 impl Default for EngineConfig {
@@ -131,8 +144,22 @@ impl Default for EngineConfig {
             background_dream_interval_secs: None,
             hnsw_threshold: cerememory_index::vector_index::DEFAULT_HNSW_THRESHOLD,
             llm_provider: None,
+            store_encryption_passphrase: None,
+            persist_search_indexes: true,
+            audit_log_path: None,
         }
     }
+}
+
+/// Summary of an at-rest store encryption migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreEncryptionMigrationStats {
+    pub raw_journal: StoreRecordMigrationStats,
+    pub episodic: StoreRecordMigrationStats,
+    pub semantic: StoreRecordMigrationStats,
+    pub procedural: StoreRecordMigrationStats,
+    pub emotional: StoreRecordMigrationStats,
+    pub vector_index: StoreRecordMigrationStats,
 }
 
 /// The main Cerememory engine — orchestrates all CMP operations.
@@ -163,6 +190,9 @@ pub struct CerememoryEngine {
     // LLM provider (optional)
     llm_provider: Option<Arc<dyn LLMProvider>>,
 
+    // Tamper-evident audit log (optional for in-memory/test engines).
+    audit_log: Option<AuditLog>,
+
     // Background decay
     background_decay_interval_secs: Option<u64>,
     decay_state: tokio::sync::Mutex<Option<BackgroundDecayState>>,
@@ -185,23 +215,43 @@ struct BackgroundDreamState {
 impl CerememoryEngine {
     /// Create a new engine. Uses in-memory stores when paths are None.
     pub fn new(config: EngineConfig) -> Result<Self, CerememoryError> {
+        let store_codec = match config.store_encryption_passphrase.as_deref() {
+            Some(passphrase) => Some(
+                cerememory_store_common::StoreRecordCodec::encrypted_from_passphrase(passphrase)?,
+            ),
+            None => None,
+        };
+
         let raw_journal = match &config.raw_journal_path {
-            Some(p) => RawJournalStore::open(p)?,
+            Some(p) => match &store_codec {
+                Some(codec) => RawJournalStore::open_with_codec_and_text_index_persistence(
+                    p,
+                    codec.clone(),
+                    config.persist_search_indexes,
+                )?,
+                None => RawJournalStore::open(p)?,
+            },
             None => RawJournalStore::open_in_memory()?,
         };
 
         let episodic = match &config.episodic_path {
-            Some(p) => EpisodicStore::open(p)?,
+            Some(p) => match &store_codec {
+                Some(codec) => EpisodicStore::open_with_codec(p, codec.clone())?,
+                None => EpisodicStore::open(p)?,
+            },
             None => EpisodicStore::open_in_memory()?,
         };
 
         let semantic = match &config.semantic_path {
-            Some(p) => SemanticStore::open(p)?,
+            Some(p) => match &store_codec {
+                Some(codec) => SemanticStore::open_with_codec(p, codec.clone())?,
+                None => SemanticStore::open(p)?,
+            },
             None => SemanticStore::open_in_memory()?,
         };
 
-        let text_index = match &config.index_path {
-            Some(p) => match TextIndex::open(p) {
+        let text_index = match (&config.index_path, config.persist_search_indexes) {
+            (Some(p), true) => match TextIndex::open(p) {
                 Ok(idx) => idx,
                 Err(e) => {
                     warn!(
@@ -218,26 +268,44 @@ impl CerememoryEngine {
                     })?
                 }
             },
-            None => TextIndex::open_in_memory()?,
+            _ => TextIndex::open_in_memory()?,
         };
 
         let vector_index = match &config.vector_index_path {
-            Some(p) => VectorIndex::open_with_threshold(p, config.hnsw_threshold)?,
+            Some(p) => match &store_codec {
+                Some(codec) => VectorIndex::open_with_threshold_and_codec(
+                    p,
+                    config.hnsw_threshold,
+                    codec.clone(),
+                )?,
+                None => VectorIndex::open_with_threshold(p, config.hnsw_threshold)?,
+            },
             None => VectorIndex::open_in_memory_with_threshold(config.hnsw_threshold)?,
         };
 
         let procedural = match &config.procedural_path {
-            Some(p) => ProceduralStore::open(p)?,
+            Some(p) => match &store_codec {
+                Some(codec) => ProceduralStore::open_with_codec(p, codec.clone())?,
+                None => ProceduralStore::open(p)?,
+            },
             None => ProceduralStore::open_in_memory()?,
         };
 
         let emotional = match &config.emotional_path {
-            Some(p) => EmotionalStore::open(p)?,
+            Some(p) => match &store_codec {
+                Some(codec) => EmotionalStore::open_with_codec(p, codec.clone())?,
+                None => EmotionalStore::open(p)?,
+            },
             None => EmotionalStore::open_in_memory()?,
         };
 
         let coordinator = Arc::new(HippocampalCoordinator::new());
         let activation = SpreadingActivationEngine::new(Arc::clone(&coordinator));
+        let audit_log = config
+            .audit_log_path
+            .as_deref()
+            .map(AuditLog::open)
+            .transpose()?;
 
         Ok(Self {
             raw_journal,
@@ -254,6 +322,7 @@ impl CerememoryEngine {
             vector_index,
             recall_mode: tokio::sync::RwLock::new(config.recall_mode),
             llm_provider: config.llm_provider,
+            audit_log,
             background_decay_interval_secs: config.background_decay_interval_secs,
             decay_state: tokio::sync::Mutex::new(None),
             background_dream_interval_secs: config.background_dream_interval_secs,
@@ -261,9 +330,101 @@ impl CerememoryEngine {
         })
     }
 
+    /// Rewrite legacy plaintext persistent payloads into the configured
+    /// encrypted record format.
+    pub async fn migrate_store_encryption(
+        &self,
+    ) -> Result<StoreEncryptionMigrationStats, CerememoryError> {
+        let raw_journal = self
+            .raw_journal
+            .migrate_plaintext_records_to_encrypted()
+            .await?;
+        let episodic = self
+            .episodic
+            .migrate_plaintext_records_to_encrypted()
+            .await?;
+        let semantic = self
+            .semantic
+            .migrate_plaintext_records_to_encrypted()
+            .await?;
+        let procedural = self
+            .procedural
+            .migrate_plaintext_records_to_encrypted()
+            .await?;
+        let emotional = self
+            .emotional
+            .migrate_plaintext_records_to_encrypted()
+            .await?;
+        let vector_index = self.vector_index.migrate_plaintext_records_to_encrypted()?;
+
+        info!(
+            raw_total = raw_journal.records_total,
+            raw_migrated = raw_journal.records_migrated,
+            raw_already_encrypted = raw_journal.records_already_encrypted,
+            episodic_total = episodic.records_total,
+            episodic_migrated = episodic.records_migrated,
+            episodic_already_encrypted = episodic.records_already_encrypted,
+            semantic_total = semantic.records_total,
+            semantic_migrated = semantic.records_migrated,
+            semantic_already_encrypted = semantic.records_already_encrypted,
+            procedural_total = procedural.records_total,
+            procedural_migrated = procedural.records_migrated,
+            procedural_already_encrypted = procedural.records_already_encrypted,
+            emotional_total = emotional.records_total,
+            emotional_migrated = emotional.records_migrated,
+            emotional_already_encrypted = emotional.records_already_encrypted,
+            vector_total = vector_index.records_total,
+            vector_migrated = vector_index.records_migrated,
+            vector_already_encrypted = vector_index.records_already_encrypted,
+            "Store encryption migration completed"
+        );
+
+        let stats = StoreEncryptionMigrationStats {
+            raw_journal,
+            episodic,
+            semantic,
+            procedural,
+            emotional,
+            vector_index,
+        };
+        self.audit_event(
+            "security.migrate_store_encryption",
+            Vec::new(),
+            vec![
+                StoreType::Episodic,
+                StoreType::Semantic,
+                StoreType::Procedural,
+                StoreType::Emotional,
+            ],
+            serde_json::json!({
+                "raw_journal": stats.raw_journal,
+                "episodic": stats.episodic,
+                "semantic": stats.semantic,
+                "procedural": stats.procedural,
+                "emotional": stats.emotional,
+                "vector_index": stats.vector_index,
+            }),
+        )?;
+
+        Ok(stats)
+    }
+
     /// Create an engine with all in-memory stores (for testing).
     pub fn in_memory() -> Result<Self, CerememoryError> {
         Self::new(EngineConfig::default())
+    }
+
+    fn audit_event(
+        &self,
+        operation: &str,
+        record_ids: Vec<Uuid>,
+        store_types: Vec<StoreType>,
+        summary: serde_json::Value,
+    ) -> Result<(), CerememoryError> {
+        if let Some(audit_log) = &self.audit_log {
+            audit_log.append(operation, record_ids, store_types, summary)?;
+        }
+        Ok(())
     }
 
     /// Start the background decay task. Requires the engine to be wrapped in Arc.
@@ -473,6 +634,7 @@ impl CerememoryEngine {
     pub async fn rebuild_coordinator(&self) -> Result<(), CerememoryError> {
         // Clear vector index to avoid stale entries from previous runs
         self.vector_index.clear()?;
+        self.raw_journal.rebuild_text_index().await?;
 
         let mut entries = Vec::new();
         let mut text_records = Vec::new();
@@ -1282,7 +1444,18 @@ impl CerememoryEngine {
         &self,
         record: RawJournalRecord,
     ) -> Result<Uuid, CerememoryError> {
-        self.raw_journal.append(record).await
+        let record_id = self.raw_journal.append(record.clone()).await?;
+        self.audit_event(
+            "raw_journal.append",
+            vec![record_id],
+            Vec::new(),
+            serde_json::json!({
+                "record_id": record_id,
+                "visibility": record.visibility,
+                "secrecy_level": record.secrecy_level,
+            }),
+        )?;
+        Ok(record_id)
     }
 
     /// Retrieve a raw journal record by id.
@@ -1813,6 +1986,16 @@ impl CerememoryEngine {
         };
         record.validate()?;
         let record_id = self.raw_journal.append(record.clone()).await?;
+        self.audit_event(
+            "encode.store_raw",
+            vec![record_id],
+            Vec::new(),
+            serde_json::json!({
+                "record_id": record_id,
+                "visibility": record.visibility,
+                "secrecy_level": record.secrecy_level,
+            }),
+        )?;
 
         Ok(EncodeStoreRawResponse {
             record_id,
@@ -1831,6 +2014,14 @@ impl CerememoryEngine {
         for record in req.records {
             results.push(self.encode_store_raw(record).await?);
         }
+        self.audit_event(
+            "encode.batch_raw",
+            results.iter().map(|result| result.record_id).collect(),
+            Vec::new(),
+            serde_json::json!({
+                "records": results.len(),
+            }),
+        )?;
         Ok(EncodeBatchStoreRawResponse { results })
     }
 
@@ -2116,6 +2307,17 @@ impl CerememoryEngine {
         metrics::counter!("cerememory_encode_total", "store" => store_type.to_string())
             .increment(1);
 
+        self.audit_event(
+            "encode.store",
+            vec![id],
+            vec![store_type],
+            serde_json::json!({
+                "record_id": id,
+                "store": store_type,
+                "associations_created": assoc_count,
+            }),
+        )?;
+
         Ok(EncodeStoreResponse {
             record_id: id,
             store: store_type,
@@ -2170,6 +2372,16 @@ impl CerememoryEngine {
             prev_id = Some(resp.record_id);
             results.push(resp);
         }
+
+        self.audit_event(
+            "encode.batch",
+            results.iter().map(|result| result.record_id).collect(),
+            results.iter().map(|result| result.store).collect(),
+            serde_json::json!({
+                "records": results.len(),
+                "associations_inferred": total_inferred,
+            }),
+        )?;
 
         Ok(EncodeBatchResponse {
             results,
@@ -2239,6 +2451,18 @@ impl CerememoryEngine {
                 }
             }
         }
+
+        self.audit_event(
+            "encode.update",
+            vec![req.record_id],
+            vec![store_type],
+            serde_json::json!({
+                "record_id": req.record_id,
+                "store": store_type,
+                "content_changed": content_changed,
+                "meta_changed": meta_changed,
+            }),
+        )?;
 
         Ok(())
     }
@@ -2467,6 +2691,8 @@ impl CerememoryEngine {
 
         // 6. Build response with reconsolidation
         let mut memories = Vec::with_capacity(candidates.len());
+        let mut reconsolidated_ids = Vec::new();
+        let mut reconsolidated_stores = Vec::new();
         for (mut record, relevance) in candidates {
             // Reconsolidate: update access metadata + fidelity
             if req.reconsolidate {
@@ -2494,6 +2720,8 @@ impl CerememoryEngine {
                     ) {
                         warn!(record_id = %record.id, error = %e, "Failed to update access during reconsolidation");
                     }
+                    reconsolidated_ids.push(record.id);
+                    reconsolidated_stores.push(store_type);
                 }
             }
 
@@ -2521,6 +2749,18 @@ impl CerememoryEngine {
         }
 
         metrics::counter!("cerememory_recall_total").increment(1);
+
+        if !reconsolidated_ids.is_empty() {
+            let records_updated = reconsolidated_ids.len();
+            self.audit_event(
+                "recall.query.reconsolidate",
+                reconsolidated_ids,
+                reconsolidated_stores,
+                serde_json::json!({
+                    "records_updated": records_updated,
+                }),
+            )?;
+        }
 
         Ok(RecallQueryResponse {
             memories,
@@ -2920,6 +3160,7 @@ impl CerememoryEngine {
         let mut raw_records_processed = 0u32;
         let mut episodic_summaries_created = 0u32;
         let mut semantic_nodes_created = 0u32;
+        let mut created_ids = Vec::new();
         let max_groups = req.max_groups as usize;
 
         for group in Self::infer_dream_groups(candidate_records)
@@ -3023,6 +3264,7 @@ impl CerememoryEngine {
             }
 
             let summary_id = summary_record.id;
+            created_ids.push(summary_id);
             dispatch_store!(self, StoreType::Episodic, store(summary_record.clone()))?;
             self.coordinator
                 .register(
@@ -3044,6 +3286,7 @@ impl CerememoryEngine {
                     last_co_activation: dreamed_at,
                 });
                 let semantic_id = semantic_record.id;
+                created_ids.push(semantic_id);
                 if let Err(err) =
                     dispatch_store!(self, StoreType::Semantic, store(semantic_record.clone()))
                 {
@@ -3109,12 +3352,26 @@ impl CerememoryEngine {
             episodic_summaries_created += 1;
         }
 
-        Ok(DreamTickResponse {
+        let response = DreamTickResponse {
             groups_processed,
             raw_records_processed,
             episodic_summaries_created,
             semantic_nodes_created,
-        })
+        };
+        self.audit_event(
+            "lifecycle.dream_tick",
+            created_ids,
+            vec![StoreType::Episodic, StoreType::Semantic],
+            serde_json::json!({
+                "groups_processed": response.groups_processed,
+                "raw_records_processed": response.raw_records_processed,
+                "episodic_summaries_created": response.episodic_summaries_created,
+                "semantic_nodes_created": response.semantic_nodes_created,
+                "dry_run": req.dry_run,
+            }),
+        )?;
+
+        Ok(response)
     }
 
     /// lifecycle.consolidate — Smart Consolidation (CMP Spec §5.1).
@@ -3323,13 +3580,28 @@ impl CerememoryEngine {
             migrated, semantic_created, compressed, pruned, "Smart consolidation completed"
         );
 
-        Ok(ConsolidateResponse {
+        let response = ConsolidateResponse {
             records_processed: processed,
             records_migrated: migrated,
             records_compressed: compressed,
             records_pruned: pruned,
             semantic_nodes_created: semantic_created,
-        })
+        };
+        self.audit_event(
+            "lifecycle.consolidate",
+            Vec::new(),
+            vec![StoreType::Episodic, StoreType::Semantic],
+            serde_json::json!({
+                "records_processed": response.records_processed,
+                "records_migrated": response.records_migrated,
+                "records_compressed": response.records_compressed,
+                "records_pruned": response.records_pruned,
+                "semantic_nodes_created": response.semantic_nodes_created,
+                "dry_run": req.dry_run,
+            }),
+        )?;
+
+        Ok(response)
     }
 
     /// lifecycle.decay_tick — Advance decay (CMP Spec §5.2).
@@ -3405,17 +3677,38 @@ impl CerememoryEngine {
             "Decay tick completed"
         );
 
-        Ok(DecayTickResponse {
+        let response = DecayTickResponse {
             records_updated: result.records_updated,
             records_below_threshold: result.records_below_threshold,
             records_pruned: result.records_pruned,
-        })
+        };
+        self.audit_event(
+            "lifecycle.decay_tick",
+            result.updates.iter().map(|update| update.id).collect(),
+            fidelity_by_store.keys().copied().collect(),
+            serde_json::json!({
+                "records_updated": response.records_updated,
+                "records_below_threshold": response.records_below_threshold,
+                "records_pruned": response.records_pruned,
+                "tick_duration_seconds": req.tick_duration_seconds,
+            }),
+        )?;
+
+        Ok(response)
     }
 
     /// lifecycle.set_mode (CMP Spec §5.3).
     pub async fn lifecycle_set_mode(&self, req: SetModeRequest) -> Result<(), CerememoryError> {
         *self.recall_mode.write().await = req.mode;
         info!(mode = ?req.mode, "Recall mode changed");
+        self.audit_event(
+            "lifecycle.set_mode",
+            Vec::new(),
+            Vec::new(),
+            serde_json::json!({
+                "mode": req.mode,
+            }),
+        )?;
         Ok(())
     }
 
@@ -3478,6 +3771,18 @@ impl CerememoryEngine {
         self.cleanup_deleted_records(&deleted_records).await?;
 
         warn!(deleted, "Forget operation completed");
+        self.audit_event(
+            "lifecycle.forget",
+            deleted_records.iter().map(|(id, _)| *id).collect(),
+            deleted_records
+                .iter()
+                .map(|(_, store_type)| *store_type)
+                .collect(),
+            serde_json::json!({
+                "deleted": deleted,
+                "cascade": cascade,
+            }),
+        )?;
         Ok(deleted)
     }
 
@@ -3512,7 +3817,7 @@ impl CerememoryEngine {
             None
         };
 
-        if req.include_raw_journal {
+        let result = if req.include_raw_journal {
             cerememory_archive::export_bundle_filtered(
                 &records,
                 &raw_records,
@@ -3525,7 +3830,21 @@ impl CerememoryEngine {
                 req.stores.as_deref(),
                 encryption_key.as_ref(),
             )
-        }
+        }?;
+        self.audit_event(
+            "lifecycle.export",
+            Vec::new(),
+            req.stores.clone().unwrap_or_default(),
+            serde_json::json!({
+                "archive_id": &result.1.archive_id,
+                "record_count": result.1.record_count,
+                "size_bytes": result.1.size_bytes,
+                "checksum": &result.1.checksum,
+                "include_raw_journal": req.include_raw_journal,
+                "encrypted": req.encrypt,
+            }),
+        )?;
+        Ok(result)
     }
 
     /// lifecycle.import — Import records from a CMA archive with optional
@@ -3616,6 +3935,17 @@ impl CerememoryEngine {
         };
 
         info!(imported, strategy = ?req.strategy, "Import completed");
+        self.audit_event(
+            "lifecycle.import",
+            Vec::new(),
+            Vec::new(),
+            serde_json::json!({
+                "archive_id": &req.archive_id,
+                "strategy": req.strategy,
+                "conflict_resolution": req.conflict_resolution,
+                "imported": imported,
+            }),
+        )?;
         Ok(imported)
     }
 
@@ -3625,12 +3955,15 @@ impl CerememoryEngine {
     pub async fn import_records(&self, data: &[u8]) -> Result<u32, CerememoryError> {
         let records = cerememory_archive::import_records(data)?;
         let mut imported = 0u32;
+        let mut imported_ids = Vec::new();
+        let mut imported_stores = Vec::new();
 
         for record in records {
             let store_type = record.store;
+            let record_id = record.id;
 
             // Check for ID conflicts — skip if record already exists
-            if self.get_store_record(&record.id).await?.is_some() {
+            if self.get_store_record(&record_id).await?.is_some() {
                 continue;
             }
 
@@ -3645,9 +3978,19 @@ impl CerememoryEngine {
                 warn!(error = %e, record_id = %record.id, "Failed to index imported record");
             }
             imported += 1;
+            imported_ids.push(record_id);
+            imported_stores.push(store_type);
         }
 
         info!(imported, "Import completed");
+        self.audit_event(
+            "import_records",
+            imported_ids,
+            imported_stores,
+            serde_json::json!({
+                "imported": imported,
+            }),
+        )?;
         Ok(imported)
     }
 
@@ -3947,6 +4290,20 @@ mod tests {
         CerememoryEngine::in_memory().unwrap()
     }
 
+    fn persistent_engine_config(dir: &tempfile::TempDir) -> EngineConfig {
+        let base = dir.path();
+        EngineConfig {
+            raw_journal_path: Some(base.join("raw_journal.redb").to_string_lossy().into_owned()),
+            episodic_path: Some(base.join("episodic.redb").to_string_lossy().into_owned()),
+            semantic_path: Some(base.join("semantic.redb").to_string_lossy().into_owned()),
+            procedural_path: Some(base.join("procedural.redb").to_string_lossy().into_owned()),
+            emotional_path: Some(base.join("emotional.redb").to_string_lossy().into_owned()),
+            index_path: Some(base.join("text_index").to_string_lossy().into_owned()),
+            vector_index_path: Some(base.join("vectors.redb").to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        }
+    }
+
     fn text_store_req(text: &str, store: Option<StoreType>) -> EncodeStoreRequest {
         EncodeStoreRequest {
             header: None,
@@ -4112,6 +4469,361 @@ mod tests {
         assert_eq!(recalled.records.len(), 1);
         assert_eq!(recalled.records[0].id, response.record_id);
         assert_eq!(recalled.records[0].text_content(), Some("forensic memory"));
+    }
+
+    #[tokio::test]
+    async fn store_encryption_passphrase_protects_persistent_raw_and_episodic_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = persistent_engine_config(&dir);
+        config.store_encryption_passphrase = Some("correct horse battery staple".to_string());
+        let engine = CerememoryEngine::new(config).unwrap();
+
+        let episodic_id = engine
+            .encode_store(text_store_req(
+                "encrypted episodic through engine",
+                Some(StoreType::Episodic),
+            ))
+            .await
+            .unwrap()
+            .record_id;
+        let raw_id = engine
+            .encode_store_raw(raw_text_store_req(
+                "sess-encrypted",
+                "encrypted raw through engine",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap()
+            .record_id;
+        drop(engine);
+
+        let mut config = persistent_engine_config(&dir);
+        config.store_encryption_passphrase = Some("correct horse battery staple".to_string());
+        let reopened = CerememoryEngine::new(config).unwrap();
+        assert_eq!(
+            reopened
+                .introspect_record(RecordIntrospectRequest {
+                    header: None,
+                    record_id: episodic_id,
+                    include_history: false,
+                    include_associations: false,
+                    include_versions: false,
+                })
+                .await
+                .unwrap()
+                .text_content(),
+            Some("encrypted episodic through engine")
+        );
+        assert_eq!(
+            reopened
+                .get_raw_journal_record(&raw_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .text_content(),
+            Some("encrypted raw through engine")
+        );
+        drop(reopened);
+
+        let without_key = CerememoryEngine::new(persistent_engine_config(&dir)).unwrap();
+        let err = without_key
+            .introspect_record(RecordIntrospectRequest {
+                header: None,
+                record_id: episodic_id,
+                include_history: false,
+                include_associations: false,
+                include_versions: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CerememoryError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn store_encryption_migration_rewrites_legacy_persistent_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let plaintext = CerememoryEngine::new(persistent_engine_config(&dir)).unwrap();
+        let mut episodic_req =
+            text_store_req("legacy episodic through engine", Some(StoreType::Episodic));
+        episodic_req.content.blocks[0].embedding = Some(vec![1.0, 0.0]);
+        let episodic_id = plaintext
+            .encode_store(episodic_req)
+            .await
+            .unwrap()
+            .record_id;
+        let semantic_id = plaintext
+            .encode_store(text_store_req(
+                "legacy semantic through engine",
+                Some(StoreType::Semantic),
+            ))
+            .await
+            .unwrap()
+            .record_id;
+        let procedural_id = plaintext
+            .encode_store(text_store_req(
+                "legacy procedural through engine",
+                Some(StoreType::Procedural),
+            ))
+            .await
+            .unwrap()
+            .record_id;
+        let emotional_id = plaintext
+            .encode_store(text_store_req(
+                "legacy emotional through engine",
+                Some(StoreType::Emotional),
+            ))
+            .await
+            .unwrap()
+            .record_id;
+        let raw_id = plaintext
+            .encode_store_raw(raw_text_store_req(
+                "sess-migrate",
+                "legacy raw through engine",
+                RawVisibility::Normal,
+                SecrecyLevel::Public,
+            ))
+            .await
+            .unwrap()
+            .record_id;
+        drop(plaintext);
+
+        let mut config = persistent_engine_config(&dir);
+        config.store_encryption_passphrase = Some("migration passphrase".to_string());
+        let encrypted = CerememoryEngine::new(config).unwrap();
+        let stats = encrypted.migrate_store_encryption().await.unwrap();
+        assert_eq!(stats.raw_journal.records_total, 1);
+        assert_eq!(stats.raw_journal.records_migrated, 1);
+        assert_eq!(stats.raw_journal.records_already_encrypted, 0);
+        assert_eq!(stats.episodic.records_total, 1);
+        assert_eq!(stats.episodic.records_migrated, 1);
+        assert_eq!(stats.episodic.records_already_encrypted, 0);
+        assert_eq!(stats.semantic.records_total, 1);
+        assert_eq!(stats.semantic.records_migrated, 1);
+        assert_eq!(stats.semantic.records_already_encrypted, 0);
+        assert_eq!(stats.procedural.records_total, 1);
+        assert_eq!(stats.procedural.records_migrated, 1);
+        assert_eq!(stats.procedural.records_already_encrypted, 0);
+        assert_eq!(stats.emotional.records_total, 1);
+        assert_eq!(stats.emotional.records_migrated, 1);
+        assert_eq!(stats.emotional.records_already_encrypted, 0);
+        assert_eq!(stats.vector_index.records_total, 1);
+        assert_eq!(stats.vector_index.records_migrated, 1);
+        assert_eq!(stats.vector_index.records_already_encrypted, 0);
+        assert_eq!(
+            encrypted
+                .get_raw_journal_record(&raw_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .text_content(),
+            Some("legacy raw through engine")
+        );
+        assert_eq!(
+            encrypted
+                .introspect_record(RecordIntrospectRequest {
+                    header: None,
+                    record_id: episodic_id,
+                    include_history: false,
+                    include_associations: false,
+                    include_versions: false,
+                })
+                .await
+                .unwrap()
+                .text_content(),
+            Some("legacy episodic through engine")
+        );
+        for (record_id, expected_text) in [
+            (semantic_id, "legacy semantic through engine"),
+            (procedural_id, "legacy procedural through engine"),
+            (emotional_id, "legacy emotional through engine"),
+        ] {
+            assert_eq!(
+                encrypted
+                    .introspect_record(RecordIntrospectRequest {
+                        header: None,
+                        record_id,
+                        include_history: false,
+                        include_associations: false,
+                        include_versions: false,
+                    })
+                    .await
+                    .unwrap()
+                    .text_content(),
+                Some(expected_text)
+            );
+        }
+        let recalled = encrypted
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    embedding: Some(vec![1.0, 0.0]),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Episodic]),
+                limit: 1,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+        assert_eq!(recalled.memories[0].record.id, episodic_id);
+
+        let stats = encrypted.migrate_store_encryption().await.unwrap();
+        assert_eq!(stats.raw_journal.records_migrated, 0);
+        assert_eq!(stats.raw_journal.records_already_encrypted, 1);
+        assert_eq!(stats.episodic.records_migrated, 0);
+        assert_eq!(stats.episodic.records_already_encrypted, 1);
+        assert_eq!(stats.semantic.records_migrated, 0);
+        assert_eq!(stats.semantic.records_already_encrypted, 1);
+        assert_eq!(stats.procedural.records_migrated, 0);
+        assert_eq!(stats.procedural.records_already_encrypted, 1);
+        assert_eq!(stats.emotional.records_migrated, 0);
+        assert_eq!(stats.emotional.records_already_encrypted, 1);
+        assert_eq!(stats.vector_index.records_migrated, 0);
+        assert_eq!(stats.vector_index.records_already_encrypted, 1);
+        drop(encrypted);
+
+        let without_key = CerememoryEngine::new(persistent_engine_config(&dir)).unwrap();
+        let err = without_key
+            .get_raw_journal_record(&raw_id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CerememoryError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn store_encryption_migration_requires_configured_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = CerememoryEngine::new(persistent_engine_config(&dir)).unwrap();
+        let err = engine.migrate_store_encryption().await.unwrap_err();
+
+        assert!(matches!(err, CerememoryError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn audit_log_records_mutations_and_verifies_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = persistent_engine_config(&dir);
+        let audit_path = dir.path().join("audit.jsonl");
+        config.audit_log_path = Some(audit_path.to_string_lossy().into_owned());
+        let engine = CerememoryEngine::new(config).unwrap();
+
+        let stored = engine
+            .encode_store(text_store_req("audited memory", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+        engine
+            .lifecycle_forget(ForgetRequest {
+                header: None,
+                record_ids: Some(vec![stored.record_id]),
+                store: None,
+                temporal_range: None,
+                cascade: false,
+                confirm: true,
+            })
+            .await
+            .unwrap();
+
+        let verification = AuditLog::verify_path(&audit_path).unwrap();
+        assert_eq!(verification.entries, 2);
+        assert_eq!(verification.last_sequence, 2);
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(contents.contains("encode.store"));
+        assert!(contents.contains("lifecycle.forget"));
+        assert!(!contents.contains("audited memory"));
+    }
+
+    #[tokio::test]
+    async fn audit_log_tampering_blocks_engine_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = persistent_engine_config(&dir);
+        let audit_path = dir.path().join("audit.jsonl");
+        config.audit_log_path = Some(audit_path.to_string_lossy().into_owned());
+        let engine = CerememoryEngine::new(config).unwrap();
+
+        engine
+            .encode_store(text_store_req("tamper target", Some(StoreType::Semantic)))
+            .await
+            .unwrap();
+        drop(engine);
+
+        let mut contents = std::fs::read_to_string(&audit_path).unwrap();
+        contents = contents.replace("encode.store", "encode.changed");
+        std::fs::write(&audit_path, contents).unwrap();
+
+        let mut reopened_config = persistent_engine_config(&dir);
+        reopened_config.audit_log_path = Some(audit_path.to_string_lossy().into_owned());
+        let err = match CerememoryEngine::new(reopened_config) {
+            Ok(_) => panic!("tampered audit log should block engine start"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn audit_log_records_reconsolidating_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = persistent_engine_config(&dir);
+        let audit_path = dir.path().join("audit.jsonl");
+        config.audit_log_path = Some(audit_path.to_string_lossy().into_owned());
+        let engine = CerememoryEngine::new(config).unwrap();
+
+        let stored = engine
+            .encode_store(text_store_req(
+                "recall audit target",
+                Some(StoreType::Episodic),
+            ))
+            .await
+            .unwrap();
+        engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("recall audit target".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Episodic]),
+                limit: 1,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: true,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(contents.contains("recall.query.reconsolidate"));
+        assert!(contents.contains(&stored.record_id.to_string()));
+        assert!(!contents.contains("recall audit target"));
+        AuditLog::verify_path(&audit_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_log_records_import_records_convenience_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = persistent_engine_config(&dir);
+        let audit_path = dir.path().join("audit.jsonl");
+        config.audit_log_path = Some(audit_path.to_string_lossy().into_owned());
+        let engine = CerememoryEngine::new(config).unwrap();
+
+        let record = MemoryRecord::new_text(StoreType::Semantic, "import convenience audit target");
+        let imported_id = record.id;
+        let (archive, _) = cerememory_archive::export(&[record]).unwrap();
+        let imported = engine.import_records(&archive).await.unwrap();
+
+        assert_eq!(imported, 1);
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(contents.contains("import_records"));
+        assert!(contents.contains(&imported_id.to_string()));
+        assert!(!contents.contains("import convenience audit target"));
+        AuditLog::verify_path(&audit_path).unwrap();
     }
 
     #[tokio::test]

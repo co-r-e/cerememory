@@ -26,6 +26,7 @@ use cerememory_core::{
     Association, AssociationType, CerememoryError, EmotionVector, FidelityState, MemoryContent,
     MemoryRecord, MetaMemory, Store,
 };
+use cerememory_store_common::{StoreRecordCodec, StoreRecordMigrationStats};
 
 // ---------------------------------------------------------------------------
 // Table definitions
@@ -109,6 +110,7 @@ pub struct EdgeEntry {
 #[derive(Clone)]
 pub struct SemanticStore {
     db: Arc<Database>,
+    codec: StoreRecordCodec,
 }
 
 impl SemanticStore {
@@ -118,11 +120,19 @@ impl SemanticStore {
             tempfile::NamedTempFile::new().map_err(|e| CerememoryError::Storage(e.to_string()))?;
         let path = tmp.into_temp_path();
         let _ = std::fs::remove_file(&path);
-        Self::open(&path)
+        Self::open_with_codec(&path, StoreRecordCodec::plaintext())
     }
 
     /// Open (or create) a semantic store at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CerememoryError> {
+        Self::open_with_codec(path, StoreRecordCodec::plaintext())
+    }
+
+    /// Open (or create) a semantic store at `path` with an explicit record codec.
+    pub fn open_with_codec(
+        path: impl AsRef<Path>,
+        codec: StoreRecordCodec,
+    ) -> Result<Self, CerememoryError> {
         let db = Database::create(path).map_err(|e| CerememoryError::Storage(e.to_string()))?;
 
         // Ensure all tables exist.
@@ -140,7 +150,107 @@ impl SemanticStore {
         txn.commit()
             .map_err(|e| CerememoryError::Storage(e.to_string()))?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            codec,
+        })
+    }
+
+    /// Rewrite legacy plaintext node and edge payloads using this store's encrypted codec.
+    pub async fn migrate_plaintext_records_to_encrypted(
+        &self,
+    ) -> Result<StoreRecordMigrationStats, CerememoryError> {
+        if !self.codec.encrypts_new_records() {
+            return Err(CerememoryError::Validation(
+                "store encryption passphrase is required before migrating semantic records"
+                    .to_string(),
+            ));
+        }
+
+        let db = self.db.clone();
+        let codec = self.codec.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db
+                .begin_write()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            let mut stats = StoreRecordMigrationStats::empty();
+            let mut node_rewrites: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            let mut edge_rewrites: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+
+            {
+                let nodes = txn
+                    .open_table(NODES)
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                for entry in nodes
+                    .iter()
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?
+                {
+                    let (key_guard, value_guard) =
+                        entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                    let payload = value_guard.value();
+                    let record: MemoryRecord = codec.decode(payload)?;
+                    stats.records_total += 1;
+
+                    if StoreRecordCodec::is_encrypted_payload(payload) {
+                        stats.records_already_encrypted += 1;
+                    } else {
+                        node_rewrites.push((key_guard.value().to_vec(), codec.encode(&record)?));
+                        stats.records_migrated += 1;
+                    }
+                }
+            }
+
+            {
+                let edges = txn
+                    .open_table(EDGES)
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                for entry in edges
+                    .iter()
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?
+                {
+                    let (key_guard, value_guard) =
+                        entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                    let payload = value_guard.value();
+                    let edge: EdgeEntry = codec.decode(payload)?;
+                    stats.records_total += 1;
+
+                    if StoreRecordCodec::is_encrypted_payload(payload) {
+                        stats.records_already_encrypted += 1;
+                    } else {
+                        edge_rewrites.push((key_guard.value().to_vec(), codec.encode(&edge)?));
+                        stats.records_migrated += 1;
+                    }
+                }
+            }
+
+            if !node_rewrites.is_empty() {
+                let mut nodes = txn
+                    .open_table(NODES)
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                for (key, payload) in node_rewrites {
+                    nodes
+                        .insert(key.as_slice(), payload.as_slice())
+                        .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                }
+            }
+
+            if !edge_rewrites.is_empty() {
+                let mut edges = txn
+                    .open_table(EDGES)
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                for (key, payload) in edge_rewrites {
+                    edges
+                        .insert(key.as_slice(), payload.as_slice())
+                        .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                }
+            }
+
+            txn.commit()
+                .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+            Ok(stats)
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(e.to_string()))?
     }
 
     // -----------------------------------------------------------------------
@@ -159,6 +269,7 @@ impl SemanticStore {
         weight: f64,
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_write()
@@ -180,9 +291,7 @@ impl SemanticStore {
                 {
                     return Err(CerememoryError::RecordNotFound(target.to_string()));
                 }
-                let mut source_record: MemoryRecord =
-                    rmp_serde::from_slice(source_value.value())
-                        .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let mut source_record: MemoryRecord = codec.decode(source_value.value())?;
                 drop(source_value);
 
                 if !source_record
@@ -199,8 +308,7 @@ impl SemanticStore {
                     });
                     source_record.updated_at = Utc::now();
                     source_record.version += 1;
-                    let source_bytes = rmp_serde::to_vec(&source_record)
-                        .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                    let source_bytes = codec.encode(&source_record)?;
                     nodes
                         .insert(source.as_bytes().as_slice(), source_bytes.as_slice())
                         .map_err(|e| CerememoryError::Storage(e.to_string()))?;
@@ -214,8 +322,7 @@ impl SemanticStore {
                     weight,
                     created_at: Utc::now(),
                 };
-                let entry_bytes = rmp_serde::to_vec(&entry)
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let entry_bytes = codec.encode(&entry)?;
 
                 let mut edges = txn
                     .open_table(EDGES)
@@ -246,6 +353,7 @@ impl SemanticStore {
         assoc_type: AssociationType,
     ) -> Result<bool, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_write()
@@ -258,8 +366,7 @@ impl SemanticStore {
                     .get(source.as_bytes().as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
                 let updated_source = if let Some(val) = source_value.as_ref() {
-                    let mut rec: MemoryRecord = rmp_serde::from_slice(val.value())
-                        .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                    let mut rec: MemoryRecord = codec.decode(val.value())?;
                     let original_len = rec.associations.len();
                     rec.associations.retain(|assoc| {
                         !(assoc.target_id == target && assoc.association_type == assoc_type)
@@ -267,10 +374,7 @@ impl SemanticStore {
                     if rec.associations.len() != original_len {
                         rec.updated_at = Utc::now();
                         rec.version += 1;
-                        Some(
-                            rmp_serde::to_vec(&rec)
-                                .map_err(|e| CerememoryError::Serialization(e.to_string()))?,
-                        )
+                        Some(codec.encode(&rec)?)
                     } else {
                         None
                     }
@@ -513,10 +617,10 @@ impl SemanticStore {
 impl Store for SemanticStore {
     async fn store(&self, record: MemoryRecord) -> Result<Uuid, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let id = record.id;
-            let bytes = rmp_serde::to_vec(&record)
-                .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+            let bytes = codec.encode(&record)?;
 
             let txn = db
                 .begin_write()
@@ -545,6 +649,7 @@ impl Store for SemanticStore {
     async fn get(&self, id: &Uuid) -> Result<Option<MemoryRecord>, CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_read()
@@ -554,8 +659,7 @@ impl Store for SemanticStore {
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
             match nodes.get(id.as_bytes().as_slice()) {
                 Ok(Some(val)) => {
-                    let rec: MemoryRecord = rmp_serde::from_slice(val.value())
-                        .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                    let rec: MemoryRecord = codec.decode(val.value())?;
                     Ok(Some(rec))
                 }
                 Ok(None) => Ok(None),
@@ -569,6 +673,7 @@ impl Store for SemanticStore {
     async fn delete(&self, id: &Uuid) -> Result<bool, CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_write()
@@ -581,8 +686,7 @@ impl Store for SemanticStore {
                 // First read the record so we can de-index concepts.
                 let record: Option<MemoryRecord> = match nodes.get(id.as_bytes().as_slice()) {
                     Ok(Some(val)) => {
-                        let rec: MemoryRecord = rmp_serde::from_slice(val.value())
-                            .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                        let rec: MemoryRecord = codec.decode(val.value())?;
                         Some(rec)
                     }
                     _ => None,
@@ -675,6 +779,7 @@ impl Store for SemanticStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_write()
@@ -687,15 +792,13 @@ impl Store for SemanticStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut rec: MemoryRecord = rmp_serde::from_slice(val.value())
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let mut rec: MemoryRecord = codec.decode(val.value())?;
                 drop(val);
 
                 rec.fidelity = fidelity;
                 rec.updated_at = Utc::now();
 
-                let bytes = rmp_serde::to_vec(&rec)
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let bytes = codec.encode(&rec)?;
                 nodes
                     .insert(id.as_bytes().as_slice(), bytes.as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
@@ -717,6 +820,7 @@ impl Store for SemanticStore {
             return Ok(Vec::new());
         }
         let db = self.db.clone();
+        let codec = self.codec.clone();
         let query = query.to_lowercase();
         tokio::task::spawn_blocking(move || {
             let txn = db
@@ -732,8 +836,7 @@ impl Store for SemanticStore {
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?
             {
                 let (_k, v) = entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                let rec: MemoryRecord = rmp_serde::from_slice(v.value())
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let rec: MemoryRecord = codec.decode(v.value())?;
 
                 let matches = rec
                     .text_content()
@@ -788,6 +891,7 @@ impl Store for SemanticStore {
 
     async fn get_all(&self) -> Result<Vec<MemoryRecord>, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_read()
@@ -795,7 +899,7 @@ impl Store for SemanticStore {
             let nodes = txn
                 .open_table(NODES)
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-            cerememory_store_common::get_all_sync(&nodes)
+            cerememory_store_common::get_all_sync_with_codec(&nodes, &codec)
         })
         .await
         .map_err(|e| CerememoryError::Internal(e.to_string()))?
@@ -829,6 +933,7 @@ impl Store for SemanticStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_write()
@@ -841,8 +946,7 @@ impl Store for SemanticStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut rec: MemoryRecord = rmp_serde::from_slice(val.value())
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let mut rec: MemoryRecord = codec.decode(val.value())?;
                 drop(val);
 
                 // De-index old concepts before content change.
@@ -878,8 +982,7 @@ impl Store for SemanticStore {
                     SemanticStore::index_concepts_for_record(&mut concepts, &rec)?;
                 }
 
-                let bytes = rmp_serde::to_vec(&rec)
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let bytes = codec.encode(&rec)?;
                 nodes
                     .insert(id.as_bytes().as_slice(), bytes.as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
@@ -899,6 +1002,7 @@ impl Store for SemanticStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_write()
@@ -911,16 +1015,14 @@ impl Store for SemanticStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut rec: MemoryRecord = rmp_serde::from_slice(val.value())
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let mut rec: MemoryRecord = codec.decode(val.value())?;
                 drop(val);
 
                 rec.associations = associations;
                 rec.updated_at = Utc::now();
                 rec.version += 1;
 
-                let bytes = rmp_serde::to_vec(&rec)
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let bytes = codec.encode(&rec)?;
                 nodes
                     .insert(id.as_bytes().as_slice(), bytes.as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
@@ -941,6 +1043,7 @@ impl Store for SemanticStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_write()
@@ -953,16 +1056,14 @@ impl Store for SemanticStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut rec: MemoryRecord = rmp_serde::from_slice(val.value())
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let mut rec: MemoryRecord = codec.decode(val.value())?;
                 drop(val);
 
                 rec.access_count = access_count;
                 rec.last_accessed_at = last_accessed_at;
                 rec.updated_at = Utc::now();
 
-                let bytes = rmp_serde::to_vec(&rec)
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let bytes = codec.encode(&rec)?;
                 nodes
                     .insert(id.as_bytes().as_slice(), bytes.as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
@@ -1048,6 +1149,57 @@ mod tests {
         let ids = store.list_ids().await.unwrap();
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
+    }
+
+    #[tokio::test]
+    async fn migrate_plaintext_records_to_encrypted_is_idempotent() {
+        let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = tmp_dir.path().join("semantic.redb");
+        let plaintext = SemanticStore::open(&db_path).unwrap();
+        let id1 = plaintext
+            .store(make_record("Legacy semantic one"))
+            .await
+            .unwrap();
+        let id2 = plaintext
+            .store(make_record("Legacy semantic two"))
+            .await
+            .unwrap();
+        plaintext
+            .add_edge(id1, id2, AssociationType::Semantic, 0.8)
+            .await
+            .unwrap();
+        drop(plaintext);
+
+        let encrypted = SemanticStore::open_with_codec(
+            &db_path,
+            StoreRecordCodec::encrypted_from_passphrase("migration passphrase").unwrap(),
+        )
+        .unwrap();
+        let stats = encrypted
+            .migrate_plaintext_records_to_encrypted()
+            .await
+            .unwrap();
+        assert_eq!(stats.records_total, 3);
+        assert_eq!(stats.records_migrated, 3);
+        assert_eq!(stats.records_already_encrypted, 0);
+        assert_eq!(
+            encrypted.get(&id1).await.unwrap().unwrap().text_content(),
+            Some("Legacy semantic one")
+        );
+        assert_eq!(encrypted.get_neighbors(id1).await.unwrap().len(), 1);
+
+        let stats = encrypted
+            .migrate_plaintext_records_to_encrypted()
+            .await
+            .unwrap();
+        assert_eq!(stats.records_total, 3);
+        assert_eq!(stats.records_migrated, 0);
+        assert_eq!(stats.records_already_encrypted, 3);
+        drop(encrypted);
+
+        let plaintext_reopen = SemanticStore::open(&db_path).unwrap();
+        let err = plaintext_reopen.get(&id1).await.unwrap_err();
+        assert!(matches!(err, CerememoryError::Unauthorized(_)));
     }
 
     #[tokio::test]

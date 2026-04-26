@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use cerememory_core::error::CerememoryError;
 use cerememory_core::types::RawJournalRecord;
-use cerememory_store_common::storage_err;
+use cerememory_store_common::{storage_err, StoreRecordCodec, StoreRecordMigrationStats};
 
 /// Primary table: UUID (16 bytes) -> MessagePack-encoded `RawJournalRecord`.
 const RAW_JOURNAL_RECORDS: TableDefinition<&[u8], &[u8]> =
@@ -150,6 +150,28 @@ impl RawTextIndex {
         Ok(())
     }
 
+    fn rebuild(&self, records: &[RawJournalRecord]) -> Result<(), CerememoryError> {
+        let mut writer = self.lock_writer()?;
+        writer
+            .delete_all_documents()
+            .map_err(|e| CerememoryError::Storage(format!("Tantivy delete all docs: {e}")))?;
+        for record in records {
+            if let Some(body) = record.text_content() {
+                let mut doc = TantivyDocument::new();
+                doc.add_text(self.fields.id, record.id.to_string());
+                doc.add_text(self.fields.session_id, &record.session_id);
+                doc.add_text(self.fields.body, body);
+                writer
+                    .add_document(doc)
+                    .map_err(|e| CerememoryError::Storage(format!("Tantivy add doc: {e}")))?;
+            }
+        }
+        writer
+            .commit()
+            .map_err(|e| CerememoryError::Storage(format!("Tantivy commit: {e}")))?;
+        Ok(())
+    }
+
     fn search(
         &self,
         query: &str,
@@ -211,18 +233,41 @@ impl RawTextIndex {
 pub struct RawJournalStore {
     db: Arc<Database>,
     text_index: Arc<RawTextIndex>,
+    codec: StoreRecordCodec,
 }
 
 impl RawJournalStore {
     /// Open (or create) a persistent raw journal at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CerememoryError> {
+        Self::open_with_codec(path, StoreRecordCodec::plaintext())
+    }
+
+    /// Open (or create) a persistent raw journal at `path` with an explicit record codec.
+    pub fn open_with_codec(
+        path: impl AsRef<Path>,
+        codec: StoreRecordCodec,
+    ) -> Result<Self, CerememoryError> {
+        Self::open_with_codec_and_text_index_persistence(path, codec, true)
+    }
+
+    /// Open (or create) a persistent raw journal with explicit record codec and text-index policy.
+    pub fn open_with_codec_and_text_index_persistence(
+        path: impl AsRef<Path>,
+        codec: StoreRecordCodec,
+        persist_text_index: bool,
+    ) -> Result<Self, CerememoryError> {
         let db = Database::create(path.as_ref())
             .map_err(|e| CerememoryError::Storage(format!("Failed to open redb database: {e}")))?;
-        let text_index = RawTextIndex::open(path.as_ref())?;
+        let text_index = if persist_text_index {
+            RawTextIndex::open(path.as_ref())?
+        } else {
+            RawTextIndex::open_in_memory()?
+        };
 
         let store = Self {
             db: Arc::new(db),
             text_index: Arc::new(text_index),
+            codec,
         };
         store.ensure_tables()?;
         Ok(store)
@@ -242,6 +287,7 @@ impl RawJournalStore {
         let store = Self {
             db: Arc::new(db),
             text_index: Arc::new(text_index),
+            codec: StoreRecordCodec::plaintext(),
         };
         store.ensure_tables()?;
         Ok(store)
@@ -259,6 +305,66 @@ impl RawJournalStore {
         Ok(())
     }
 
+    /// Rewrite legacy plaintext raw journal payloads using this store's encrypted codec.
+    ///
+    /// Already encrypted payloads are decoded with the active key to ensure the
+    /// configured passphrase can actually read the whole journal.
+    pub async fn migrate_plaintext_records_to_encrypted(
+        &self,
+    ) -> Result<StoreRecordMigrationStats, CerememoryError> {
+        if !self.codec.encrypts_new_records() {
+            return Err(CerememoryError::Validation(
+                "store encryption passphrase is required before migrating raw journal records"
+                    .to_string(),
+            ));
+        }
+
+        let db = self.db.clone();
+        let codec = self.codec.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write().map_err(storage_err)?;
+            let mut stats = StoreRecordMigrationStats::empty();
+            let mut rewrites: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+
+            {
+                let records = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
+                for entry in records.iter().map_err(storage_err)? {
+                    let (key_guard, value_guard) = entry.map_err(storage_err)?;
+                    let payload = value_guard.value();
+                    let record: RawJournalRecord = codec.decode(payload)?;
+                    stats.records_total += 1;
+
+                    if StoreRecordCodec::is_encrypted_payload(payload) {
+                        stats.records_already_encrypted += 1;
+                    } else {
+                        rewrites.push((key_guard.value().to_vec(), codec.encode(&record)?));
+                        stats.records_migrated += 1;
+                    }
+                }
+            }
+
+            if !rewrites.is_empty() {
+                let mut records = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
+                for (key, payload) in rewrites {
+                    records
+                        .insert(key.as_slice(), payload.as_slice())
+                        .map_err(storage_err)?;
+                }
+            }
+
+            txn.commit().map_err(storage_err)?;
+            Ok(stats)
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
+    }
+
+    /// Rebuild the raw journal text index from stored records.
+    pub async fn rebuild_text_index(&self) -> Result<(), CerememoryError> {
+        let records = self.get_all().await?;
+        self.text_index.rebuild(&records)
+    }
+
     /// Append a new raw journal record.
     pub async fn append(&self, record: RawJournalRecord) -> Result<Uuid, CerememoryError> {
         record.validate()?;
@@ -269,10 +375,10 @@ impl RawJournalStore {
             .map(|text| (record_id, record.session_id.clone(), text.to_string()));
 
         let db = self.db.clone();
+        let codec = self.codec.clone();
         let _ = tokio::task::spawn_blocking(move || {
             let id = record.id;
-            let packed = rmp_serde::to_vec(&record)
-                .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+            let packed = codec.encode(&record)?;
 
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -338,9 +444,9 @@ impl RawJournalStore {
         let record_for_txn = record.clone();
 
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
-            let packed = rmp_serde::to_vec(&record_for_txn)
-                .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+            let packed = codec.encode(&record_for_txn)?;
 
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -431,10 +537,11 @@ impl RawJournalStore {
     pub async fn get(&self, id: &Uuid) -> Result<Option<RawJournalRecord>, CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let table = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
-            get_raw_record_sync(&table, &id)
+            get_raw_record_sync(&table, &id, &codec)
         })
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
@@ -497,10 +604,11 @@ impl RawJournalStore {
     /// Return all raw journal records in storage.
     pub async fn get_all(&self) -> Result<Vec<RawJournalRecord>, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let table = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
-            get_all_raw_records_sync(&table)
+            get_all_raw_records_sync(&table, &codec)
         })
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
@@ -519,6 +627,7 @@ impl RawJournalStore {
         }
 
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let records_table = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
@@ -526,7 +635,7 @@ impl RawJournalStore {
                 .open_table(RAW_JOURNAL_SESSION_INDEX)
                 .map_err(storage_err)?;
             let entries = get_session_index_entries_sync(&session_table, &session_id)?;
-            let mut records = get_raw_records_by_entries_sync(&records_table, &entries)?;
+            let mut records = get_raw_records_by_entries_sync(&records_table, &entries, &codec)?;
             records.sort_by(|a, b| {
                 a.created_at
                     .cmp(&b.created_at)
@@ -558,6 +667,7 @@ impl RawJournalStore {
         }
 
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let records_table = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
@@ -569,7 +679,8 @@ impl RawJournalStore {
                 .into_iter()
                 .filter(|entry| entry.created_at >= start && entry.created_at <= end)
                 .collect();
-            let mut records = get_raw_records_by_entries_sync(&records_table, &filtered_entries)?;
+            let mut records =
+                get_raw_records_by_entries_sync(&records_table, &filtered_entries, &codec)?;
             records.sort_by(|a, b| {
                 a.created_at
                     .cmp(&b.created_at)
@@ -625,25 +736,22 @@ fn raw_text_index_path(path: &Path) -> PathBuf {
 fn get_raw_record_sync(
     table: &redb::ReadOnlyTable<&[u8], &[u8]>,
     id: &Uuid,
+    codec: &StoreRecordCodec,
 ) -> Result<Option<RawJournalRecord>, CerememoryError> {
     match table.get(id.as_bytes().as_slice()).map_err(storage_err)? {
-        Some(value_guard) => {
-            let record: RawJournalRecord = rmp_serde::from_slice(value_guard.value())
-                .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
-            Ok(Some(record))
-        }
+        Some(value_guard) => Ok(Some(codec.decode(value_guard.value())?)),
         None => Ok(None),
     }
 }
 
 fn get_all_raw_records_sync(
     table: &redb::ReadOnlyTable<&[u8], &[u8]>,
+    codec: &StoreRecordCodec,
 ) -> Result<Vec<RawJournalRecord>, CerememoryError> {
     let mut records = Vec::new();
     for entry in table.iter().map_err(storage_err)? {
         let (_, value) = entry.map_err(storage_err)?;
-        let record: RawJournalRecord = rmp_serde::from_slice(value.value())
-            .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+        let record: RawJournalRecord = codec.decode(value.value())?;
         records.push(record);
     }
     Ok(records)
@@ -664,10 +772,11 @@ fn get_session_index_entries_sync(
 fn get_raw_records_by_entries_sync(
     table: &redb::ReadOnlyTable<&[u8], &[u8]>,
     entries: &[SessionIndexEntry],
+    codec: &StoreRecordCodec,
 ) -> Result<Vec<RawJournalRecord>, CerememoryError> {
     let mut records = Vec::with_capacity(entries.len());
     for entry in entries {
-        if let Some(record) = get_raw_record_sync(table, &entry.id)? {
+        if let Some(record) = get_raw_record_sync(table, &entry.id, codec)? {
             records.push(record);
         }
     }
@@ -702,6 +811,108 @@ mod tests {
         assert_eq!(restored.id, id);
         assert_eq!(restored.session_id, "sess-1");
         assert_eq!(restored.text_content(), Some("hello raw journal"));
+    }
+
+    #[tokio::test]
+    async fn encrypted_store_roundtrip_and_requires_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw_journal.redb");
+        let store = RawJournalStore::open_with_codec(
+            &path,
+            StoreRecordCodec::encrypted_from_passphrase("correct horse battery staple").unwrap(),
+        )
+        .unwrap();
+        let record = make_record("sess-1", "encrypted raw journal");
+        let id = record.id;
+        store.append(record).await.unwrap();
+        drop(store);
+
+        let reopened = RawJournalStore::open_with_codec(
+            &path,
+            StoreRecordCodec::encrypted_from_passphrase("correct horse battery staple").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.get(&id).await.unwrap().unwrap().text_content(),
+            Some("encrypted raw journal")
+        );
+        drop(reopened);
+
+        let plaintext_reopen = RawJournalStore::open(&path).unwrap();
+        let err = plaintext_reopen.get(&id).await.unwrap_err();
+        assert!(matches!(err, CerememoryError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn encrypted_store_reads_legacy_plaintext_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw_journal.redb");
+        let plaintext = RawJournalStore::open(&path).unwrap();
+        let record = make_record("sess-1", "legacy raw journal");
+        let id = record.id;
+        plaintext.append(record).await.unwrap();
+        drop(plaintext);
+
+        let encrypted = RawJournalStore::open_with_codec(
+            &path,
+            StoreRecordCodec::encrypted_from_passphrase("new passphrase").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            encrypted.get(&id).await.unwrap().unwrap().text_content(),
+            Some("legacy raw journal")
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_plaintext_records_to_encrypted_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw_journal.redb");
+        let plaintext = RawJournalStore::open(&path).unwrap();
+        let record = make_record("sess-1", "legacy raw journal to migrate");
+        let id = record.id;
+        plaintext.append(record).await.unwrap();
+        drop(plaintext);
+
+        let encrypted = RawJournalStore::open_with_codec(
+            &path,
+            StoreRecordCodec::encrypted_from_passphrase("migration passphrase").unwrap(),
+        )
+        .unwrap();
+
+        let stats = encrypted
+            .migrate_plaintext_records_to_encrypted()
+            .await
+            .unwrap();
+        assert_eq!(stats.records_total, 1);
+        assert_eq!(stats.records_migrated, 1);
+        assert_eq!(stats.records_already_encrypted, 0);
+        assert_eq!(
+            encrypted.get(&id).await.unwrap().unwrap().text_content(),
+            Some("legacy raw journal to migrate")
+        );
+        assert_eq!(
+            encrypted
+                .query_session("sess-1")
+                .await
+                .unwrap()
+                .first()
+                .and_then(RawJournalRecord::text_content),
+            Some("legacy raw journal to migrate")
+        );
+
+        let stats = encrypted
+            .migrate_plaintext_records_to_encrypted()
+            .await
+            .unwrap();
+        assert_eq!(stats.records_total, 1);
+        assert_eq!(stats.records_migrated, 0);
+        assert_eq!(stats.records_already_encrypted, 1);
+        drop(encrypted);
+
+        let plaintext_reopen = RawJournalStore::open(&path).unwrap();
+        let err = plaintext_reopen.get(&id).await.unwrap_err();
+        assert!(matches!(err, CerememoryError::Unauthorized(_)));
     }
 
     #[tokio::test]

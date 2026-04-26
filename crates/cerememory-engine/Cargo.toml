@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 cerememory-core = { workspace = true }
+cerememory-store-common = { workspace = true }
 cerememory-store-raw = { workspace = true }
 cerememory-store-episodic = { workspace = true }
 cerememory-store-semantic = { workspace = true }
@@ -27,6 +28,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }

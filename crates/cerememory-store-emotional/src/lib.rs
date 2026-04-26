@@ -22,7 +22,8 @@ use cerememory_core::types::{
     Association, EmotionVector, FidelityState, MemoryContent, MemoryRecord, MetaMemory,
 };
 use cerememory_store_common::{
-    fidelity_bucket, fidelity_key, get_all_sync, get_record_sync, record_matches_text, storage_err,
+    fidelity_bucket, fidelity_key, get_all_sync_with_codec, get_record_sync_with_codec,
+    record_matches_text, storage_err, StoreRecordCodec, StoreRecordMigrationStats,
 };
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,7 @@ fn intensity_bucket(intensity: f64) -> u8 {
 #[derive(Clone)]
 pub struct EmotionalStore {
     db: Arc<Database>,
+    codec: StoreRecordCodec,
 }
 
 impl EmotionalStore {
@@ -80,10 +82,21 @@ impl EmotionalStore {
 
     /// Open (or create) a persistent store at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CerememoryError> {
+        Self::open_with_codec(path, StoreRecordCodec::plaintext())
+    }
+
+    /// Open (or create) a persistent store at `path` with an explicit record codec.
+    pub fn open_with_codec(
+        path: impl AsRef<Path>,
+        codec: StoreRecordCodec,
+    ) -> Result<Self, CerememoryError> {
         let db = Database::create(path.as_ref())
             .map_err(|e| CerememoryError::Storage(format!("Failed to open redb database: {e}")))?;
 
-        let store = Self { db: Arc::new(db) };
+        let store = Self {
+            db: Arc::new(db),
+            codec,
+        };
         store.ensure_tables()?;
         Ok(store)
     }
@@ -102,7 +115,10 @@ impl EmotionalStore {
             CerememoryError::Storage(format!("Failed to open in-memory redb database: {e}"))
         })?;
 
-        let store = Self { db: Arc::new(db) };
+        let store = Self {
+            db: Arc::new(db),
+            codec: StoreRecordCodec::plaintext(),
+        };
         store.ensure_tables()?;
         Ok(store)
     }
@@ -123,6 +139,57 @@ impl EmotionalStore {
         Ok(())
     }
 
+    /// Rewrite legacy plaintext record payloads using this store's encrypted codec.
+    pub async fn migrate_plaintext_records_to_encrypted(
+        &self,
+    ) -> Result<StoreRecordMigrationStats, CerememoryError> {
+        if !self.codec.encrypts_new_records() {
+            return Err(CerememoryError::Validation(
+                "store encryption passphrase is required before migrating emotional records"
+                    .to_string(),
+            ));
+        }
+
+        let db = self.db.clone();
+        let codec = self.codec.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write().map_err(storage_err)?;
+            let mut stats = StoreRecordMigrationStats::empty();
+            let mut rewrites: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+
+            {
+                let records = txn.open_table(EMOTIONAL_RECORDS).map_err(storage_err)?;
+                for entry in records.iter().map_err(storage_err)? {
+                    let (key_guard, value_guard) = entry.map_err(storage_err)?;
+                    let payload = value_guard.value();
+                    let record: MemoryRecord = codec.decode(payload)?;
+                    stats.records_total += 1;
+
+                    if StoreRecordCodec::is_encrypted_payload(payload) {
+                        stats.records_already_encrypted += 1;
+                    } else {
+                        rewrites.push((key_guard.value().to_vec(), codec.encode(&record)?));
+                        stats.records_migrated += 1;
+                    }
+                }
+            }
+
+            if !rewrites.is_empty() {
+                let mut records = txn.open_table(EMOTIONAL_RECORDS).map_err(storage_err)?;
+                for (key, payload) in rewrites {
+                    records
+                        .insert(key.as_slice(), payload.as_slice())
+                        .map_err(storage_err)?;
+                }
+            }
+
+            txn.commit().map_err(storage_err)?;
+            Ok(stats)
+        })
+        .await
+        .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
+    }
+
     // ------------------------------------------------------------------
     // Additional query methods (not part of the Store trait)
     // ------------------------------------------------------------------
@@ -133,6 +200,7 @@ impl EmotionalStore {
         threshold: f64,
     ) -> Result<Vec<MemoryRecord>, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let fidelity_table = txn
@@ -170,7 +238,7 @@ impl EmotionalStore {
                     let mut id_bytes = [0u8; 16];
                     id_bytes.copy_from_slice(&key_bytes[1..17]);
                     let id = Uuid::from_bytes(id_bytes);
-                    if let Some(record) = get_record_sync(&records_table, &id)? {
+                    if let Some(record) = get_record_sync_with_codec(&records_table, &id, &codec)? {
                         // Double-check against the actual fidelity score, because
                         // bucket rounding can be slightly off.
                         if record.fidelity.score < threshold {
@@ -200,6 +268,7 @@ impl EmotionalStore {
             return Ok(Vec::new());
         }
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let intensity_table = txn
@@ -238,7 +307,7 @@ impl EmotionalStore {
                     let mut id_bytes = [0u8; 16];
                     id_bytes.copy_from_slice(&key_bytes[1..17]);
                     let id = Uuid::from_bytes(id_bytes);
-                    if let Some(record) = get_record_sync(&records_table, &id)? {
+                    if let Some(record) = get_record_sync_with_codec(&records_table, &id, &codec)? {
                         // Double-check against the actual intensity value
                         if record.emotion.intensity >= min_intensity
                             && record.emotion.intensity <= max_intensity
@@ -272,10 +341,10 @@ impl Default for EmotionalStore {
 impl Store for EmotionalStore {
     async fn store(&self, record: MemoryRecord) -> Result<Uuid, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let id = record.id;
-            let packed = rmp_serde::to_vec(&record)
-                .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+            let packed = codec.encode(&record)?;
 
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -311,10 +380,11 @@ impl Store for EmotionalStore {
     async fn get(&self, id: &Uuid) -> Result<Option<MemoryRecord>, CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let table = txn.open_table(EMOTIONAL_RECORDS).map_err(storage_err)?;
-            get_record_sync(&table, &id)
+            get_record_sync_with_codec(&table, &id, &codec)
         })
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
@@ -323,6 +393,7 @@ impl Store for EmotionalStore {
     async fn delete(&self, id: &Uuid) -> Result<bool, CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             let existed = {
@@ -332,10 +403,7 @@ impl Store for EmotionalStore {
                 let existing: Option<MemoryRecord> =
                     match records.get(id.as_bytes().as_slice()).map_err(storage_err)? {
                         Some(guard) => {
-                            let record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                                .map_err(|e| {
-                                    CerememoryError::Serialization(format!("msgpack decode: {e}"))
-                                })?;
+                            let record: MemoryRecord = codec.decode(guard.value())?;
                             drop(guard);
                             Some(record)
                         }
@@ -378,6 +446,7 @@ impl Store for EmotionalStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -388,16 +457,14 @@ impl Store for EmotionalStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let mut record: MemoryRecord = codec.decode(guard.value())?;
                 drop(guard);
 
                 let old_fidelity_score = record.fidelity.score;
                 record.fidelity = fidelity;
                 record.updated_at = Utc::now();
 
-                let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+                let packed = codec.encode(&record)?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -431,6 +498,7 @@ impl Store for EmotionalStore {
             return Ok(Vec::new());
         }
         let db = self.db.clone();
+        let codec = self.codec.clone();
         let query = query.to_lowercase();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
@@ -440,8 +508,7 @@ impl Store for EmotionalStore {
             let iter = table.iter().map_err(storage_err)?;
             for entry in iter {
                 let (_, value_guard) = entry.map_err(storage_err)?;
-                let record: MemoryRecord = rmp_serde::from_slice(value_guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let record: MemoryRecord = codec.decode(value_guard.value())?;
 
                 if record_matches_text(&record, &query) {
                     results.push(record);
@@ -481,10 +548,11 @@ impl Store for EmotionalStore {
 
     async fn get_all(&self) -> Result<Vec<MemoryRecord>, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let table = txn.open_table(EMOTIONAL_RECORDS).map_err(storage_err)?;
-            get_all_sync(&table)
+            get_all_sync_with_codec(&table, &codec)
         })
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))?
@@ -512,6 +580,7 @@ impl Store for EmotionalStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -522,8 +591,7 @@ impl Store for EmotionalStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let mut record: MemoryRecord = codec.decode(guard.value())?;
                 drop(guard);
 
                 let old_intensity = record.emotion.intensity;
@@ -543,8 +611,7 @@ impl Store for EmotionalStore {
                 record.updated_at = Utc::now();
                 record.version += 1;
 
-                let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+                let packed = codec.encode(&record)?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -578,6 +645,7 @@ impl Store for EmotionalStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -586,16 +654,14 @@ impl Store for EmotionalStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let mut record: MemoryRecord = codec.decode(guard.value())?;
                 drop(guard);
 
                 record.associations = associations;
                 record.updated_at = Utc::now();
                 record.version += 1;
 
-                let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+                let packed = codec.encode(&record)?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -615,6 +681,7 @@ impl Store for EmotionalStore {
     ) -> Result<(), CerememoryError> {
         let db = self.db.clone();
         let id = *id;
+        let codec = self.codec.clone();
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_write().map_err(storage_err)?;
             {
@@ -624,16 +691,14 @@ impl Store for EmotionalStore {
                     .get(id.as_bytes().as_slice())
                     .map_err(storage_err)?
                     .ok_or_else(|| CerememoryError::RecordNotFound(id.to_string()))?;
-                let mut record: MemoryRecord = rmp_serde::from_slice(guard.value())
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack decode: {e}")))?;
+                let mut record: MemoryRecord = codec.decode(guard.value())?;
                 drop(guard);
 
                 record.access_count = access_count;
                 record.last_accessed_at = last_accessed_at;
                 record.updated_at = Utc::now();
 
-                let packed = rmp_serde::to_vec(&record)
-                    .map_err(|e| CerememoryError::Serialization(format!("msgpack encode: {e}")))?;
+                let packed = codec.encode(&record)?;
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -790,6 +855,48 @@ mod tests {
             assert_eq!(retrieved.text_content(), Some("Persistent memory"));
             assert_eq!(retrieved.id, record_id);
         }
+    }
+
+    #[tokio::test]
+    async fn migrate_plaintext_records_to_encrypted_is_idempotent() {
+        let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = tmp_dir.path().join("emotional.redb");
+        let plaintext = EmotionalStore::open(&db_path).unwrap();
+        let id = plaintext
+            .store(make_record("Legacy emotional to migrate"))
+            .await
+            .unwrap();
+        drop(plaintext);
+
+        let encrypted = EmotionalStore::open_with_codec(
+            &db_path,
+            StoreRecordCodec::encrypted_from_passphrase("migration passphrase").unwrap(),
+        )
+        .unwrap();
+        let stats = encrypted
+            .migrate_plaintext_records_to_encrypted()
+            .await
+            .unwrap();
+        assert_eq!(stats.records_total, 1);
+        assert_eq!(stats.records_migrated, 1);
+        assert_eq!(stats.records_already_encrypted, 0);
+        assert_eq!(
+            encrypted.get(&id).await.unwrap().unwrap().text_content(),
+            Some("Legacy emotional to migrate")
+        );
+
+        let stats = encrypted
+            .migrate_plaintext_records_to_encrypted()
+            .await
+            .unwrap();
+        assert_eq!(stats.records_total, 1);
+        assert_eq!(stats.records_migrated, 0);
+        assert_eq!(stats.records_already_encrypted, 1);
+        drop(encrypted);
+
+        let plaintext_reopen = EmotionalStore::open(&db_path).unwrap();
+        let err = plaintext_reopen.get(&id).await.unwrap_err();
+        assert!(matches!(err, CerememoryError::Unauthorized(_)));
     }
 
     // 4. Query text substring search

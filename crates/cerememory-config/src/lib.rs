@@ -88,6 +88,10 @@ pub struct ServerConfig {
     #[serde(default)]
     pub auth: AuthConfig,
 
+    /// Security configuration.
+    #[serde(default)]
+    pub security: SecurityConfig,
+
     /// LLM provider configuration.
     #[serde(default)]
     pub llm: LlmConfig,
@@ -183,6 +187,65 @@ impl std::fmt::Debug for AuthConfig {
     }
 }
 
+/// Security settings.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Optional passphrase used to encrypt newly written redb store records.
+    ///
+    /// Existing plaintext records remain readable for migration compatibility.
+    /// Prefer `CEREMEMORY_SECURITY__STORE_ENCRYPTION_PASSPHRASE` over TOML.
+    #[serde(rename = "store_encryption_passphrase")]
+    store_encryption_passphrase_raw: Option<String>,
+    /// Whether full-text search indexes are persisted to disk.
+    ///
+    /// When omitted, encrypted stores use in-memory search indexes by default.
+    pub persist_search_indexes: Option<bool>,
+    /// Whether the tamper-evident audit log is enabled.
+    ///
+    /// When omitted, server-backed engines write `audit.jsonl` under data_dir.
+    pub audit_log_enabled: Option<bool>,
+    /// Optional path for the tamper-evident audit log.
+    ///
+    /// Prefer the default under data_dir unless operationally necessary.
+    pub audit_log_path: Option<String>,
+}
+
+impl SecurityConfig {
+    /// Return the configured store encryption passphrase, if present.
+    pub fn store_encryption_passphrase(&self) -> Option<SecretString> {
+        self.store_encryption_passphrase_raw
+            .as_ref()
+            .map(|value| SecretString::from(value.clone()))
+    }
+
+    /// Return the exposed store encryption passphrase for engine wiring.
+    pub fn store_encryption_passphrase_exposed(&self) -> Option<&str> {
+        self.store_encryption_passphrase_raw.as_deref()
+    }
+
+    pub fn audit_log_enabled(&self) -> bool {
+        self.audit_log_enabled.unwrap_or(true)
+    }
+}
+
+impl std::fmt::Debug for SecurityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityConfig")
+            .field(
+                "store_encryption_passphrase",
+                &self
+                    .store_encryption_passphrase_raw
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .field("persist_search_indexes", &self.persist_search_indexes)
+            .field("audit_log_enabled", &self.audit_log_enabled)
+            .field("audit_log_path", &self.audit_log_path)
+            .finish()
+    }
+}
+
 /// LLM provider settings.
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -273,6 +336,7 @@ impl Default for ServerConfig {
             http: HttpConfig::default(),
             grpc: GrpcConfig::default(),
             auth: AuthConfig::default(),
+            security: SecurityConfig::default(),
             llm: LlmConfig::default(),
             decay: DecayConfig::default(),
             dream: DreamConfig::default(),
@@ -431,6 +495,30 @@ impl ServerConfig {
             );
         }
 
+        if self
+            .security
+            .store_encryption_passphrase_raw
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(
+                "security.store_encryption_passphrase must not be blank. Remove it or provide a non-empty passphrase."
+                    .to_string(),
+            );
+        }
+
+        if self
+            .security
+            .audit_log_path
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(
+                "security.audit_log_path must not be blank. Remove it or provide a non-empty path."
+                    .to_string(),
+            );
+        }
+
         for (idx, cidr) in self.http.trusted_proxy_cidrs.iter().enumerate() {
             validate_cidr(cidr).map_err(|msg| {
                 format!(
@@ -498,6 +586,17 @@ impl ServerConfig {
             vector_index_path: Some(base.join("vectors.redb").to_string_lossy().into_owned()),
             background_decay_interval_secs: Some(self.decay.background_interval_secs),
             background_dream_interval_secs: Some(self.dream.background_interval_secs),
+            store_encryption_passphrase: self.security.store_encryption_passphrase_raw.clone(),
+            persist_search_indexes: self
+                .security
+                .persist_search_indexes
+                .unwrap_or(self.security.store_encryption_passphrase_raw.is_none()),
+            audit_log_path: self.security.audit_log_enabled().then(|| {
+                self.security
+                    .audit_log_path
+                    .clone()
+                    .unwrap_or_else(|| base.join("audit.jsonl").to_string_lossy().into_owned())
+            }),
             ..EngineConfig::default()
         }
     }
@@ -638,6 +737,19 @@ port = 9999
     }
 
     #[test]
+    fn security_debug_is_redacted() {
+        let config = SecurityConfig {
+            store_encryption_passphrase_raw: Some("very-secret-passphrase".to_string()),
+            persist_search_indexes: Some(false),
+            audit_log_enabled: Some(true),
+            audit_log_path: Some("/tmp/audit.jsonl".to_string()),
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("very-secret-passphrase"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn validate_catches_zero_port() {
         let mut config = ServerConfig::default();
         config.http.port = 0;
@@ -662,6 +774,20 @@ port = 9999
     fn validate_rejects_blank_api_keys() {
         let mut config = ServerConfig::default();
         config.auth.api_keys_raw = vec!["   ".to_string()];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_blank_store_encryption_passphrase() {
+        let mut config = ServerConfig::default();
+        config.security.store_encryption_passphrase_raw = Some("   ".to_string());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_blank_audit_log_path() {
+        let mut config = ServerConfig::default();
+        config.security.audit_log_path = Some("   ".to_string());
         assert!(config.validate().is_err());
     }
 
@@ -698,6 +824,44 @@ port = 9999
         assert_eq!(ec.semantic_path.unwrap(), "/my/data/semantic.redb");
         assert_eq!(ec.background_decay_interval_secs, Some(1800));
         assert_eq!(ec.background_dream_interval_secs, Some(7200));
+        assert_eq!(ec.audit_log_path.unwrap(), "/my/data/audit.jsonl");
+    }
+
+    #[test]
+    fn to_engine_config_maps_store_encryption_passphrase() {
+        let mut config = ServerConfig::default();
+        config.security.store_encryption_passphrase_raw = Some("passphrase".to_string());
+
+        let ec = config.to_engine_config();
+        assert_eq!(
+            ec.store_encryption_passphrase.as_deref(),
+            Some("passphrase")
+        );
+        assert!(!ec.persist_search_indexes);
+    }
+
+    #[test]
+    fn to_engine_config_allows_persisted_search_indexes_override() {
+        let mut config = ServerConfig::default();
+        config.security.store_encryption_passphrase_raw = Some("passphrase".to_string());
+        config.security.persist_search_indexes = Some(true);
+
+        let ec = config.to_engine_config();
+        assert!(ec.persist_search_indexes);
+    }
+
+    #[test]
+    fn to_engine_config_allows_audit_log_disable_and_override() {
+        let mut config = ServerConfig::default();
+        config.security.audit_log_enabled = Some(false);
+        assert!(config.to_engine_config().audit_log_path.is_none());
+
+        config.security.audit_log_enabled = Some(true);
+        config.security.audit_log_path = Some("/tmp/custom-audit.jsonl".to_string());
+        assert_eq!(
+            config.to_engine_config().audit_log_path.as_deref(),
+            Some("/tmp/custom-audit.jsonl")
+        );
     }
 
     #[test]
@@ -777,5 +941,26 @@ api_key = "sk-test-llm-key"
 
         let config = ServerConfig::load(Some(toml_path.to_str().unwrap())).unwrap();
         assert_eq!(config.llm.api_key_exposed(), Some("sk-test-llm-key"));
+    }
+
+    #[test]
+    fn toml_store_encryption_passphrase_field_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("cerememory.toml");
+        let mut f = std::fs::File::create(&toml_path).unwrap();
+        writeln!(
+            f,
+            r#"
+[security]
+store_encryption_passphrase = "test-passphrase"
+"#
+        )
+        .unwrap();
+
+        let config = ServerConfig::load(Some(toml_path.to_str().unwrap())).unwrap();
+        assert_eq!(
+            config.security.store_encryption_passphrase_exposed(),
+            Some("test-passphrase")
+        );
     }
 }

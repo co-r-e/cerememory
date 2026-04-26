@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CMA (Cerememory Archive) export/import based on SQLite"
+description = "CMA (Cerememory Archive) JSON Lines bundle export/import"
 rust-version.workspace = true
 
 [dependencies]

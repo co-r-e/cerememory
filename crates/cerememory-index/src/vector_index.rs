@@ -17,6 +17,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use cerememory_core::error::CerememoryError;
+use cerememory_store_common::{StoreRecordCodec, StoreRecordMigrationStats};
 
 use crate::hnsw_index::HnswVectorIndex;
 
@@ -36,6 +37,7 @@ pub struct VectorSearchHit {
 pub struct VectorIndex {
     db: Arc<Database>,
     hnsw: HnswVectorIndex,
+    codec: StoreRecordCodec,
 }
 
 impl VectorIndex {
@@ -60,12 +62,22 @@ impl VectorIndex {
 
     /// Open or create a file-backed vector index with a custom HNSW threshold.
     pub fn open_with_threshold(path: &str, hnsw_threshold: usize) -> Result<Self, CerememoryError> {
+        Self::open_with_threshold_and_codec(path, hnsw_threshold, StoreRecordCodec::plaintext())
+    }
+
+    /// Open or create a file-backed vector index with a custom HNSW threshold and codec.
+    pub fn open_with_threshold_and_codec(
+        path: &str,
+        hnsw_threshold: usize,
+        codec: StoreRecordCodec,
+    ) -> Result<Self, CerememoryError> {
         let db = Database::create(path)
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex db open: {e}")))?;
         Self::ensure_table(&db)?;
         Ok(Self {
             db: Arc::new(db),
             hnsw: HnswVectorIndex::new(hnsw_threshold),
+            codec,
         })
     }
 
@@ -83,7 +95,66 @@ impl VectorIndex {
         Ok(Self {
             db: Arc::new(db),
             hnsw: HnswVectorIndex::new(hnsw_threshold),
+            codec: StoreRecordCodec::plaintext(),
         })
+    }
+
+    /// Rewrite legacy plaintext embedding payloads using this index's encrypted codec.
+    pub fn migrate_plaintext_records_to_encrypted(
+        &self,
+    ) -> Result<StoreRecordMigrationStats, CerememoryError> {
+        if !self.codec.encrypts_new_records() {
+            return Err(CerememoryError::Validation(
+                "store encryption passphrase is required before migrating vector records"
+                    .to_string(),
+            ));
+        }
+
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| CerememoryError::Storage(format!("VectorIndex txn: {e}")))?;
+        let mut stats = StoreRecordMigrationStats::empty();
+        let mut rewrites: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+
+        {
+            let table = txn
+                .open_table(VECTORS)
+                .map_err(|e| CerememoryError::Storage(format!("VectorIndex table: {e}")))?;
+            for entry in table
+                .iter()
+                .map_err(|e| CerememoryError::Storage(format!("VectorIndex iter: {e}")))?
+            {
+                let (key, value) = entry
+                    .map_err(|e| CerememoryError::Storage(format!("VectorIndex entry: {e}")))?;
+                let payload = value.value();
+                let vector: Vec<f32> = self.codec.decode(payload)?;
+                stats.records_total += 1;
+
+                if StoreRecordCodec::is_encrypted_payload(payload) {
+                    stats.records_already_encrypted += 1;
+                } else {
+                    rewrites.push((key.value().to_vec(), self.codec.encode(&vector)?));
+                    stats.records_migrated += 1;
+                }
+            }
+        }
+
+        if !rewrites.is_empty() {
+            let mut table = txn
+                .open_table(VECTORS)
+                .map_err(|e| CerememoryError::Storage(format!("VectorIndex table: {e}")))?;
+            for (key, payload) in rewrites {
+                table
+                    .insert(key.as_slice(), payload.as_slice())
+                    .map_err(|e| CerememoryError::Storage(format!("VectorIndex insert: {e}")))?;
+            }
+        }
+
+        txn.commit()
+            .map_err(|e| CerememoryError::Storage(format!("VectorIndex commit: {e}")))?;
+        self.rebuild_hnsw()?;
+        Ok(stats)
     }
 
     /// Remove all vectors from the index (including HNSW).
@@ -137,8 +208,7 @@ impl VectorIndex {
     pub fn upsert(&self, id: Uuid, embedding: &[f32]) -> Result<(), CerememoryError> {
         Self::validate_embedding(embedding)?;
         let normalized = l2_normalize(embedding);
-        let bytes = rmp_serde::to_vec(&normalized)
-            .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+        let bytes = self.codec.encode(&normalized)?;
 
         let txn = self
             .db
@@ -185,8 +255,7 @@ impl VectorIndex {
             .map(|(id, embedding)| {
                 Self::validate_embedding(embedding)?;
                 let normalized = l2_normalize(embedding);
-                let bytes = rmp_serde::to_vec(&normalized)
-                    .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                let bytes = self.codec.encode(&normalized)?;
                 Ok((*id, bytes))
             })
             .collect::<Result<Vec<_>, CerememoryError>>()?;
@@ -303,8 +372,7 @@ impl VectorIndex {
             }
             let id = Uuid::from_bytes(key_bytes.try_into().expect("length validated above"));
 
-            let vec: Vec<f32> = rmp_serde::from_slice(value.value())
-                .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+            let vec: Vec<f32> = self.codec.decode(value.value())?;
 
             let sim = cosine_similarity(query_norm, &vec);
             let score = OrderedFloat(sim);
@@ -378,8 +446,7 @@ impl VectorIndex {
                 continue;
             }
             let id = Uuid::from_bytes(key_bytes.try_into().expect("length validated above"));
-            let vec: Vec<f32> = rmp_serde::from_slice(value.value())
-                .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+            let vec: Vec<f32> = self.codec.decode(value.value())?;
             entries.push((id, vec));
         }
 
@@ -492,6 +559,39 @@ mod tests {
 
         let hits = idx.search(&[1.0, 0.0], 10).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn migrate_plaintext_records_to_encrypted_is_idempotent() {
+        let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = tmp_dir.path().join("vectors.redb");
+        let db_path = db_path.to_string_lossy();
+        let plaintext = VectorIndex::open_with_threshold(&db_path, 2).unwrap();
+        let id = Uuid::now_v7();
+        plaintext.upsert(id, &[1.0, 0.0]).unwrap();
+        drop(plaintext);
+
+        let encrypted = VectorIndex::open_with_threshold_and_codec(
+            &db_path,
+            2,
+            StoreRecordCodec::encrypted_from_passphrase("migration passphrase").unwrap(),
+        )
+        .unwrap();
+        let stats = encrypted.migrate_plaintext_records_to_encrypted().unwrap();
+        assert_eq!(stats.records_total, 1);
+        assert_eq!(stats.records_migrated, 1);
+        assert_eq!(stats.records_already_encrypted, 0);
+        assert_eq!(encrypted.search(&[1.0, 0.0], 1).unwrap()[0].record_id, id);
+
+        let stats = encrypted.migrate_plaintext_records_to_encrypted().unwrap();
+        assert_eq!(stats.records_total, 1);
+        assert_eq!(stats.records_migrated, 0);
+        assert_eq!(stats.records_already_encrypted, 1);
+        drop(encrypted);
+
+        let plaintext_reopen = VectorIndex::open_with_threshold(&db_path, 2).unwrap();
+        let err = plaintext_reopen.search(&[1.0, 0.0], 1).unwrap_err();
+        assert!(matches!(err, CerememoryError::Unauthorized(_)));
     }
 
     #[test]

@@ -296,6 +296,20 @@ enum Commands {
         conflict_resolution: String,
     },
 
+    /// Rewrite existing plaintext persistent redb payloads using configured store encryption.
+    MigrateStoreEncryption {
+        /// Required confirmation flag for non-interactive use.
+        #[arg(long)]
+        confirm: bool,
+    },
+
+    /// Verify the tamper-evident audit log hash chain.
+    AuditVerify {
+        /// Audit log path. Defaults to security.audit_log_path or data_dir/audit.jsonl.
+        #[arg(long)]
+        path: Option<String>,
+    },
+
     /// Start the MCP (Model Context Protocol) server on stdio
     Mcp {
         /// Proxy MCP requests to an existing Cerememory HTTP server instead of opening local storage.
@@ -908,6 +922,24 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Commands::AuditVerify { path } = &cli.command {
+        let audit_path = path
+            .clone()
+            .or_else(|| config.to_engine_config().audit_log_path);
+        let Some(audit_path) = audit_path else {
+            anyhow::bail!(
+                "Audit log is disabled by configuration. Provide --path to verify a specific audit log."
+            );
+        };
+        let verification = cerememory_engine::AuditLog::verify_path(&audit_path)?;
+        println!("Audit log verified:");
+        println!("  path={audit_path}");
+        println!("  entries={}", verification.entries);
+        println!("  last_sequence={}", verification.last_sequence);
+        println!("  head_hash={}", verification.head_hash_hex());
+        return Ok(());
+    }
+
     let engine = create_engine_from_config(&config)?;
 
     // Only rebuild coordinator/indexes for commands that need up-to-date index state.
@@ -924,6 +956,7 @@ async fn main() -> Result<()> {
             | Commands::DecayTick { .. }
             | Commands::Forget { .. }
             | Commands::Export { .. }
+            | Commands::AuditVerify { .. }
     );
     if needs_rebuild {
         engine.rebuild_coordinator().await?;
@@ -1300,7 +1333,72 @@ async fn main() -> Result<()> {
             println!("Imported {imported} records from {path}");
         }
 
+        Commands::MigrateStoreEncryption { confirm } => {
+            let confirmed = if confirm {
+                true
+            } else if std::io::stdin().is_terminal() {
+                eprintln!(
+                    "Warning: This will rewrite existing persistent redb payloads. \
+                     After migration, those records require the configured store encryption passphrase."
+                );
+                eprint!("Are you sure? [y/N] ");
+                std::io::stderr().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                input.trim().eq_ignore_ascii_case("y")
+            } else {
+                anyhow::bail!(
+                    "Store encryption migration requires confirmation. Use --confirm in non-interactive mode."
+                );
+            };
+
+            if !confirmed {
+                println!("Aborted.");
+                return Ok(());
+            }
+
+            let stats = engine.migrate_store_encryption().await?;
+            println!("Store encryption migration completed:");
+            println!(
+                "  raw_journal: total={}, migrated={}, already_encrypted={}",
+                stats.raw_journal.records_total,
+                stats.raw_journal.records_migrated,
+                stats.raw_journal.records_already_encrypted
+            );
+            println!(
+                "  episodic: total={}, migrated={}, already_encrypted={}",
+                stats.episodic.records_total,
+                stats.episodic.records_migrated,
+                stats.episodic.records_already_encrypted
+            );
+            println!(
+                "  semantic: total={}, migrated={}, already_encrypted={}",
+                stats.semantic.records_total,
+                stats.semantic.records_migrated,
+                stats.semantic.records_already_encrypted
+            );
+            println!(
+                "  procedural: total={}, migrated={}, already_encrypted={}",
+                stats.procedural.records_total,
+                stats.procedural.records_migrated,
+                stats.procedural.records_already_encrypted
+            );
+            println!(
+                "  emotional: total={}, migrated={}, already_encrypted={}",
+                stats.emotional.records_total,
+                stats.emotional.records_migrated,
+                stats.emotional.records_already_encrypted
+            );
+            println!(
+                "  vector_index: total={}, migrated={}, already_encrypted={}",
+                stats.vector_index.records_total,
+                stats.vector_index.records_migrated,
+                stats.vector_index.records_already_encrypted
+            );
+        }
+
         Commands::Healthcheck { .. } => unreachable!("Handled above"),
+        Commands::AuditVerify { .. } => unreachable!("Handled above"),
         Commands::Mcp { .. } => unreachable!("Handled above"),
     }
 
@@ -1387,5 +1485,29 @@ mod tests {
         let parsed = Cli::try_parse_from(["cerememory", "mcp"]);
 
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn migrate_store_encryption_command_parses_confirm_flag() {
+        let cli =
+            Cli::try_parse_from(["cerememory", "migrate-store-encryption", "--confirm"]).unwrap();
+
+        match cli.command {
+            Commands::MigrateStoreEncryption { confirm } => assert!(confirm),
+            _ => panic!("expected migrate-store-encryption command"),
+        }
+    }
+
+    #[test]
+    fn audit_verify_command_parses_optional_path() {
+        let cli = Cli::try_parse_from(["cerememory", "audit-verify", "--path", "/tmp/audit.jsonl"])
+            .unwrap();
+
+        match cli.command {
+            Commands::AuditVerify { path } => {
+                assert_eq!(path.as_deref(), Some("/tmp/audit.jsonl"));
+            }
+            _ => panic!("expected audit-verify command"),
+        }
     }
 }

@@ -1,7 +1,8 @@
-//! Encryption at rest for Cerememory memory records.
+//! Low-level ChaCha20-Poly1305 helpers for encrypted payload experiments.
 //!
-//! Provides ChaCha20-Poly1305 authenticated encryption for transparently
-//! encrypting record content before storage and decrypting after retrieval.
+//! These helpers are not currently wired into the redb-backed memory stores.
+//! Production archive encryption lives in `cerememory-archive::crypto`, which
+//! adds passphrase derivation and archive-specific framing.
 //!
 //! The encrypted format is: `nonce (12 bytes) || ciphertext + auth tag`.
 //! Each encryption generates a fresh random 96-bit nonce.
