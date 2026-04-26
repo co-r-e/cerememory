@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Reliability and Security
 - Hardened API key validation so configured keys are scanned without early-exit match behavior
+- Hardened exact vector search so redb iterator/count failures are surfaced and mismatched stored embedding dimensions are skipped
 - CLI builds without LLM adapter features now report configured LLM providers as unsupported instead of silently disabling them
 - Removed stale SQLite/archive wording from docs and crate metadata
 

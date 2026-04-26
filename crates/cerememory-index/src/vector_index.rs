@@ -144,13 +144,17 @@ impl VectorIndex {
             let mut table = txn
                 .open_table(VECTORS)
                 .map_err(|e| CerememoryError::Storage(format!("VectorIndex table: {e}")))?;
-            // Collect all keys first to avoid borrow conflict
-            let keys: Vec<Vec<u8>> = table
+            // Collect all keys first to avoid borrow conflicts while deleting.
+            let keys: Result<Vec<Vec<u8>>, CerememoryError> = table
                 .iter()
                 .map_err(|e| CerememoryError::Storage(format!("VectorIndex iter: {e}")))?
-                .filter_map(|entry| entry.ok().map(|(k, _)| k.value().to_vec()))
+                .map(|entry| {
+                    entry
+                        .map(|(key, _)| key.value().to_vec())
+                        .map_err(|e| CerememoryError::Storage(format!("VectorIndex entry: {e}")))
+                })
                 .collect();
-            for key in keys {
+            for key in keys? {
                 table
                     .remove(key.as_slice())
                     .map_err(|e| CerememoryError::Storage(format!("VectorIndex remove: {e}")))?;
@@ -175,6 +179,10 @@ impl VectorIndex {
             ));
         }
         Ok(())
+    }
+
+    fn is_valid_stored_embedding(embedding: &[f32]) -> bool {
+        !embedding.is_empty() && embedding.iter().all(|value| value.is_finite())
     }
 
     /// Insert or update an embedding vector. The vector is L2-normalized before storage.
@@ -313,9 +321,28 @@ impl VectorIndex {
                 );
                 continue;
             }
-            let id = Uuid::from_bytes(key_bytes.try_into().expect("length validated above"));
+            let mut id_bytes = [0u8; 16];
+            id_bytes.copy_from_slice(key_bytes);
+            let id = Uuid::from_bytes(id_bytes);
 
             let vec: Vec<f32> = self.codec.decode(value.value())?;
+            if !Self::is_valid_stored_embedding(&vec) {
+                warn!(
+                    record_id = %id,
+                    dimensions = vec.len(),
+                    "Skipping vector index entry with invalid stored embedding"
+                );
+                continue;
+            }
+            if vec.len() != query_norm.len() {
+                warn!(
+                    record_id = %id,
+                    query_dimensions = query_norm.len(),
+                    stored_dimensions = vec.len(),
+                    "Skipping vector index entry with mismatched dimensions"
+                );
+                continue;
+            }
 
             let sim = cosine_similarity(query_norm, &vec);
             let score = OrderedFloat(sim);
@@ -355,7 +382,10 @@ impl VectorIndex {
         let table = txn
             .open_table(VECTORS)
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex table: {e}")))?;
-        Ok(table.len().unwrap_or(0) as usize)
+        table
+            .len()
+            .map(|len| len as usize)
+            .map_err(|e| CerememoryError::Storage(format!("VectorIndex len: {e}")))
     }
 }
 
@@ -507,6 +537,20 @@ mod tests {
         let idx = VectorIndex::open_in_memory().unwrap();
         let hits = idx.search(&[1.0, 0.0, 0.0], 10).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_skips_vectors_with_different_dimensions() {
+        let idx = VectorIndex::open_in_memory().unwrap();
+        let matching_id = Uuid::now_v7();
+        let mismatched_id = Uuid::now_v7();
+
+        idx.upsert(matching_id, &[1.0, 0.0]).unwrap();
+        idx.upsert(mismatched_id, &[0.0, 1.0, 0.0]).unwrap();
+
+        let hits = idx.search(&[1.0, 0.0], 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record_id, matching_id);
     }
 
     #[test]
