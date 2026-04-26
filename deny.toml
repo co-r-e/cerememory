@@ -7,9 +7,9 @@ all-features = false
 no-default-features = false
 
 [advisories]
+# Advisory ignores must include an owner, review-after date, and exit plan.
+# Keep this list empty unless a temporary exception is explicitly accepted.
 ignore = [
-    # Transitive deps with no safe upgrade available:
-    { id = "RUSTSEC-2025-0141", reason = "bincode is transitive dep of hnsw_rs; no alternative available" },
 ]
 
 [licenses]

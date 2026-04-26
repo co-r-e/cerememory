@@ -663,6 +663,10 @@ pub struct StatsResponse {
     #[serde(default)]
     pub raw_journal_pending_dream: u32,
     #[serde(default)]
+    pub vector_index_records: u32,
+    #[serde(default)]
+    pub vector_search_backend: String,
+    #[serde(default)]
     pub dream_episodic_summaries: u32,
     #[serde(default)]
     pub dream_semantic_nodes: u32,
@@ -1065,6 +1069,8 @@ mod tests {
             total_recall_count: 100,
             raw_journal_records: 7,
             raw_journal_pending_dream: 3,
+            vector_index_records: 42,
+            vector_search_backend: "brute_force".to_string(),
             dream_episodic_summaries: 2,
             dream_semantic_nodes: 1,
             last_dream_tick_at: None,

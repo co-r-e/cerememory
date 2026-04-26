@@ -22,8 +22,6 @@ tantivy = { workspace = true }
 redb = { workspace = true }
 ordered-float = { workspace = true }
 tracing = { workspace = true }
-hnsw_rs = { workspace = true }
-parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

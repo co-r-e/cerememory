@@ -71,9 +71,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Numeric
 ordered-float = "5"
 
-# ANN (Approximate Nearest Neighbor)
-hnsw_rs = "0.3"
-
 # MCP (Model Context Protocol)
 rmcp = { version = "1.2", features = ["server", "transport-io"] }
 schemars = "1"

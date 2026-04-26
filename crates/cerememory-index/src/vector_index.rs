@@ -1,11 +1,8 @@
-//! Dual-mode vector search for Cerememory.
+//! Deterministic vector search for Cerememory.
 //!
-//! Stores embedding vectors in redb (source of truth) and provides two
-//! search modes:
-//! - **Brute-force** (O(n log k)): Used when vector count is below the
-//!   HNSW activation threshold.
-//! - **HNSW** (O(log n)): Activated when vector count exceeds the threshold.
-//!   The HNSW graph lives in memory and is rebuilt from redb on startup.
+//! Stores normalized embedding vectors in redb, which is the only source of
+//! truth. Search uses an exact brute-force cosine scan so correctness does not
+//! depend on a secondary in-memory ANN graph.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -13,18 +10,16 @@ use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use cerememory_core::error::CerememoryError;
 use cerememory_store_common::{StoreRecordCodec, StoreRecordMigrationStats};
 
-use crate::hnsw_index::HnswVectorIndex;
-
 const VECTORS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("embedding_vectors");
 
-/// Default threshold for switching from brute-force to HNSW search.
-pub const DEFAULT_HNSW_THRESHOLD: usize = 1000;
+/// Search backend currently used by the vector index.
+pub const VECTOR_SEARCH_BACKEND: &str = "brute_force";
 
 /// A hit from the vector similarity search.
 #[derive(Debug, Clone)]
@@ -33,10 +28,9 @@ pub struct VectorSearchHit {
     pub similarity: f32,
 }
 
-/// Dual-mode vector index: redb-backed storage with optional HNSW acceleration.
+/// Vector index backed by redb with exact cosine search.
 pub struct VectorIndex {
     db: Arc<Database>,
-    hnsw: HnswVectorIndex,
     codec: StoreRecordCodec,
 }
 
@@ -55,46 +49,30 @@ impl VectorIndex {
         Ok(())
     }
 
-    /// Open or create a file-backed vector index with default HNSW threshold.
+    /// Open or create a file-backed vector index.
     pub fn open(path: &str) -> Result<Self, CerememoryError> {
-        Self::open_with_threshold(path, DEFAULT_HNSW_THRESHOLD)
+        Self::open_with_codec(path, StoreRecordCodec::plaintext())
     }
 
-    /// Open or create a file-backed vector index with a custom HNSW threshold.
-    pub fn open_with_threshold(path: &str, hnsw_threshold: usize) -> Result<Self, CerememoryError> {
-        Self::open_with_threshold_and_codec(path, hnsw_threshold, StoreRecordCodec::plaintext())
-    }
-
-    /// Open or create a file-backed vector index with a custom HNSW threshold and codec.
-    pub fn open_with_threshold_and_codec(
-        path: &str,
-        hnsw_threshold: usize,
-        codec: StoreRecordCodec,
-    ) -> Result<Self, CerememoryError> {
+    /// Open or create a file-backed vector index with a custom storage codec.
+    pub fn open_with_codec(path: &str, codec: StoreRecordCodec) -> Result<Self, CerememoryError> {
         let db = Database::create(path)
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex db open: {e}")))?;
         Self::ensure_table(&db)?;
         Ok(Self {
             db: Arc::new(db),
-            hnsw: HnswVectorIndex::new(hnsw_threshold),
             codec,
         })
     }
 
-    /// Create an in-memory vector index (for testing) with default HNSW threshold.
+    /// Create an in-memory vector index (for testing).
     pub fn open_in_memory() -> Result<Self, CerememoryError> {
-        Self::open_in_memory_with_threshold(DEFAULT_HNSW_THRESHOLD)
-    }
-
-    /// Create an in-memory vector index with a custom HNSW threshold.
-    pub fn open_in_memory_with_threshold(hnsw_threshold: usize) -> Result<Self, CerememoryError> {
         let db = Database::builder()
             .create_with_backend(redb::backends::InMemoryBackend::new())
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex in-memory: {e}")))?;
         Self::ensure_table(&db)?;
         Ok(Self {
             db: Arc::new(db),
-            hnsw: HnswVectorIndex::new(hnsw_threshold),
             codec: StoreRecordCodec::plaintext(),
         })
     }
@@ -153,11 +131,10 @@ impl VectorIndex {
 
         txn.commit()
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex commit: {e}")))?;
-        self.rebuild_hnsw()?;
         Ok(stats)
     }
 
-    /// Remove all vectors from the index (including HNSW).
+    /// Remove all vectors from the index.
     pub fn clear(&self) -> Result<(), CerememoryError> {
         let txn = self
             .db
@@ -182,8 +159,6 @@ impl VectorIndex {
         txn.commit()
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex commit: {e}")))?;
 
-        self.hnsw.deactivate();
-
         Ok(())
     }
 
@@ -204,7 +179,6 @@ impl VectorIndex {
 
     /// Insert or update an embedding vector. The vector is L2-normalized before storage.
     /// Rejects empty vectors or vectors containing NaN/Inf.
-    /// Also updates the HNSW index if active.
     pub fn upsert(&self, id: Uuid, embedding: &[f32]) -> Result<(), CerememoryError> {
         Self::validate_embedding(embedding)?;
         let normalized = l2_normalize(embedding);
@@ -224,21 +198,6 @@ impl VectorIndex {
         }
         txn.commit()
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex commit: {e}")))?;
-
-        // Sync to HNSW if active (best-effort, log-and-continue)
-        if self.hnsw.is_active() {
-            let _ = self.hnsw.insert(id, &normalized);
-        }
-
-        // Check if we should activate HNSW
-        if !self.hnsw.is_active() {
-            if let Ok(count) = self.count() {
-                if count >= self.hnsw.threshold() {
-                    let _ = self.rebuild_hnsw();
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -295,18 +254,12 @@ impl VectorIndex {
         }
         txn.commit()
             .map_err(|e| CerememoryError::Storage(format!("VectorIndex commit: {e}")))?;
-
-        // Sync to HNSW
-        self.hnsw.remove(&id);
-
         Ok(())
     }
 
     /// Search for the top-k most similar vectors to the query.
     ///
-    /// When HNSW is active (vector count >= threshold), uses approximate
-    /// nearest neighbor search in O(log n). Otherwise, falls back to
-    /// brute-force O(n log k) search via redb scan.
+    /// Uses exact brute-force O(n log k) search via redb scan.
     ///
     /// The query embedding is L2-normalized before comparison.
     pub fn search(
@@ -320,20 +273,10 @@ impl VectorIndex {
         Self::validate_embedding(query_embedding)?;
 
         let query_norm = l2_normalize(query_embedding);
-
-        // Use HNSW if active
-        if self.hnsw.is_active() {
-            let hits = self.hnsw.search(&query_norm, limit)?;
-            return Ok(hits
-                .into_iter()
-                .map(|h| VectorSearchHit {
-                    record_id: h.record_id,
-                    similarity: h.similarity,
-                })
-                .collect());
-        }
-
-        // Fallback: brute-force scan
+        debug!(
+            backend = self.search_backend(),
+            limit, "Searching vector index"
+        );
         self.search_brute_force(&query_norm, limit)
     }
 
@@ -398,64 +341,9 @@ impl VectorIndex {
         Ok(results)
     }
 
-    /// Rebuild the HNSW index from all vectors stored in redb.
-    /// Called during startup or when crossing the activation threshold.
-    pub fn rebuild_hnsw(&self) -> Result<(), CerememoryError> {
-        let entries = self.read_all_vectors()?;
-
-        info!(
-            vector_count = entries.len(),
-            threshold = self.hnsw.threshold(),
-            "Rebuilding HNSW index"
-        );
-
-        self.hnsw.rebuild(&entries)?;
-
-        if self.hnsw.is_active() {
-            info!("HNSW index activated ({} vectors)", entries.len());
-        }
-
-        Ok(())
-    }
-
-    /// Read all vectors from redb as (UUID, Vec<f32>) pairs.
-    fn read_all_vectors(&self) -> Result<Vec<(Uuid, Vec<f32>)>, CerememoryError> {
-        let txn = self
-            .db
-            .begin_read()
-            .map_err(|e| CerememoryError::Storage(format!("VectorIndex read txn: {e}")))?;
-        let table = txn
-            .open_table(VECTORS)
-            .map_err(|e| CerememoryError::Storage(format!("VectorIndex table: {e}")))?;
-
-        let iter = table
-            .iter()
-            .map_err(|e| CerememoryError::Storage(format!("VectorIndex iter: {e}")))?;
-
-        let mut entries = Vec::new();
-        for entry in iter {
-            let (key, value) =
-                entry.map_err(|e| CerememoryError::Storage(format!("VectorIndex entry: {e}")))?;
-
-            let key_bytes = key.value();
-            if key_bytes.len() != 16 {
-                warn!(
-                    key_len = key_bytes.len(),
-                    "Skipping vector index entry with invalid key length"
-                );
-                continue;
-            }
-            let id = Uuid::from_bytes(key_bytes.try_into().expect("length validated above"));
-            let vec: Vec<f32> = self.codec.decode(value.value())?;
-            entries.push((id, vec));
-        }
-
-        Ok(entries)
-    }
-
-    /// Whether the HNSW index is currently active.
-    pub fn is_hnsw_active(&self) -> bool {
-        self.hnsw.is_active()
+    /// Name of the active vector search backend.
+    pub fn search_backend(&self) -> &'static str {
+        VECTOR_SEARCH_BACKEND
     }
 
     /// Count stored vectors.
@@ -566,14 +454,13 @@ mod tests {
         let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let db_path = tmp_dir.path().join("vectors.redb");
         let db_path = db_path.to_string_lossy();
-        let plaintext = VectorIndex::open_with_threshold(&db_path, 2).unwrap();
+        let plaintext = VectorIndex::open(&db_path).unwrap();
         let id = Uuid::now_v7();
         plaintext.upsert(id, &[1.0, 0.0]).unwrap();
         drop(plaintext);
 
-        let encrypted = VectorIndex::open_with_threshold_and_codec(
+        let encrypted = VectorIndex::open_with_codec(
             &db_path,
-            2,
             StoreRecordCodec::encrypted_from_passphrase("migration passphrase").unwrap(),
         )
         .unwrap();
@@ -589,7 +476,7 @@ mod tests {
         assert_eq!(stats.records_already_encrypted, 1);
         drop(encrypted);
 
-        let plaintext_reopen = VectorIndex::open_with_threshold(&db_path, 2).unwrap();
+        let plaintext_reopen = VectorIndex::open(&db_path).unwrap();
         let err = plaintext_reopen.search(&[1.0, 0.0], 1).unwrap_err();
         assert!(matches!(err, CerememoryError::Unauthorized(_)));
     }

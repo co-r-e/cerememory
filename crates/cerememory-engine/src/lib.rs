@@ -111,9 +111,6 @@ pub struct EngineConfig {
     pub background_decay_interval_secs: Option<u64>,
     /// If set, enables background dream processing at this interval (in seconds). None = disabled.
     pub background_dream_interval_secs: Option<u64>,
-    /// Number of vectors at which to switch from brute-force to HNSW search.
-    /// Default: 1000. Set to `usize::MAX` to always use brute-force.
-    pub hnsw_threshold: usize,
     /// Optional LLM provider for auto-embedding, summarization, and relation extraction.
     /// When None, the engine operates without LLM capabilities (manual embeddings only).
     pub llm_provider: Option<Arc<dyn LLMProvider>>,
@@ -142,7 +139,6 @@ impl Default for EngineConfig {
             vector_index_path: None,
             background_decay_interval_secs: None,
             background_dream_interval_secs: None,
-            hnsw_threshold: cerememory_index::vector_index::DEFAULT_HNSW_THRESHOLD,
             llm_provider: None,
             store_encryption_passphrase: None,
             persist_search_indexes: true,
@@ -273,14 +269,10 @@ impl CerememoryEngine {
 
         let vector_index = match &config.vector_index_path {
             Some(p) => match &store_codec {
-                Some(codec) => VectorIndex::open_with_threshold_and_codec(
-                    p,
-                    config.hnsw_threshold,
-                    codec.clone(),
-                )?,
-                None => VectorIndex::open_with_threshold(p, config.hnsw_threshold)?,
+                Some(codec) => VectorIndex::open_with_codec(p, codec.clone())?,
+                None => VectorIndex::open(p)?,
             },
-            None => VectorIndex::open_in_memory_with_threshold(config.hnsw_threshold)?,
+            None => VectorIndex::open_in_memory()?,
         };
 
         let procedural = match &config.procedural_path {
@@ -668,11 +660,10 @@ impl CerememoryEngine {
 
         self.coordinator.rebuild(entries).await;
         self.text_index.rebuild(&text_records)?;
-        self.vector_index.rebuild_hnsw()?;
 
         info!(
             records = self.coordinator.total_records().await,
-            hnsw_active = self.vector_index.is_hnsw_active(),
+            vector_search_backend = self.vector_index.search_backend(),
             "Coordinator and indexes rebuilt from persistent stores"
         );
         Ok(())
@@ -4082,6 +4073,7 @@ impl CerememoryEngine {
             .iter()
             .filter(|record| !Self::raw_record_processed(record))
             .count() as u32;
+        let vector_index_records = self.vector_index.count()? as u32;
 
         let avg_fidelity = if total_records > 0 {
             total_fidelity / total_records as f64
@@ -4100,6 +4092,8 @@ impl CerememoryEngine {
             total_recall_count: 0,
             raw_journal_records,
             raw_journal_pending_dream,
+            vector_index_records,
+            vector_search_backend: self.vector_index.search_backend().to_string(),
             dream_episodic_summaries,
             dream_semantic_nodes,
             last_dream_tick_at,

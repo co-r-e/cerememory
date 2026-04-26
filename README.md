@@ -285,7 +285,7 @@ For HTTP TLS, use a reverse proxy (nginx, caddy) in front of the HTTP server. gR
 | Async Runtime | Tokio | I/O-bound CMP request handling |
 | Compute Pool | Rayon | CPU-bound decay engine and spreading activation |
 | Episodic Store | redb | ACID transactions, zero-copy reads |
-| Vector Search | hnsw_rs | Lightweight embedded HNSW index |
+| Vector Search | redb + exact cosine scan | Deterministic embedded vector search with no secondary ANN graph |
 | Full-Text Search | Tantivy | Rust-native Lucene equivalent |
 | Synchronization | parking_lot | Poison-free RwLock/Mutex (no panics on lock contention) |
 | Internal Serialization | MessagePack | Compact binary, schema-less |

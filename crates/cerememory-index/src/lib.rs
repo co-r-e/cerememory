@@ -8,7 +8,6 @@
 //! - [`text_index::TextIndex`] — Tantivy full-text search across all stores
 //! - [`vector_index::VectorIndex`] — Brute-force cosine similarity search
 
-pub mod hnsw_index;
 pub mod structured_index;
 pub mod text_index;
 pub mod vector_index;

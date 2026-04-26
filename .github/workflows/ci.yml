@@ -64,18 +64,61 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Check CLI without LLM adapters
-        run: cargo check -p cerememory-cli --no-default-features --locked
-
       - name: Run tests
         run: cargo test --workspace --locked
 
       - name: Check benchmarks compile
         run: cargo bench --workspace --no-run --locked
 
+  feature-matrix:
+    name: Feature Matrix (${{ matrix.feature_set }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - feature_set: no-default
+            command: cargo check -p cerememory-cli --no-default-features --locked
+          - feature_set: llm-openai
+            command: cargo check -p cerememory-cli --no-default-features --features llm-openai --locked
+          - feature_set: llm-claude
+            command: cargo check -p cerememory-cli --no-default-features --features llm-claude --locked
+          - feature_set: llm-gemini
+            command: cargo check -p cerememory-cli --no-default-features --features llm-gemini --locked
+          - feature_set: all-features
+            command: cargo check -p cerememory-cli --all-features --locked
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.feature_set }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.feature_set }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Check selected feature set
+        run: ${{ matrix.command }}
+
   llm-e2e:
     name: LLM E2E tests
-    needs: check
+    needs: [check, feature-matrix]
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[llm-e2e]')
     runs-on: ubuntu-latest
     steps:

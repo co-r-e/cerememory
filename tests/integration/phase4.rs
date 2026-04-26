@@ -1,7 +1,7 @@
 //! Phase 4 "Intelligence" integration tests for Cerememory.
 //!
 //! End-to-end tests that exercise the Phase 4 features across
-//! multiple subsystems: HNSW vector search, CMP spec endpoints
+//! multiple subsystems: vector search, CMP spec endpoints
 //! (timeline, graph, decay forecast, evolution), LLM provider
 //! integration, and smart consolidation.
 
@@ -66,16 +66,11 @@ impl LLMProvider for TestLLMProvider {
     }
 }
 
-// ─── HNSW ANN Integration ────────────────────────────────────────────
+// ─── Vector Search Integration ───────────────────────────────────────
 
 #[tokio::test]
-async fn hnsw_activates_above_threshold_and_returns_results() {
-    // Use a low threshold so HNSW activates with few records
-    let engine = CerememoryEngine::new(EngineConfig {
-        hnsw_threshold: 5,
-        ..Default::default()
-    })
-    .unwrap();
+async fn vector_search_returns_nearest_results() {
+    let engine = CerememoryEngine::new(EngineConfig::default()).unwrap();
 
     // Insert records with embeddings
     for i in 0..10 {
@@ -83,7 +78,7 @@ async fn hnsw_activates_above_threshold_and_returns_results() {
         emb[i % 4] = 1.0;
         engine
             .encode_store(text_with_embedding(
-                &format!("HNSW record {i}"),
+                &format!("Vector record {i}"),
                 StoreType::Episodic,
                 emb,
             ))
@@ -91,7 +86,6 @@ async fn hnsw_activates_above_threshold_and_returns_results() {
             .unwrap();
     }
 
-    // Vector search should use HNSW path now
     let resp = engine
         .recall_query(RecallQueryRequest {
             header: None,
@@ -111,8 +105,11 @@ async fn hnsw_activates_above_threshold_and_returns_results() {
         .unwrap();
 
     assert!(!resp.memories.is_empty());
-    // Top result should have high similarity
     assert!(resp.memories[0].relevance_score > 0.5);
+
+    let stats = engine.introspect_stats().await.unwrap();
+    assert_eq!(stats.vector_search_backend, "brute_force");
+    assert_eq!(stats.vector_index_records, 10);
 }
 
 // ─── CMP Spec: recall.timeline ───────────────────────────────────────

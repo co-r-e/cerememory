@@ -25,7 +25,7 @@ Cerememory is a living memory database implementing the CMP (Cerememory Protocol
 - `crates/cerememory-store-*` — Per-store implementations (episodic, semantic, procedural, emotional, working)
 - `crates/cerememory-decay` — Power-law fidelity decay engine
 - `crates/cerememory-association` — Spreading activation network
-- `crates/cerememory-index` — Tantivy full-text + HNSW vector index
+- `crates/cerememory-index` — Tantivy full-text + redb-backed exact vector search
 - `crates/cerememory-archive` — CMA export/import with optional encryption
 - `crates/cerememory-evolution` — Self-tuning parameter evolution
 - `crates/cerememory-transport-http` — Axum REST API
