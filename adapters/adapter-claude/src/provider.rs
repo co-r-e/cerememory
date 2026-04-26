@@ -6,7 +6,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use cerememory_adapter_common::{self as common, DEFAULT_MAX_RETRIES};
 use cerememory_core::{CerememoryError, ExtractedRelation, LLMProvider, ProviderCapabilities};
@@ -151,13 +150,9 @@ impl ClaudeProvider {
         &self,
         body: &impl Serialize,
     ) -> Result<MessagesResponse, CerememoryError> {
-        let backoff = common::create_backoff_policy();
-
         let url = self.messages_url();
-        let attempt = AtomicU32::new(0);
 
-        let op = || {
-            let current = attempt.fetch_add(1, Ordering::Relaxed) + 1;
+        common::retry_with_policy(common::create_retry_policy(), |current| {
             let url = url.clone();
             async move {
                 debug!(attempt = current, url = %url, "sending Anthropic API request");
@@ -173,11 +168,11 @@ impl ClaudeProvider {
                     .await
                     .map_err(|e| {
                         if e.is_connect() || e.is_timeout() {
-                            backoff::Error::transient(CerememoryError::Internal(format!(
+                            common::RetryError::transient(CerememoryError::Internal(format!(
                                 "Anthropic API connection error: {e}"
                             )))
                         } else {
-                            backoff::Error::permanent(CerememoryError::Internal(format!(
+                            common::RetryError::permanent(CerememoryError::Internal(format!(
                                 "Anthropic API request error: {e}"
                             )))
                         }
@@ -187,7 +182,7 @@ impl ClaudeProvider {
 
                 if status.is_success() {
                     let parsed: MessagesResponse = resp.json().await.map_err(|e| {
-                        backoff::Error::permanent(CerememoryError::Internal(format!(
+                        common::RetryError::permanent(CerememoryError::Internal(format!(
                             "Failed to parse Anthropic API response: {e}"
                         )))
                     })?;
@@ -205,18 +200,18 @@ impl ClaudeProvider {
                             attempt = current,
                             "Anthropic API retryable error, max retries reached"
                         );
-                        return Err(backoff::Error::permanent(CerememoryError::Internal(
-                        format!(
-                            "Anthropic API error after {current} attempts (HTTP {status}): {error_body}"
-                        ),
-                    )));
+                        return Err(common::RetryError::permanent(
+                            CerememoryError::Internal(format!(
+                                "Anthropic API error after {current} attempts (HTTP {status}): {error_body}"
+                            )),
+                        ));
                     }
                     warn!(
                         status = %status,
                         attempt = current,
                         "Anthropic API retryable error, will retry"
                     );
-                    return Err(backoff::Error::transient(CerememoryError::Internal(
+                    return Err(common::RetryError::transient(CerememoryError::Internal(
                         format!("Anthropic API error (HTTP {status}): {error_body}"),
                     )));
                 }
@@ -226,13 +221,12 @@ impl ClaudeProvider {
                     .map(|e| format!("{}: {}", e.error.r#type, e.error.message))
                     .unwrap_or(error_body);
 
-                Err(backoff::Error::permanent(CerememoryError::Internal(
+                Err(common::RetryError::permanent(CerememoryError::Internal(
                     format!("Anthropic API error (HTTP {status}): {detail}"),
                 )))
             }
-        };
-
-        backoff::future::retry(backoff, op).await
+        })
+        .await
     }
 }
 

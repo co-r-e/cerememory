@@ -62,7 +62,10 @@ jobs:
         run: cargo fmt --all --check --verbose
 
       - name: Clippy
-        run: cargo clippy --workspace --tests --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Check CLI without LLM adapters
+        run: cargo check -p cerememory-cli --no-default-features --locked
 
       - name: Run tests
         run: cargo test --workspace --locked

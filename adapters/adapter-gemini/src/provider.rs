@@ -261,14 +261,9 @@ where
     Req: Serialize + Sync,
     Res: for<'de> Deserialize<'de>,
 {
-    let backoff = common::create_backoff_policy();
-
-    let attempts = std::sync::atomic::AtomicU32::new(0);
-
-    backoff::future::retry(backoff, || async {
-        let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    common::retry_with_policy(common::create_retry_policy(), |attempt| async move {
         if attempt > DEFAULT_MAX_RETRIES {
-            return Err(backoff::Error::permanent(CerememoryError::Internal(
+            return Err(common::RetryError::permanent(CerememoryError::Internal(
                 "Gemini max retries exceeded".to_string(),
             )));
         }
@@ -280,7 +275,7 @@ where
             .send()
             .await
             .map_err(|e| {
-                backoff::Error::permanent(CerememoryError::Internal(format!(
+                common::RetryError::permanent(CerememoryError::Internal(format!(
                     "Gemini request failed: {e}"
                 )))
             })?;
@@ -289,7 +284,7 @@ where
 
         if status.is_success() {
             let parsed = resp.json::<Res>().await.map_err(|e| {
-                backoff::Error::permanent(CerememoryError::Internal(format!(
+                common::RetryError::permanent(CerememoryError::Internal(format!(
                     "Failed to parse Gemini response: {e}"
                 )))
             })?;
@@ -305,7 +300,7 @@ where
                 body = %response_body,
                 "Gemini transient error, will retry"
             );
-            return Err(backoff::Error::transient(CerememoryError::Internal(
+            return Err(common::RetryError::transient(CerememoryError::Internal(
                 format!("Gemini transient error {status}: {response_body}"),
             )));
         }
@@ -316,7 +311,7 @@ where
             body = %response_body,
             "Gemini permanent error"
         );
-        Err(backoff::Error::permanent(CerememoryError::Internal(
+        Err(common::RetryError::permanent(CerememoryError::Internal(
             format!("Gemini error {status}: {response_body}"),
         )))
     })

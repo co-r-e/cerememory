@@ -26,11 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated Rust dependencies to their latest compatible releases, including major updates for `redb`, `tantivy`, `criterion`, `ordered-float`, `rand`, and `sha2`
 - Updated GitHub Actions usage to Node 24-capable `actions/checkout@v6` and `actions/cache@v5`
 - Removed stale security advisory ignores that are no longer present after the dependency refresh
+- CI now runs Clippy across all targets and checks the CLI `--no-default-features` build
+- Removed the unmaintained `backoff` dependency from LLM adapters
 
 ### Fixed
 
 #### Reliability and Security
 - Hardened API key validation so configured keys are scanned without early-exit match behavior
+- CLI builds without LLM adapter features now report configured LLM providers as unsupported instead of silently disabling them
 - Fixed HNSW search fallback behavior after vector removals
 - Removed stale SQLite/archive wording from docs and crate metadata
 

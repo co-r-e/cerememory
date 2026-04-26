@@ -5,7 +5,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use cerememory_adapter_common::{self as common, DEFAULT_MAX_RETRIES};
@@ -171,11 +170,6 @@ impl OpenAIProvider {
         })
     }
 
-    /// Build the backoff policy used for transient-error retries.
-    fn backoff_policy() -> backoff::ExponentialBackoff {
-        common::create_backoff_policy()
-    }
-
     /// Execute an HTTP request with exponential backoff retry on transient errors.
     ///
     /// `build_request` is called on each attempt to produce the `RequestBuilder`.
@@ -184,9 +178,9 @@ impl OpenAIProvider {
     where
         F: Fn() -> Result<reqwest::RequestBuilder, CerememoryError>,
     {
-        let mut attempts: u32 = 0;
-        let backoff = Self::backoff_policy();
-        let mut current_interval = backoff.initial_interval;
+        let policy = common::create_retry_policy();
+        let mut attempts = 0;
+        let mut current_interval = policy.initial_interval;
 
         loop {
             attempts += 1;
@@ -219,14 +213,11 @@ impl OpenAIProvider {
             warn!(
                 status = %status,
                 attempt = attempts,
-                "transient OpenAI API error, retrying after {current_interval:?}"
+                "transient OpenAI API error, retrying"
             );
 
             tokio::time::sleep(current_interval).await;
-            current_interval = Duration::from_secs_f64(
-                (current_interval.as_secs_f64() * backoff.multiplier)
-                    .min(backoff.max_interval.as_secs_f64()),
-            );
+            current_interval = policy.next_interval(current_interval);
         }
     }
 

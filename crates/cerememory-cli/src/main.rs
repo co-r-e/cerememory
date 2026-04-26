@@ -540,36 +540,84 @@ fn build_llm_provider(
 ) -> Result<Option<Arc<dyn cerememory_core::LLMProvider>>> {
     use cerememory_config::LlmProvider;
 
-    let model = config.llm.model.clone();
-    let base_url = config.llm.base_url.clone();
-
-    let require_api_key = || {
-        config
-            .llm
-            .api_key_exposed()
-            .map(str::to_string)
-            .ok_or_else(|| {
-                anyhow::anyhow!("LLM provider '{}' requires an API key", config.llm.provider)
-            })
-    };
-
     match config.llm.provider {
-        #[cfg(feature = "llm-openai")]
-        LlmProvider::OpenAI => Ok(Some(Arc::new(
-            cerememory_adapter_openai::OpenAIProvider::new(require_api_key()?, model, base_url)?,
-        ))),
-        #[cfg(feature = "llm-claude")]
-        LlmProvider::Claude => Ok(Some(Arc::new(
-            cerememory_adapter_claude::ClaudeProvider::new(require_api_key()?, model, base_url)?,
-        ))),
-        #[cfg(feature = "llm-gemini")]
-        LlmProvider::Gemini => Ok(Some(Arc::new(
-            cerememory_adapter_gemini::GeminiProvider::new(require_api_key()?, model, base_url)?,
-        ))),
+        LlmProvider::OpenAI => {
+            #[cfg(feature = "llm-openai")]
+            {
+                Ok(Some(Arc::new(
+                    cerememory_adapter_openai::OpenAIProvider::new(
+                        require_llm_api_key(config)?,
+                        config.llm.model.clone(),
+                        config.llm.base_url.clone(),
+                    )?,
+                )))
+            }
+            #[cfg(not(feature = "llm-openai"))]
+            {
+                llm_feature_disabled("openai", "llm-openai")
+            }
+        }
+        LlmProvider::Claude => {
+            #[cfg(feature = "llm-claude")]
+            {
+                Ok(Some(Arc::new(
+                    cerememory_adapter_claude::ClaudeProvider::new(
+                        require_llm_api_key(config)?,
+                        config.llm.model.clone(),
+                        config.llm.base_url.clone(),
+                    )?,
+                )))
+            }
+            #[cfg(not(feature = "llm-claude"))]
+            {
+                llm_feature_disabled("claude", "llm-claude")
+            }
+        }
+        LlmProvider::Gemini => {
+            #[cfg(feature = "llm-gemini")]
+            {
+                Ok(Some(Arc::new(
+                    cerememory_adapter_gemini::GeminiProvider::new(
+                        require_llm_api_key(config)?,
+                        config.llm.model.clone(),
+                        config.llm.base_url.clone(),
+                    )?,
+                )))
+            }
+            #[cfg(not(feature = "llm-gemini"))]
+            {
+                llm_feature_disabled("gemini", "llm-gemini")
+            }
+        }
         LlmProvider::None => Ok(None),
-        #[allow(unreachable_patterns)]
-        _ => Ok(None),
     }
+}
+
+#[cfg(any(feature = "llm-openai", feature = "llm-claude", feature = "llm-gemini"))]
+fn require_llm_api_key(config: &ServerConfig) -> Result<String> {
+    config
+        .llm
+        .api_key_exposed()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!("LLM provider '{}' requires an API key", config.llm.provider)
+        })
+}
+
+#[cfg(any(
+    not(feature = "llm-openai"),
+    not(feature = "llm-claude"),
+    not(feature = "llm-gemini")
+))]
+fn llm_feature_disabled(
+    provider: &str,
+    feature: &str,
+) -> Result<Option<Arc<dyn cerememory_core::LLMProvider>>> {
+    anyhow::bail!(
+        "LLM provider '{}' is configured, but this binary was built without the '{}' feature",
+        provider,
+        feature
+    );
 }
 
 fn is_storage_lock_error(message: &str) -> bool {

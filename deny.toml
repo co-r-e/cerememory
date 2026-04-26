@@ -9,9 +9,7 @@ no-default-features = false
 [advisories]
 ignore = [
     # Transitive deps with no safe upgrade available:
-    { id = "RUSTSEC-2025-0012", reason = "backoff is transitive dep of adapters; considering migration to backon" },
     { id = "RUSTSEC-2025-0141", reason = "bincode is transitive dep of hnsw_rs; no alternative available" },
-    { id = "RUSTSEC-2024-0384", reason = "instant is transitive dep of backoff; will be resolved when backoff is replaced" },
 ]
 
 [licenses]
