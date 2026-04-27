@@ -26,6 +26,8 @@ const ALL_STORES: [StoreType; 5] = [
     StoreType::Emotional,
     StoreType::Working,
 ];
+const MAX_RECALL_ASSOCIATE_DEPTH: u32 = 8;
+const MAX_RECALL_ASSOCIATE_LIMIT: u32 = 256;
 
 /// Scope guard that records a histogram metric on drop (success or error path).
 struct TimerGuard {
@@ -87,7 +89,7 @@ use cerememory_store_common::StoreRecordMigrationStats;
 use cerememory_store_emotional::EmotionalStore;
 use cerememory_store_episodic::EpisodicStore;
 use cerememory_store_procedural::ProceduralStore;
-use cerememory_store_raw::RawJournalStore;
+use cerememory_store_raw::{RawJournalStore, RawJournalTextIndexStatus};
 use cerememory_store_semantic::SemanticStore;
 use cerememory_store_working::WorkingMemoryStore;
 
@@ -417,6 +419,41 @@ impl CerememoryEngine {
             audit_log.append(operation, record_ids, store_types, summary)?;
         }
         Ok(())
+    }
+
+    fn raw_text_index_audit_summary(status: &RawJournalTextIndexStatus) -> serde_json::Value {
+        match status {
+            RawJournalTextIndexStatus::Updated => serde_json::json!({
+                "state": "updated",
+                "rebuildable": true,
+            }),
+            RawJournalTextIndexStatus::SkippedNoText => serde_json::json!({
+                "state": "skipped_no_text",
+                "rebuildable": true,
+            }),
+            RawJournalTextIndexStatus::Degraded { operation, error } => serde_json::json!({
+                "state": "degraded",
+                "operation": operation.as_str(),
+                "error": error,
+                "rebuildable": true,
+            }),
+        }
+    }
+
+    fn warn_raw_text_index_degradation(
+        api_operation: &str,
+        record_id: Uuid,
+        status: &RawJournalTextIndexStatus,
+    ) {
+        if let Some(degradation) = status.degradation() {
+            warn!(
+                error = %degradation.error,
+                record_id = %record_id,
+                raw_text_index_operation = degradation.operation.as_str(),
+                api_operation,
+                "Raw journal persisted but text index update failed; search can recover via rebuild"
+            );
+        }
     }
 
     /// Start the background decay task. Requires the engine to be wrapped in Arc.
@@ -969,17 +1006,21 @@ impl CerememoryEngine {
     fn index_record(&self, record: &MemoryRecord) -> Result<(), CerememoryError> {
         let text = Self::build_searchable_text(record).unwrap_or_default();
         if Self::has_indexable_content(&text, record) {
-            self.text_index.add(
+            self.text_index.update(
                 record.id,
                 record.store,
                 &text,
                 record.content.summary.as_deref(),
             )?;
+        } else {
+            self.text_index.remove(record.id)?;
         }
 
         // Vector index — use first embedding found (one vector per record_id)
         if let Some(embedding) = Self::primary_embedding(record) {
             self.vector_index.upsert(record.id, embedding)?;
+        } else {
+            self.vector_index.remove(record.id)?;
         }
 
         Ok(())
@@ -1435,7 +1476,12 @@ impl CerememoryEngine {
         &self,
         record: RawJournalRecord,
     ) -> Result<Uuid, CerememoryError> {
-        let record_id = self.raw_journal.append(record.clone()).await?;
+        let outcome = self
+            .raw_journal
+            .append_with_index_report(record.clone())
+            .await?;
+        let record_id = outcome.record_id;
+        Self::warn_raw_text_index_degradation("raw_journal.append", record_id, &outcome.text_index);
         self.audit_event(
             "raw_journal.append",
             vec![record_id],
@@ -1444,6 +1490,7 @@ impl CerememoryEngine {
                 "record_id": record_id,
                 "visibility": record.visibility,
                 "secrecy_level": record.secrecy_level,
+                "text_index": Self::raw_text_index_audit_summary(&outcome.text_index),
             }),
         )?;
         Ok(record_id)
@@ -1976,7 +2023,12 @@ impl CerememoryEngine {
             suppressed: false,
         };
         record.validate()?;
-        let record_id = self.raw_journal.append(record.clone()).await?;
+        let outcome = self
+            .raw_journal
+            .append_with_index_report(record.clone())
+            .await?;
+        let record_id = outcome.record_id;
+        Self::warn_raw_text_index_degradation("encode.store_raw", record_id, &outcome.text_index);
         self.audit_event(
             "encode.store_raw",
             vec![record_id],
@@ -1985,6 +2037,7 @@ impl CerememoryEngine {
                 "record_id": record_id,
                 "visibility": record.visibility,
                 "secrecy_level": record.secrecy_level,
+                "text_index": Self::raw_text_index_audit_summary(&outcome.text_index),
             }),
         )?;
 
@@ -2770,6 +2823,19 @@ impl CerememoryEngine {
         &self,
         req: RecallAssociateRequest,
     ) -> Result<RecallAssociateResponse, CerememoryError> {
+        if req.depth > MAX_RECALL_ASSOCIATE_DEPTH {
+            return Err(CerememoryError::Validation(format!(
+                "recall.associate depth {} exceeds maximum of {MAX_RECALL_ASSOCIATE_DEPTH}",
+                req.depth
+            )));
+        }
+        if req.limit > MAX_RECALL_ASSOCIATE_LIMIT {
+            return Err(CerememoryError::Validation(format!(
+                "recall.associate limit {} exceeds maximum of {MAX_RECALL_ASSOCIATE_LIMIT}",
+                req.limit
+            )));
+        }
+
         // Verify record exists
         self.get_store_record(&req.record_id)
             .await?
@@ -5542,6 +5608,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn index_record_overwrite_removes_stale_tantivy_document() {
+        let engine = make_engine().await;
+
+        let old_record = MemoryRecord::new_text(StoreType::Episodic, "obsolete tantivy phrase");
+        let id = old_record.id;
+        engine.episodic.store(old_record.clone()).await.unwrap();
+        engine.index_record(&old_record).unwrap();
+
+        let mut new_record = MemoryRecord::new_text(StoreType::Episodic, "fresh tantivy phrase");
+        new_record.id = id;
+        engine.episodic.store(new_record.clone()).await.unwrap();
+        engine.index_record(&new_record).unwrap();
+
+        let old_resp = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("obsolete".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Episodic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+        assert!(!old_resp
+            .memories
+            .iter()
+            .any(|memory| memory.record.id == id));
+
+        let new_resp = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("fresh".to_string()),
+                    ..Default::default()
+                },
+                stores: Some(vec![StoreType::Episodic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+        assert!(new_resp.memories.iter().any(|memory| memory.record.id == id
+            && memory.record.text_content() == Some("fresh tantivy phrase")));
+    }
+
+    #[tokio::test]
     async fn vector_search_recall() {
         let engine = make_engine().await;
 
@@ -5806,6 +5929,45 @@ mod tests {
             .unwrap();
         assert_eq!(assoc_resp.memories.len(), 1);
         assert_eq!(assoc_resp.memories[0].record.id, resp.results[1].record_id);
+    }
+
+    #[tokio::test]
+    async fn recall_associate_rejects_excessive_depth_and_limit() {
+        let engine = make_engine().await;
+        let resp = engine
+            .encode_store(text_store_req("Root memory", Some(StoreType::Episodic)))
+            .await
+            .unwrap();
+
+        let depth_err = engine
+            .recall_associate(RecallAssociateRequest {
+                header: None,
+                record_id: resp.record_id,
+                association_types: None,
+                depth: MAX_RECALL_ASSOCIATE_DEPTH + 1,
+                min_weight: 0.1,
+                limit: 10,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(depth_err, CerememoryError::Validation(message) if message.contains("depth"))
+        );
+
+        let limit_err = engine
+            .recall_associate(RecallAssociateRequest {
+                header: None,
+                record_id: resp.record_id,
+                association_types: None,
+                depth: 1,
+                min_weight: 0.1,
+                limit: MAX_RECALL_ASSOCIATE_LIMIT + 1,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(limit_err, CerememoryError::Validation(message) if message.contains("limit"))
+        );
     }
 
     #[tokio::test]

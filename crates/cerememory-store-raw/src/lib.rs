@@ -3,6 +3,7 @@
 //! The raw journal is an append-oriented preservation layer for verbatim
 //! conversation turns, tool I/O, and other externally visible traces.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -25,6 +26,7 @@ const RAW_JOURNAL_RECORDS: TableDefinition<&[u8], &[u8]> =
 /// Secondary table: session id -> MessagePack-encoded ordered session index entries.
 const RAW_JOURNAL_SESSION_INDEX: TableDefinition<&str, &[u8]> =
     TableDefinition::new("raw_journal_session_index");
+const RAW_SESSION_INDEX_SCOPE: &str = "raw-journal-session";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionIndexEntry {
@@ -41,6 +43,19 @@ struct RawFields {
 #[derive(Clone)]
 struct RawTextSearchHit {
     record_id: Uuid,
+}
+
+trait RawTextIndexBackend: Send + Sync {
+    fn add(&self, id: Uuid, session_id: &str, body: &str) -> Result<(), CerememoryError>;
+    fn remove(&self, id: Uuid) -> Result<(), CerememoryError>;
+    fn update(&self, id: Uuid, session_id: &str, body: &str) -> Result<(), CerememoryError>;
+    fn rebuild(&self, records: &[RawJournalRecord]) -> Result<(), CerememoryError>;
+    fn search(
+        &self,
+        query: &str,
+        session_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RawTextSearchHit>, CerememoryError>;
 }
 
 struct RawTextIndex {
@@ -105,7 +120,9 @@ impl RawTextIndex {
             .lock()
             .map_err(|e| CerememoryError::Internal(format!("RawTextIndex writer lock: {e}")))
     }
+}
 
+impl RawTextIndexBackend for RawTextIndex {
     fn add(&self, id: Uuid, session_id: &str, body: &str) -> Result<(), CerememoryError> {
         let mut doc = TantivyDocument::new();
         doc.add_text(self.fields.id, id.to_string());
@@ -232,10 +249,76 @@ impl RawTextIndex {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawJournalTextIndexOperation {
+    Add,
+    Update,
+    Remove,
+}
+
+impl RawJournalTextIndexOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Update => "update",
+            Self::Remove => "remove",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawJournalTextIndexDegradation {
+    pub operation: RawJournalTextIndexOperation,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RawJournalTextIndexStatus {
+    Updated,
+    SkippedNoText,
+    Degraded {
+        operation: RawJournalTextIndexOperation,
+        error: String,
+    },
+}
+
+impl RawJournalTextIndexStatus {
+    pub fn degraded(operation: RawJournalTextIndexOperation, error: CerememoryError) -> Self {
+        Self::Degraded {
+            operation,
+            error: error.to_string(),
+        }
+    }
+
+    pub fn degradation(&self) -> Option<RawJournalTextIndexDegradation> {
+        match self {
+            Self::Degraded { operation, error } => Some(RawJournalTextIndexDegradation {
+                operation: *operation,
+                error: error.clone(),
+            }),
+            Self::Updated | Self::SkippedNoText => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawJournalAppendOutcome {
+    pub record_id: Uuid,
+    pub text_index: RawJournalTextIndexStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawJournalDeleteOutcome {
+    pub deleted: bool,
+    pub text_index: RawJournalTextIndexStatus,
+}
+
 #[derive(Clone)]
 pub struct RawJournalStore {
     db: Arc<Database>,
-    text_index: Arc<RawTextIndex>,
+    text_index: Arc<dyn RawTextIndexBackend>,
     codec: StoreRecordCodec,
 }
 
@@ -261,6 +344,7 @@ impl RawJournalStore {
     ) -> Result<Self, CerememoryError> {
         let db = Database::create(path.as_ref())
             .map_err(|e| CerememoryError::Storage(format!("Failed to open redb database: {e}")))?;
+        let persist_text_index = persist_text_index && !codec.encrypts_new_records();
         let text_index = if persist_text_index {
             RawTextIndex::open(path.as_ref())?
         } else {
@@ -271,6 +355,27 @@ impl RawJournalStore {
             db: Arc::new(db),
             text_index: Arc::new(text_index),
             codec,
+        };
+        store.ensure_tables()?;
+        Ok(store)
+    }
+
+    #[cfg(test)]
+    fn open_in_memory_with_text_index(
+        text_index: Arc<dyn RawTextIndexBackend>,
+    ) -> Result<Self, CerememoryError> {
+        let tmp = tempfile::NamedTempFile::new()
+            .map_err(|e| CerememoryError::Storage(format!("Failed to create temp file: {e}")))?;
+        let path = tmp.into_temp_path();
+        let _ = std::fs::remove_file(&path);
+        let db = Database::create(&path).map_err(|e| {
+            CerememoryError::Storage(format!("Failed to open in-memory redb database: {e}"))
+        })?;
+
+        let store = Self {
+            db: Arc::new(db),
+            text_index,
+            codec: StoreRecordCodec::plaintext(),
         };
         store.ensure_tables()?;
         Ok(store)
@@ -328,6 +433,7 @@ impl RawJournalStore {
             let txn = db.begin_write().map_err(storage_err)?;
             let mut stats = StoreRecordMigrationStats::empty();
             let mut rewrites: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            let mut records_for_index = Vec::new();
 
             {
                 let records = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
@@ -335,6 +441,7 @@ impl RawJournalStore {
                     let (key_guard, value_guard) = entry.map_err(storage_err)?;
                     let payload = value_guard.value();
                     let record: RawJournalRecord = codec.decode(payload)?;
+                    records_for_index.push(record.clone());
                     stats.records_total += 1;
 
                     if StoreRecordCodec::is_encrypted_payload(payload) {
@@ -346,11 +453,49 @@ impl RawJournalStore {
                 }
             }
 
+            let mut rebuilt_session_entries: BTreeMap<String, Vec<SessionIndexEntry>> =
+                BTreeMap::new();
+            for record in &records_for_index {
+                rebuilt_session_entries
+                    .entry(session_index_key(&codec, &record.session_id))
+                    .or_default()
+                    .push(SessionIndexEntry {
+                        id: record.id,
+                        created_at: record.created_at,
+                    });
+            }
+
             if !rewrites.is_empty() {
                 let mut records = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
                 for (key, payload) in rewrites {
                     records
                         .insert(key.as_slice(), payload.as_slice())
+                        .map_err(storage_err)?;
+                }
+            }
+
+            {
+                let mut session_index = txn
+                    .open_table(RAW_JOURNAL_SESSION_INDEX)
+                    .map_err(storage_err)?;
+                let keys: Vec<String> = session_index
+                    .iter()
+                    .map_err(storage_err)?
+                    .map(|entry| {
+                        entry
+                            .map(|(key, _)| key.value().to_string())
+                            .map_err(storage_err)
+                    })
+                    .collect::<Result<_, _>>()?;
+                for key in keys {
+                    session_index.remove(key.as_str()).map_err(storage_err)?;
+                }
+                for (key, entries) in rebuilt_session_entries {
+                    let packed_entries = rmp_serde::to_vec(&entries).map_err(|e| {
+                        CerememoryError::Serialization(format!("msgpack encode session index: {e}"))
+                    })?;
+                    session_index
+                        .insert(key.as_str(), packed_entries.as_slice())
                         .map_err(storage_err)?;
                 }
             }
@@ -370,6 +515,14 @@ impl RawJournalStore {
 
     /// Append a new raw journal record.
     pub async fn append(&self, record: RawJournalRecord) -> Result<Uuid, CerememoryError> {
+        Ok(self.append_with_index_report(record).await?.record_id)
+    }
+
+    /// Append a new raw journal record and report whether the rebuildable text index caught up.
+    pub async fn append_with_index_report(
+        &self,
+        record: RawJournalRecord,
+    ) -> Result<RawJournalAppendOutcome, CerememoryError> {
         record.validate()?;
 
         let record_id = record.id;
@@ -393,8 +546,9 @@ impl RawJournalStore {
                 let mut session_index = txn
                     .open_table(RAW_JOURNAL_SESSION_INDEX)
                     .map_err(storage_err)?;
+                let session_key = session_index_key(&codec, &record.session_id);
                 let mut entries: Vec<SessionIndexEntry> = match session_index
-                    .get(record.session_id.as_str())
+                    .get(session_key.as_str())
                     .map_err(storage_err)?
                 {
                     Some(value_guard) => {
@@ -406,6 +560,7 @@ impl RawJournalStore {
                     }
                     None => Vec::new(),
                 };
+                entries.retain(|entry| entry.id != id);
                 entries.push(SessionIndexEntry {
                     id,
                     created_at: record.created_at,
@@ -414,7 +569,7 @@ impl RawJournalStore {
                     CerememoryError::Serialization(format!("msgpack encode session index: {e}"))
                 })?;
                 session_index
-                    .insert(record.session_id.as_str(), packed_entries.as_slice())
+                    .insert(session_key.as_str(), packed_entries.as_slice())
                     .map_err(storage_err)?;
             }
             txn.commit().map_err(storage_err)?;
@@ -423,14 +578,33 @@ impl RawJournalStore {
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))??;
 
-        if let Some((id, session_id, text)) = text_payload {
-            self.text_index.add(id, &session_id, &text)?;
-        }
-        Ok(record_id)
+        let text_index = if let Some((id, session_id, text)) = text_payload {
+            match self.text_index.add(id, &session_id, &text) {
+                Ok(()) => RawJournalTextIndexStatus::Updated,
+                Err(error) => {
+                    RawJournalTextIndexStatus::degraded(RawJournalTextIndexOperation::Add, error)
+                }
+            }
+        } else {
+            RawJournalTextIndexStatus::SkippedNoText
+        };
+        Ok(RawJournalAppendOutcome {
+            record_id,
+            text_index,
+        })
     }
 
     /// Update an existing raw journal record in place.
     pub async fn update(&self, record: RawJournalRecord) -> Result<(), CerememoryError> {
+        let _ = self.update_with_index_report(record).await?;
+        Ok(())
+    }
+
+    /// Update an existing raw journal record and report any rebuildable text-index degradation.
+    pub async fn update_with_index_report(
+        &self,
+        record: RawJournalRecord,
+    ) -> Result<RawJournalTextIndexStatus, CerememoryError> {
         record.validate()?;
 
         let previous = self
@@ -461,9 +635,11 @@ impl RawJournalStore {
                 let mut session_index = txn
                     .open_table(RAW_JOURNAL_SESSION_INDEX)
                     .map_err(storage_err)?;
+                let previous_session_key = session_index_key(&codec, &previous_for_txn.session_id);
+                let record_session_key = session_index_key(&codec, &record_for_txn.session_id);
 
                 let mut old_entries: Vec<SessionIndexEntry> = match session_index
-                    .get(previous_for_txn.session_id.as_str())
+                    .get(previous_session_key.as_str())
                     .map_err(storage_err)?
                 {
                     Some(value_guard) => {
@@ -480,18 +656,15 @@ impl RawJournalStore {
                     CerememoryError::Serialization(format!("msgpack encode session index: {e}"))
                 })?;
                 session_index
-                    .insert(
-                        previous_for_txn.session_id.as_str(),
-                        packed_old_entries.as_slice(),
-                    )
+                    .insert(previous_session_key.as_str(), packed_old_entries.as_slice())
                     .map_err(storage_err)?;
 
                 let mut new_entries: Vec<SessionIndexEntry> =
-                    if previous_for_txn.session_id == record_for_txn.session_id {
+                    if previous_session_key == record_session_key {
                         old_entries
                     } else {
                         match session_index
-                            .get(record_for_txn.session_id.as_str())
+                            .get(record_session_key.as_str())
                             .map_err(storage_err)?
                         {
                             Some(value_guard) => rmp_serde::from_slice(value_guard.value())
@@ -511,10 +684,7 @@ impl RawJournalStore {
                     CerememoryError::Serialization(format!("msgpack encode session index: {e}"))
                 })?;
                 session_index
-                    .insert(
-                        record_for_txn.session_id.as_str(),
-                        packed_new_entries.as_slice(),
-                    )
+                    .insert(record_session_key.as_str(), packed_new_entries.as_slice())
                     .map_err(storage_err)?;
             }
             txn.commit().map_err(storage_err)?;
@@ -524,16 +694,35 @@ impl RawJournalStore {
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))??;
 
         if previous_had_text && text_payload.is_none() {
-            self.text_index.remove(record_id)?;
+            return Ok(match self.text_index.remove(record_id) {
+                Ok(()) => RawJournalTextIndexStatus::Updated,
+                Err(error) => {
+                    RawJournalTextIndexStatus::degraded(RawJournalTextIndexOperation::Remove, error)
+                }
+            });
         }
-        if let Some((id, session_id, text)) = text_payload {
+        let text_index = if let Some((id, session_id, text)) = text_payload {
             if previous_had_text {
-                self.text_index.update(id, &session_id, &text)?;
+                match self.text_index.update(id, &session_id, &text) {
+                    Ok(()) => RawJournalTextIndexStatus::Updated,
+                    Err(error) => RawJournalTextIndexStatus::degraded(
+                        RawJournalTextIndexOperation::Update,
+                        error,
+                    ),
+                }
             } else {
-                self.text_index.add(id, &session_id, &text)?;
+                match self.text_index.add(id, &session_id, &text) {
+                    Ok(()) => RawJournalTextIndexStatus::Updated,
+                    Err(error) => RawJournalTextIndexStatus::degraded(
+                        RawJournalTextIndexOperation::Add,
+                        error,
+                    ),
+                }
             }
-        }
-        Ok(())
+        } else {
+            RawJournalTextIndexStatus::SkippedNoText
+        };
+        Ok(text_index)
     }
 
     /// Retrieve a raw journal record by id.
@@ -552,12 +741,24 @@ impl RawJournalStore {
 
     /// Delete a raw journal record by id.
     pub async fn delete(&self, id: &Uuid) -> Result<bool, CerememoryError> {
+        Ok(self.delete_with_index_report(id).await?.deleted)
+    }
+
+    /// Delete a raw journal record and report any rebuildable text-index degradation.
+    pub async fn delete_with_index_report(
+        &self,
+        id: &Uuid,
+    ) -> Result<RawJournalDeleteOutcome, CerememoryError> {
         let existing = self.get(id).await?;
         let Some(existing) = existing else {
-            return Ok(false);
+            return Ok(RawJournalDeleteOutcome {
+                deleted: false,
+                text_index: RawJournalTextIndexStatus::SkippedNoText,
+            });
         };
         let existing_had_text = existing.text_content().is_some();
         let existing_session_id = existing.session_id.clone();
+        let existing_session_key = session_index_key(&self.codec, &existing_session_id);
         let id = *id;
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
@@ -572,7 +773,7 @@ impl RawJournalStore {
                     .open_table(RAW_JOURNAL_SESSION_INDEX)
                     .map_err(storage_err)?;
                 let mut entries: Vec<SessionIndexEntry> = match session_index
-                    .get(existing_session_id.as_str())
+                    .get(existing_session_key.as_str())
                     .map_err(storage_err)?
                 {
                     Some(value_guard) => {
@@ -589,7 +790,7 @@ impl RawJournalStore {
                     CerememoryError::Serialization(format!("msgpack encode session index: {e}"))
                 })?;
                 session_index
-                    .insert(existing_session_id.as_str(), packed_entries.as_slice())
+                    .insert(existing_session_key.as_str(), packed_entries.as_slice())
                     .map_err(storage_err)?;
             }
             txn.commit().map_err(storage_err)?;
@@ -598,10 +799,20 @@ impl RawJournalStore {
         .await
         .map_err(|e| CerememoryError::Internal(format!("spawn_blocking panicked: {e}")))??;
 
-        if existing_had_text {
-            self.text_index.remove(id)?;
-        }
-        Ok(true)
+        let text_index = if existing_had_text {
+            match self.text_index.remove(id) {
+                Ok(()) => RawJournalTextIndexStatus::Updated,
+                Err(error) => {
+                    RawJournalTextIndexStatus::degraded(RawJournalTextIndexOperation::Remove, error)
+                }
+            }
+        } else {
+            RawJournalTextIndexStatus::SkippedNoText
+        };
+        Ok(RawJournalDeleteOutcome {
+            deleted: true,
+            text_index,
+        })
     }
 
     /// Return all raw journal records in storage.
@@ -631,14 +842,22 @@ impl RawJournalStore {
 
         let db = self.db.clone();
         let codec = self.codec.clone();
+        let session_key = session_index_key(&codec, &session_id);
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let records_table = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
             let session_table = txn
                 .open_table(RAW_JOURNAL_SESSION_INDEX)
                 .map_err(storage_err)?;
-            let entries = get_session_index_entries_sync(&session_table, &session_id)?;
-            let mut records = get_raw_records_by_entries_sync(&records_table, &entries, &codec)?;
+            let entries = get_session_index_entries_sync(&session_table, &session_key)?;
+            let mut records = if entries.is_empty() && codec.encrypts_new_records() {
+                get_all_raw_records_sync(&records_table, &codec)?
+                    .into_iter()
+                    .filter(|record| record.session_id == session_id)
+                    .collect()
+            } else {
+                get_raw_records_by_entries_sync(&records_table, &entries, &codec)?
+            };
             records.sort_by(|a, b| {
                 a.created_at
                     .cmp(&b.created_at)
@@ -671,19 +890,30 @@ impl RawJournalStore {
 
         let db = self.db.clone();
         let codec = self.codec.clone();
+        let session_key = session_index_key(&codec, &session_id);
         tokio::task::spawn_blocking(move || {
             let txn = db.begin_read().map_err(storage_err)?;
             let records_table = txn.open_table(RAW_JOURNAL_RECORDS).map_err(storage_err)?;
             let session_table = txn
                 .open_table(RAW_JOURNAL_SESSION_INDEX)
                 .map_err(storage_err)?;
-            let entries = get_session_index_entries_sync(&session_table, &session_id)?;
-            let filtered_entries: Vec<SessionIndexEntry> = entries
-                .into_iter()
-                .filter(|entry| entry.created_at >= start && entry.created_at <= end)
-                .collect();
-            let mut records =
-                get_raw_records_by_entries_sync(&records_table, &filtered_entries, &codec)?;
+            let entries = get_session_index_entries_sync(&session_table, &session_key)?;
+            let mut records = if entries.is_empty() && codec.encrypts_new_records() {
+                get_all_raw_records_sync(&records_table, &codec)?
+                    .into_iter()
+                    .filter(|record| {
+                        record.session_id == session_id
+                            && record.created_at >= start
+                            && record.created_at <= end
+                    })
+                    .collect()
+            } else {
+                let filtered_entries: Vec<SessionIndexEntry> = entries
+                    .into_iter()
+                    .filter(|entry| entry.created_at >= start && entry.created_at <= end)
+                    .collect();
+                get_raw_records_by_entries_sync(&records_table, &filtered_entries, &codec)?
+            };
             records.sort_by(|a, b| {
                 a.created_at
                     .cmp(&b.created_at)
@@ -734,6 +964,10 @@ fn raw_text_index_path(path: &Path) -> PathBuf {
         .unwrap_or("raw_journal");
     let dir_name = format!("{stem}_text_index");
     path.with_file_name(dir_name)
+}
+
+fn session_index_key(codec: &StoreRecordCodec, session_id: &str) -> String {
+    codec.protect_index_key(RAW_SESSION_INDEX_SCOPE, session_id)
 }
 
 fn get_raw_record_sync(
@@ -790,6 +1024,63 @@ fn get_raw_records_by_entries_sync(
 mod tests {
     use super::*;
     use cerememory_core::types::{RawSource, RawSpeaker, RawVisibility, SecrecyLevel};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct ToggleFailingTextIndex {
+        inner: RawTextIndex,
+        fail_writes: Arc<AtomicBool>,
+    }
+
+    impl ToggleFailingTextIndex {
+        fn new() -> Result<Self, CerememoryError> {
+            Ok(Self {
+                inner: RawTextIndex::open_in_memory()?,
+                fail_writes: Arc::new(AtomicBool::new(false)),
+            })
+        }
+    }
+
+    impl RawTextIndexBackend for ToggleFailingTextIndex {
+        fn add(&self, id: Uuid, session_id: &str, body: &str) -> Result<(), CerememoryError> {
+            if self.fail_writes.load(Ordering::SeqCst) {
+                return Err(CerememoryError::Storage(
+                    "synthetic raw text index outage".to_string(),
+                ));
+            }
+            self.inner.add(id, session_id, body)
+        }
+
+        fn remove(&self, id: Uuid) -> Result<(), CerememoryError> {
+            if self.fail_writes.load(Ordering::SeqCst) {
+                return Err(CerememoryError::Storage(
+                    "synthetic raw text index outage".to_string(),
+                ));
+            }
+            self.inner.remove(id)
+        }
+
+        fn update(&self, id: Uuid, session_id: &str, body: &str) -> Result<(), CerememoryError> {
+            if self.fail_writes.load(Ordering::SeqCst) {
+                return Err(CerememoryError::Storage(
+                    "synthetic raw text index outage".to_string(),
+                ));
+            }
+            self.inner.update(id, session_id, body)
+        }
+
+        fn rebuild(&self, records: &[RawJournalRecord]) -> Result<(), CerememoryError> {
+            self.inner.rebuild(records)
+        }
+
+        fn search(
+            &self,
+            query: &str,
+            session_id: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<RawTextSearchHit>, CerememoryError> {
+            self.inner.search(query, session_id, limit)
+        }
+    }
 
     fn make_record(session_id: &str, text: &str) -> RawJournalRecord {
         RawJournalRecord::new_text(
@@ -800,6 +1091,16 @@ mod tests {
             SecrecyLevel::Public,
             text,
         )
+    }
+
+    fn session_index_keys(store: &RawJournalStore) -> Vec<String> {
+        let txn = store.db.begin_read().unwrap();
+        let table = txn.open_table(RAW_JOURNAL_SESSION_INDEX).unwrap();
+        table
+            .iter()
+            .unwrap()
+            .map(|entry| entry.unwrap().0.value().to_string())
+            .collect()
     }
 
     #[tokio::test]
@@ -814,6 +1115,43 @@ mod tests {
         assert_eq!(restored.id, id);
         assert_eq!(restored.session_id, "sess-1");
         assert_eq!(restored.text_content(), Some("hello raw journal"));
+    }
+
+    #[tokio::test]
+    async fn append_reports_text_index_degradation_after_durable_commit_and_rebuild_recovers() {
+        let text_index = Arc::new(ToggleFailingTextIndex::new().unwrap());
+        let fail_writes = text_index.fail_writes.clone();
+        let store = RawJournalStore::open_in_memory_with_text_index(text_index).unwrap();
+        fail_writes.store(true, Ordering::SeqCst);
+
+        let record = make_record("sess-1", "survives text index outage");
+        let id = record.id;
+        let outcome = store.append_with_index_report(record).await.unwrap();
+
+        assert_eq!(outcome.record_id, id);
+        assert!(matches!(
+            outcome.text_index,
+            RawJournalTextIndexStatus::Degraded {
+                operation: RawJournalTextIndexOperation::Add,
+                ..
+            }
+        ));
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().text_content(),
+            Some("survives text index outage")
+        );
+        assert!(store
+            .search_text("survives", None, 10)
+            .await
+            .unwrap()
+            .is_empty());
+
+        fail_writes.store(false, Ordering::SeqCst);
+        store.rebuild_text_index().await.unwrap();
+
+        let rebuilt = store.search_text("survives", None, 10).await.unwrap();
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].id, id);
     }
 
     #[tokio::test]
@@ -844,6 +1182,31 @@ mod tests {
         let plaintext_reopen = RawJournalStore::open(&path).unwrap();
         let err = plaintext_reopen.get(&id).await.unwrap_err();
         assert!(matches!(err, CerememoryError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn encrypted_store_protects_session_index_and_disables_persistent_text_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw_journal.redb");
+        let store = RawJournalStore::open_with_codec(
+            &path,
+            StoreRecordCodec::encrypted_from_passphrase("index passphrase").unwrap(),
+        )
+        .unwrap();
+        let id = store
+            .append(make_record("sensitive-session", "encrypted index body"))
+            .await
+            .unwrap();
+
+        let by_session = store.query_session("sensitive-session").await.unwrap();
+        assert_eq!(by_session.len(), 1);
+        assert_eq!(by_session[0].id, id);
+
+        let keys = session_index_keys(&store);
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].starts_with("cmh1:"));
+        assert!(!keys.iter().any(|key| key == "sensitive-session"));
+        assert!(!raw_text_index_path(&path).exists());
     }
 
     #[tokio::test]
@@ -903,6 +1266,9 @@ mod tests {
                 .and_then(RawJournalRecord::text_content),
             Some("legacy raw journal to migrate")
         );
+        let keys = session_index_keys(&encrypted);
+        assert!(keys.iter().all(|key| key.starts_with("cmh1:")));
+        assert!(!keys.iter().any(|key| key == "sess-1"));
 
         let stats = encrypted
             .migrate_plaintext_records_to_encrypted()
@@ -928,6 +1294,23 @@ mod tests {
         let sess_1 = store.query_session("sess-1").await.unwrap();
         assert_eq!(sess_1.len(), 2);
         assert!(sess_1.iter().all(|record| record.session_id == "sess-1"));
+    }
+
+    #[tokio::test]
+    async fn append_same_id_replaces_session_index_entry() {
+        let store = RawJournalStore::open_in_memory().unwrap();
+        let first = make_record("sess-1", "first");
+        let id = first.id;
+        store.append(first).await.unwrap();
+
+        let mut second = make_record("sess-1", "second");
+        second.id = id;
+        store.append(second).await.unwrap();
+
+        let records = store.query_session("sess-1").await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, id);
+        assert_eq!(records[0].text_content(), Some("second"));
     }
 
     #[tokio::test]

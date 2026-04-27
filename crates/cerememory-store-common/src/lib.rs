@@ -12,6 +12,7 @@ use chacha20poly1305::{
 use rand::Rng;
 use redb::ReadableTable;
 use serde::{de::DeserializeOwned, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -20,6 +21,8 @@ const STORE_KEY_SALT: &[u8] = b"cerememory-store-record-v1";
 const STORE_KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
+const INDEX_KEY_PREFIX: &str = "cmh1:";
+const HMAC_BLOCK_LEN: usize = 64;
 
 /// Convert any `Display` error into `CerememoryError::Storage`.
 pub fn storage_err(e: impl std::fmt::Display) -> CerememoryError {
@@ -66,6 +69,49 @@ impl StoreRecordCodec {
     /// Return whether new payloads are encrypted.
     pub fn encrypts_new_records(&self) -> bool {
         self.key.is_some()
+    }
+
+    /// Return a stable lookup key for plaintext-derived secondary indexes.
+    ///
+    /// Plain stores keep the historical plaintext key for compatibility. Encrypted
+    /// stores use a scoped HMAC-SHA256 so exact lookups still work without storing
+    /// session IDs, concept tokens, or other derived plaintext in redb keys.
+    pub fn protect_index_key(&self, scope: &str, plaintext: &str) -> String {
+        let Some(key) = &self.key else {
+            return plaintext.to_string();
+        };
+
+        let mut key_block = [0u8; HMAC_BLOCK_LEN];
+        key_block[..key.len()].copy_from_slice(key);
+
+        let mut ipad = [0x36u8; HMAC_BLOCK_LEN];
+        let mut opad = [0x5cu8; HMAC_BLOCK_LEN];
+        for i in 0..HMAC_BLOCK_LEN {
+            ipad[i] ^= key_block[i];
+            opad[i] ^= key_block[i];
+        }
+
+        let mut inner = Sha256::new();
+        inner.update(ipad);
+        inner.update(b"cerememory-index-key-v1");
+        inner.update((scope.len() as u64).to_be_bytes());
+        inner.update(scope.as_bytes());
+        inner.update((plaintext.len() as u64).to_be_bytes());
+        inner.update(plaintext.as_bytes());
+        let inner_digest = inner.finalize();
+
+        let mut outer = Sha256::new();
+        outer.update(opad);
+        outer.update(inner_digest);
+        let digest = outer.finalize();
+
+        let mut protected = String::with_capacity(INDEX_KEY_PREFIX.len() + digest.len() * 2);
+        protected.push_str(INDEX_KEY_PREFIX);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(protected, "{byte:02x}");
+        }
+        protected
     }
 
     /// Return whether a payload uses Cerememory's encrypted record framing.

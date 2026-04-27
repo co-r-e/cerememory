@@ -10,6 +10,7 @@ Usage:
   scripts/release-check.sh
 
 Requires:
+  rustc 1.95.0
   cargo-audit
   cargo-deny
   cargo-outdated
@@ -37,11 +38,18 @@ require_cargo_subcommand() {
 }
 
 require_cmd cargo
+require_cmd rustc
 require_cmd protoc
 require_cmd git
 require_cargo_subcommand audit
 require_cargo_subcommand deny
 require_cargo_subcommand outdated
+
+rustc_version="$(rustc --version)"
+if [[ "${rustc_version}" != rustc\ 1.95.0\ * ]]; then
+  echo "release checks require rustc 1.95.0; found: ${rustc_version}" >&2
+  exit 1
+fi
 
 cargo fmt --all --check
 cargo check -p cerememory-cli --locked
@@ -55,6 +63,6 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo bench --workspace --no-run --locked
 cargo audit
-cargo deny check advisories licenses sources
+cargo deny check advisories licenses sources bans
 cargo outdated --workspace --root-deps-only
 git diff --check

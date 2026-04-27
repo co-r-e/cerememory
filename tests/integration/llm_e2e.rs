@@ -3,6 +3,7 @@
 //! These optional tests call real LLM APIs. They are not part of the standard
 //! no-external-API release gate and must be explicitly opted into:
 //! - `CEREMEMORY_LLM_E2E=1` — master switch (required)
+//! - At least one provider key is required when `CEREMEMORY_LLM_E2E=1`
 //! - `OPENAI_API_KEY` — enables OpenAI tests
 //! - `ANTHROPIC_API_KEY` — enables Claude tests
 //! - `GEMINI_API_KEY` — enables Gemini tests
@@ -16,11 +17,39 @@ fn llm_e2e_enabled() -> bool {
     std::env::var("CEREMEMORY_LLM_E2E").is_ok_and(|v| v == "1")
 }
 
+fn configured_provider_keys() -> Vec<&'static str> {
+    ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"]
+        .into_iter()
+        .filter(|env_var| std::env::var(env_var).is_ok_and(|v| !v.trim().is_empty()))
+        .collect()
+}
+
 fn provider_key(env_var: &str) -> Option<String> {
     if !llm_e2e_enabled() {
+        eprintln!("Skipping {env_var}: CEREMEMORY_LLM_E2E is not set to 1");
         return None;
     }
-    std::env::var(env_var).ok()
+    let key = std::env::var(env_var).ok().filter(|v| !v.trim().is_empty());
+    if key.is_none() {
+        eprintln!("Skipping provider tests for {env_var}: key is not configured");
+    }
+    key
+}
+
+#[test]
+#[ignore]
+fn llm_e2e_requires_api_key_when_enabled() {
+    if !llm_e2e_enabled() {
+        eprintln!("Skipping: CEREMEMORY_LLM_E2E is not set to 1");
+        return;
+    }
+
+    let configured = configured_provider_keys();
+    assert!(
+        !configured.is_empty(),
+        "CEREMEMORY_LLM_E2E=1 requires at least one provider API key: \
+         OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY"
+    );
 }
 
 // ─── OpenAI ─────────────────────────────────────────────────────────

@@ -422,9 +422,23 @@ async fn evolution_metrics_after_observations() {
         .unwrap();
 
     let metrics = engine.introspect_evolution().await.unwrap();
-    // After a heavy decay tick, the evolution engine should detect patterns
-    // (at minimum, it should have observed the fidelity distribution)
-    assert!(metrics.parameter_adjustments.is_empty() || !metrics.parameter_adjustments.is_empty());
+    assert!(
+        metrics.parameter_adjustments.iter().any(|adjustment| {
+            adjustment.store == StoreType::Episodic
+                && ["decay_exponent", "prune_threshold"].contains(&adjustment.parameter.as_str())
+                && adjustment.current_value < adjustment.original_value
+        }),
+        "heavy episodic decay should lower at least one decay/pruning parameter, got {:?}",
+        metrics.parameter_adjustments
+    );
+    assert!(
+        metrics
+            .detected_patterns
+            .iter()
+            .any(|pattern| pattern.to_lowercase().contains("episodic")),
+        "heavy episodic decay should report an episodic pattern, got {:?}",
+        metrics.detected_patterns
+    );
 }
 
 // ─── LLM Provider: Auto-Embed E2E ───────────────────────────────────

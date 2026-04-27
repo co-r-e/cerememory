@@ -510,6 +510,20 @@ fn bind_address_is_loopback(bind_address: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn ensure_http_api_bind_auth_safe(config: &ServerConfig) -> Result<()> {
+    if config.auth.enabled || bind_address_is_loopback(&config.http.bind_address) {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Refusing to start the HTTP API with auth.enabled=false on non-loopback bind address '{}'. \
+         This would expose an unauthenticated Cerememory API to the network. \
+         Set auth.enabled=true and configure auth.api_keys, or bind http.bind_address to \
+         localhost, 127.0.0.1, or ::1 for local-only use.",
+        config.http.bind_address
+    );
+}
+
 fn load_config(cli: &Cli) -> Result<ServerConfig> {
     let mut config =
         ServerConfig::load(cli.config.as_deref()).context("Failed to load configuration")?;
@@ -751,6 +765,8 @@ async fn main() -> Result<()> {
 
     // Serve uses its own engine lifecycle with background decay + graceful shutdown
     if let Commands::Serve { .. } = &cli.command {
+        ensure_http_api_bind_auth_safe(&config)?;
+
         let engine = Arc::new(create_engine_from_config(&config)?);
         engine.rebuild_coordinator().await?;
         engine.start_background_decay();
@@ -887,9 +903,6 @@ async fn main() -> Result<()> {
             format!("{}:{}", config.http.bind_address, config.http.port)
         };
         println!("HTTP  listening on {addr}");
-        if config.http.bind_address == "0.0.0.0" && !config.auth.enabled {
-            tracing::warn!("Server bound to 0.0.0.0 with authentication disabled — accessible from entire network");
-        }
         let http_cancel = cancel.clone();
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
@@ -1496,6 +1509,42 @@ mod tests {
         );
 
         assert_eq!(err.to_string(), "Storage error: disk is full");
+    }
+
+    #[test]
+    fn http_api_allows_auth_disabled_on_loopback_bind() {
+        for bind_address in ["localhost", "127.0.0.1", "::1"] {
+            let mut config = ServerConfig::default();
+            config.auth.enabled = false;
+            config.http.bind_address = bind_address.to_string();
+
+            ensure_http_api_bind_auth_safe(&config).unwrap();
+        }
+    }
+
+    #[test]
+    fn http_api_allows_non_loopback_bind_when_auth_enabled() {
+        let mut config = ServerConfig::default();
+        config.auth.enabled = true;
+        config.http.bind_address = "0.0.0.0".to_string();
+
+        ensure_http_api_bind_auth_safe(&config).unwrap();
+    }
+
+    #[test]
+    fn http_api_rejects_auth_disabled_on_non_loopback_bind() {
+        for bind_address in ["0.0.0.0", "::", "192.0.2.10"] {
+            let mut config = ServerConfig::default();
+            config.auth.enabled = false;
+            config.http.bind_address = bind_address.to_string();
+
+            let err = ensure_http_api_bind_auth_safe(&config).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("auth.enabled=false"), "{message}");
+            assert!(message.contains(bind_address), "{message}");
+            assert!(message.contains("auth.enabled=true"), "{message}");
+            assert!(message.contains("localhost"), "{message}");
+        }
     }
 
     #[test]

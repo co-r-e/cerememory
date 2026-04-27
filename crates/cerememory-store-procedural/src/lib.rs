@@ -256,6 +256,16 @@ impl Store for ProceduralStore {
             let txn = db.begin_write().map_err(storage_err)?;
             {
                 let mut records = txn.open_table(PROCEDURAL_RECORDS).map_err(storage_err)?;
+                let existing: Option<MemoryRecord> =
+                    match records.get(id.as_bytes().as_slice()).map_err(storage_err)? {
+                        Some(guard) => {
+                            let record: MemoryRecord = codec.decode(guard.value())?;
+                            drop(guard);
+                            Some(record)
+                        }
+                        None => None,
+                    };
+
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -263,6 +273,12 @@ impl Store for ProceduralStore {
                 let mut fidelity_idx = txn
                     .open_table(PROCEDURAL_FIDELITY_INDEX)
                     .map_err(storage_err)?;
+                if let Some(existing) = &existing {
+                    let old_fk = fidelity_key(existing.fidelity.score, &id);
+                    fidelity_idx
+                        .remove(old_fk.as_slice())
+                        .map_err(storage_err)?;
+                }
                 let fk = fidelity_key(record.fidelity.score, &id);
                 fidelity_idx
                     .insert(fk.as_slice(), ())
@@ -994,6 +1010,24 @@ mod tests {
         // Threshold 1.0: should get all 4
         let all = store.records_below_fidelity(1.0).await.unwrap();
         assert_eq!(all.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn store_overwrite_cleans_fidelity_index() {
+        let store = temp_store();
+
+        let mut old = make_record("old procedural");
+        old.fidelity.score = 0.10;
+        let id = old.id;
+        store.store(old).await.unwrap();
+
+        let mut new = make_record("new procedural");
+        new.id = id;
+        new.fidelity.score = 0.20;
+        store.store(new).await.unwrap();
+
+        let below = store.records_below_fidelity(0.5).await.unwrap();
+        assert_eq!(below.iter().filter(|record| record.id == id).count(), 1);
     }
 
     // 13. Limit zero

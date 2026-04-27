@@ -717,6 +717,7 @@ dependencies = [
  "redb",
  "rmp-serde",
  "serde",
+ "sha2",
  "uuid",
  "zeroize",
 ]

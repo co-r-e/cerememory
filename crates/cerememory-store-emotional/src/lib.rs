@@ -349,6 +349,16 @@ impl Store for EmotionalStore {
             let txn = db.begin_write().map_err(storage_err)?;
             {
                 let mut records = txn.open_table(EMOTIONAL_RECORDS).map_err(storage_err)?;
+                let existing: Option<MemoryRecord> =
+                    match records.get(id.as_bytes().as_slice()).map_err(storage_err)? {
+                        Some(guard) => {
+                            let record: MemoryRecord = codec.decode(guard.value())?;
+                            drop(guard);
+                            Some(record)
+                        }
+                        None => None,
+                    };
+
                 records
                     .insert(id.as_bytes().as_slice(), packed.as_slice())
                     .map_err(storage_err)?;
@@ -356,6 +366,12 @@ impl Store for EmotionalStore {
                 let mut fidelity_idx = txn
                     .open_table(EMOTIONAL_FIDELITY_INDEX)
                     .map_err(storage_err)?;
+                if let Some(existing) = &existing {
+                    let old_fk = fidelity_key(existing.fidelity.score, &id);
+                    fidelity_idx
+                        .remove(old_fk.as_slice())
+                        .map_err(storage_err)?;
+                }
                 let fk = fidelity_key(record.fidelity.score, &id);
                 fidelity_idx
                     .insert(fk.as_slice(), ())
@@ -364,6 +380,12 @@ impl Store for EmotionalStore {
                 let mut intensity_idx = txn
                     .open_table(EMOTIONAL_INTENSITY_INDEX)
                     .map_err(storage_err)?;
+                if let Some(existing) = &existing {
+                    let old_ik = intensity_key(existing.emotion.intensity, &id);
+                    intensity_idx
+                        .remove(old_ik.as_slice())
+                        .map_err(storage_err)?;
+                }
                 let ik = intensity_key(record.emotion.intensity, &id);
                 intensity_idx
                     .insert(ik.as_slice(), ())
@@ -1117,6 +1139,32 @@ mod tests {
         // Threshold 1.0: should get all 4
         let all = store.records_below_fidelity(1.0).await.unwrap();
         assert_eq!(all.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn store_overwrite_cleans_fidelity_and_intensity_indexes() {
+        let store = temp_store();
+
+        let mut old = make_record("old emotional");
+        old.fidelity.score = 0.10;
+        old.emotion.intensity = 0.20;
+        let id = old.id;
+        store.store(old).await.unwrap();
+
+        let mut new = make_record("new emotional");
+        new.id = id;
+        new.fidelity.score = 0.20;
+        new.emotion.intensity = 0.30;
+        store.store(new).await.unwrap();
+
+        let below = store.records_below_fidelity(0.5).await.unwrap();
+        assert_eq!(below.iter().filter(|record| record.id == id).count(), 1);
+
+        let by_intensity = store.query_by_intensity_range(0.0, 0.4, 10).await.unwrap();
+        assert_eq!(
+            by_intensity.iter().filter(|record| record.id == id).count(),
+            1
+        );
     }
 
     // 13. Limit zero

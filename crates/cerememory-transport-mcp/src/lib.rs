@@ -3,6 +3,8 @@
 //! Exposes CMP operations as MCP tools over stdio transport, enabling
 //! direct integration with Claude Code and other MCP-compatible clients.
 
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -212,6 +214,112 @@ struct ExportParams {
     output_path: String,
 }
 
+fn resolve_export_output_path(output_path: &str) -> Result<PathBuf, McpError> {
+    let trimmed = output_path.trim();
+    if trimmed.is_empty() {
+        return Err(McpError::invalid_params(
+            "output_path must not be empty".to_string(),
+            None,
+        ));
+    }
+
+    let path = PathBuf::from(trimmed);
+    // Policy: absolute paths are allowed because MCP callers already pass an
+    // explicit output path. Relative paths are resolved from the MCP process
+    // cwd. In both cases, parent traversal is rejected instead of being
+    // normalized away.
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(McpError::invalid_params(
+            "output_path must not contain '..' parent traversal components".to_string(),
+            None,
+        ));
+    }
+
+    let file_name = path.file_name().ok_or_else(|| {
+        McpError::invalid_params(
+            "output_path must include a file name, not only a directory".to_string(),
+            None,
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let canonical_parent = parent.canonicalize().map_err(|e| {
+        McpError::invalid_params(
+            format!("output_path parent directory must exist and be accessible: {e}"),
+            None,
+        )
+    })?;
+    let parent_metadata = std::fs::metadata(&canonical_parent).map_err(|e| {
+        McpError::invalid_params(format!("Invalid output_path parent directory: {e}"), None)
+    })?;
+    if !parent_metadata.is_dir() {
+        return Err(McpError::invalid_params(
+            "output_path parent must be an existing directory".to_string(),
+            None,
+        ));
+    }
+
+    let resolved = canonical_parent.join(file_name);
+    match std::fs::symlink_metadata(&resolved) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(McpError::invalid_params(
+                    "output_path must not be a symlink".to_string(),
+                    None,
+                ));
+            }
+            if metadata.is_dir() {
+                return Err(McpError::invalid_params(
+                    "output_path must point to a new file, not an existing directory".to_string(),
+                    None,
+                ));
+            }
+            Err(McpError::invalid_params(
+                "output_path must point to a new file; refusing to overwrite existing path"
+                    .to_string(),
+                None,
+            ))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(resolved),
+        Err(e) => Err(McpError::invalid_params(
+            format!("Invalid output_path: {e}"),
+            None,
+        )),
+    }
+}
+
+fn write_export_archive(path: &Path, bytes: &[u8]) -> Result<(), McpError> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                McpError::invalid_params(
+                    "output_path must point to a new file; refusing to overwrite existing path"
+                        .to_string(),
+                    None,
+                )
+            } else {
+                McpError::internal_error(format!("Failed to create archive file: {e}"), None)
+            }
+        })?;
+    if let Err(e) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(McpError::internal_error(
+            format!("Failed to write archive file: {e}"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// Convert an EmotionVector to a human-readable label, or None if neutral (intensity == 0).
 fn emotion_label(e: &EmotionVector) -> Option<String> {
     if e.intensity == 0.0 {
@@ -302,10 +410,13 @@ impl CerememoryHttpClient {
             }
         }
 
+        let api_key = api_key.filter(|value| !value.trim().is_empty());
+        validate_http_api_key_upstream(&parsed, api_key.is_some())?;
+
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
-        if let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) {
+        if let Some(api_key) = api_key {
             let mut auth = HeaderValue::from_str(&format!("Bearer {api_key}"))
                 .map_err(|e| CerememoryError::Validation(format!("Invalid API key header: {e}")))?;
             auth.set_sensitive(true);
@@ -403,6 +514,40 @@ impl CerememoryHttpClient {
 
         Err(http_response_err(response).await)
     }
+}
+
+fn validate_http_api_key_upstream(
+    parsed: &reqwest::Url,
+    uses_api_key: bool,
+) -> Result<(), CerememoryError> {
+    if !uses_api_key || parsed.scheme() != "http" || upstream_host_is_loopback(parsed) {
+        return Ok(());
+    }
+
+    let host = parsed.host_str().unwrap_or("(missing host)");
+    Err(CerememoryError::Validation(format!(
+        "Refusing to start MCP proxy with an API key over insecure HTTP upstream '{}'. \
+         Host '{}' is not loopback, so the API key could be sent across the network in plaintext. \
+         Use https:// for remote servers, or point --server-url at http://localhost, \
+         http://127.0.0.1, or http://[::1] for local-only HTTP.",
+        parsed, host
+    )))
+}
+
+fn upstream_host_is_loopback(parsed: &reqwest::Url) -> bool {
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 fn http_transport_err(err: reqwest::Error) -> CerememoryError {
@@ -1546,22 +1691,17 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Export all memory records as a CMA archive file to an explicit output path. Optionally encrypted with ChaCha20-Poly1305. Returns metadata and archive size."
+        description = "Export all curated memory records and raw journal records as a CMA backup archive file to an explicit new output path. Refuses to overwrite existing files. Optionally encrypted with ChaCha20-Poly1305. Returns metadata and archive size."
     )]
     async fn export(&self, params: Parameters<ExportParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let format = parse_export_format(p.format)?;
-        if p.output_path.trim().is_empty() {
-            return Err(McpError::invalid_params(
-                "output_path must not be empty".to_string(),
-                None,
-            ));
-        }
+        let resolved = resolve_export_output_path(&p.output_path)?;
         let req = ExportRequest {
             header: None,
             format,
             stores: None,
-            include_raw_journal: false,
+            include_raw_journal: true,
             encrypt: p.encrypt.unwrap_or(false),
             encryption_key: p.encryption_key,
         };
@@ -1573,26 +1713,7 @@ impl CerememoryMcpServer {
             .map_err(engine_err)?;
         let bytes = resp.archive_data.clone();
 
-        let path = std::path::PathBuf::from(&p.output_path);
-        // Resolve to an absolute path and validate it is not a symlink or
-        // pointing to sensitive system directories.
-        let canonical_parent = path
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .canonicalize()
-            .map_err(|e| {
-                McpError::invalid_params(format!("Invalid output_path directory: {e}"), None)
-            })?;
-        if path.is_symlink() {
-            return Err(McpError::invalid_params(
-                "output_path must not be a symlink".to_string(),
-                None,
-            ));
-        }
-        let resolved = canonical_parent.join(path.file_name().unwrap_or_default());
-        std::fs::write(&resolved, &bytes).map_err(|e| {
-            McpError::internal_error(format!("Failed to write archive file: {e}"), None)
-        })?;
+        write_export_archive(&resolved, &bytes)?;
 
         let summary = serde_json::to_string_pretty(&resp.metadata).map_err(internal_err)?;
         ok_text(format!(
@@ -1626,7 +1747,7 @@ impl ServerHandler for CerememoryMcpServer {
                  - forget: Permanently delete memories by UUID (requires confirm=true)\n\
                  - dream_tick: Summarize raw journal entries into episodic summaries\n\
                  - consolidate: Migrate mature episodic memories to semantic store\n\
-                 - export: Export all memories to a CMA archive file (requires output_path)\n\
+                 - export: Export all curated memories and raw journal records to a new CMA archive file (requires output_path)\n\
                  - stats: View system statistics and store counts",
             )
     }
@@ -1663,6 +1784,15 @@ async fn serve_server_stdio(server: CerememoryMcpServer) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use rmcp::{model::CallToolRequestParams, ServiceExt};
+
+    fn unique_test_dir(test_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "cerememory-mcp-{test_name}-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&dir).expect("create temp test dir");
+        dir
+    }
 
     #[test]
     fn server_creates_successfully() {
@@ -1717,6 +1847,45 @@ mod tests {
             Err(err) => err,
         };
         assert!(matches!(err, CerememoryError::Validation(_)));
+    }
+
+    #[test]
+    fn http_proxy_allows_api_key_on_loopback_http() {
+        for url in [
+            "http://localhost:8420",
+            "http://127.0.0.1:8420",
+            "http://[::1]:8420",
+        ] {
+            CerememoryMcpServer::from_http(url, Some("secret".to_string()), None).unwrap();
+        }
+    }
+
+    #[test]
+    fn http_proxy_allows_api_key_on_https_upstream() {
+        CerememoryMcpServer::from_http(
+            "https://cerememory.example.test",
+            Some("secret".to_string()),
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn http_proxy_rejects_api_key_on_non_loopback_http() {
+        for url in ["http://192.0.2.10:8420", "http://example.com:8420"] {
+            let err = match CerememoryMcpServer::from_http(url, Some("secret".to_string()), None) {
+                Ok(_) => panic!("expected insecure upstream error for {url}"),
+                Err(err) => err,
+            };
+
+            let CerememoryError::Validation(message) = err else {
+                panic!("expected validation error");
+            };
+            assert!(message.contains("insecure HTTP upstream"), "{message}");
+            assert!(message.contains(url), "{message}");
+            assert!(message.contains("https://"), "{message}");
+            assert!(message.contains("localhost"), "{message}");
+        }
     }
 
     #[test]
@@ -1787,6 +1956,94 @@ mod tests {
             parse_export_format(Some("jsonl".to_string())).unwrap(),
             "cma".to_string()
         );
+    }
+
+    #[test]
+    fn resolve_export_output_path_accepts_absolute_new_file() {
+        let dir = unique_test_dir("absolute-new-file");
+        let path = dir.join("backup.cma");
+        let resolved = resolve_export_output_path(&path.to_string_lossy()).unwrap();
+
+        let canonical_dir = dir.canonicalize().unwrap();
+        assert_eq!(resolved, canonical_dir.join("backup.cma"));
+        assert_eq!(resolved.parent().unwrap(), canonical_dir);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_export_output_path_rejects_parent_traversal() {
+        let dir = unique_test_dir("parent-traversal");
+        let path = dir.join("nested").join("..").join("backup.cma");
+
+        let err = resolve_export_output_path(&path.to_string_lossy()).unwrap_err();
+
+        assert!(err.message.contains("parent traversal"), "{}", err.message);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_export_output_path_requires_existing_parent_directory() {
+        let dir = unique_test_dir("missing-parent");
+        let path = dir.join("missing").join("backup.cma");
+
+        let err = resolve_export_output_path(&path.to_string_lossy()).unwrap_err();
+
+        assert!(
+            err.message.contains("parent directory must exist"),
+            "{}",
+            err.message
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_export_output_path_rejects_existing_file() {
+        let dir = unique_test_dir("existing-file");
+        let path = dir.join("backup.cma");
+        std::fs::write(&path, b"keep me").unwrap();
+
+        let err = resolve_export_output_path(&path.to_string_lossy()).unwrap_err();
+
+        assert!(
+            err.message.contains("refusing to overwrite"),
+            "{}",
+            err.message
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_export_archive_uses_create_new() {
+        let dir = unique_test_dir("create-new");
+        let path = dir.join("backup.cma");
+        write_export_archive(&path, b"first").unwrap();
+
+        let err = write_export_archive(&path, b"second").unwrap_err();
+
+        assert!(
+            err.message.contains("refusing to overwrite"),
+            "{}",
+            err.message
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_export_output_path_rejects_symlink() {
+        let dir = unique_test_dir("symlink");
+        let target = dir.join("target.cma");
+        let link = dir.join("backup.cma");
+        std::fs::write(&target, b"target").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = resolve_export_output_path(&link.to_string_lossy()).unwrap_err();
+
+        assert!(err.message.contains("symlink"), "{}", err.message);
+        assert_eq!(std::fs::read(&target).unwrap(), b"target");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1987,5 +2244,65 @@ mod tests {
             .expect("server task")
             .expect("server start");
         running.cancel().await.expect("server cancel");
+    }
+
+    #[tokio::test]
+    async fn export_tool_includes_raw_journal_records_in_backup_archive() {
+        let dir = unique_test_dir("raw-journal-export");
+        let output_path = dir.join("backup.cma");
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let server = CerememoryMcpServer::new(engine);
+
+        server
+            .store(Parameters(StoreParams {
+                content: "curated backup memory".to_string(),
+                store: Some("semantic".to_string()),
+                emotion: None,
+                meta_json: None,
+            }))
+            .await
+            .expect("store curated memory");
+        server
+            .store_raw(Parameters(StoreRawParams {
+                content: "verbatim raw journal backup payload".to_string(),
+                session_id: "sess-mcp-export".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                topic_id: None,
+                source: Some("conversation".to_string()),
+                speaker: Some("user".to_string()),
+                visibility: Some("normal".to_string()),
+                secrecy_level: Some("public".to_string()),
+                meta_json: None,
+            }))
+            .await
+            .expect("store raw journal");
+
+        server
+            .export(Parameters(ExportParams {
+                format: None,
+                encrypt: None,
+                encryption_key: None,
+                output_path: output_path.to_string_lossy().into_owned(),
+            }))
+            .await
+            .expect("export backup archive");
+
+        let archive = std::fs::read(&output_path).expect("read export archive");
+        let target = CerememoryEngine::in_memory().unwrap();
+        let imported = target
+            .lifecycle_import(ImportRequest {
+                header: None,
+                archive_id: "mcp-export-raw-journal-test".to_string(),
+                strategy: ImportStrategy::Merge,
+                conflict_resolution: ConflictResolution::KeepImported,
+                decryption_key: None,
+                archive_data: Some(archive),
+            })
+            .await
+            .expect("import exported backup archive");
+
+        assert_eq!(imported, 2);
+        assert_eq!(target.raw_journal_count().await.unwrap(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

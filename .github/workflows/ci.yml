@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
 
@@ -45,8 +45,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-rust-1.95.0-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-rust-1.95.0-
             ${{ runner.os }}-cargo-
 
       - name: Install protoc (Ubuntu)
@@ -100,7 +101,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy
 
@@ -112,9 +113,10 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ matrix.feature_set }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-rust-1.95.0-${{ matrix.feature_set }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.feature_set }}-
+            ${{ runner.os }}-cargo-rust-1.95.0-${{ matrix.feature_set }}-
+            ${{ runner.os }}-cargo-rust-1.95.0-
             ${{ runner.os }}-cargo-
 
       - name: Install protoc
@@ -126,16 +128,14 @@ jobs:
       - name: Check selected feature set
         run: ${{ matrix.command }}
 
-  llm-e2e:
-    name: LLM E2E tests
-    needs: [check, feature-matrix]
-    if: github.event_name == 'workflow_dispatch' && inputs.run_llm_e2e == true
+  msrv:
+    name: MSRV (Rust 1.95)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Cache cargo registry & build
         uses: actions/cache@v5
@@ -145,8 +145,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-msrv-1.95.0-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-msrv-1.95.0-
             ${{ runner.os }}-cargo-
 
       - name: Install protoc
@@ -154,6 +155,50 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
           protoc --version
+
+      - name: Check workspace with MSRV
+        run: cargo check --workspace --all-targets --locked
+
+  llm-e2e:
+    name: LLM E2E tests
+    needs: [check, feature-matrix, msrv]
+    if: github.event_name == 'workflow_dispatch' && inputs.run_llm_e2e == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-rust-1.95.0-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-rust-1.95.0-
+            ${{ runner.os }}-cargo-
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Require at least one provider secret
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "${OPENAI_API_KEY}${ANTHROPIC_API_KEY}${GEMINI_API_KEY}" ]; then
+            echo "::error::LLM E2E was requested, but no provider API secret is configured. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY."
+            exit 1
+          fi
 
       - name: Run LLM E2E tests
         env:

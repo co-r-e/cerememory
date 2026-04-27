@@ -35,7 +35,7 @@ license = "MIT"
 repository = "https://github.com/co-r-e/cerememory"
 homepage = "https://github.com/co-r-e/cerememory"
 description = "A living memory database for the age of AI"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [workspace.dependencies]
 # Core

@@ -14,6 +14,7 @@
 //! | `semantic_reverse_edges` | `target ++ source ++ type_byte` (33) | `()` (empty) |
 //! | `semantic_concepts` | concept `&str` | MessagePack `Vec<Uuid>` |
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,6 +37,7 @@ const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("semantic_node
 const EDGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("semantic_edges");
 const REVERSE_EDGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("semantic_reverse_edges");
 const CONCEPTS: TableDefinition<&str, &[u8]> = TableDefinition::new("semantic_concepts");
+const SEMANTIC_CONCEPT_INDEX_SCOPE: &str = "semantic-concept";
 
 // ---------------------------------------------------------------------------
 // Edge key helpers
@@ -176,6 +178,7 @@ impl SemanticStore {
             let mut stats = StoreRecordMigrationStats::empty();
             let mut node_rewrites: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
             let mut edge_rewrites: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            let mut records_for_concepts = Vec::new();
 
             {
                 let nodes = txn
@@ -189,6 +192,7 @@ impl SemanticStore {
                         entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
                     let payload = value_guard.value();
                     let record: MemoryRecord = codec.decode(payload)?;
+                    records_for_concepts.push(record.clone());
                     stats.records_total += 1;
 
                     if StoreRecordCodec::is_encrypted_payload(payload) {
@@ -223,6 +227,21 @@ impl SemanticStore {
                 }
             }
 
+            let mut rebuilt_concepts: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
+            for record in &records_for_concepts {
+                if let Some(ref summary) = record.content.summary {
+                    for word in summary.split_whitespace() {
+                        let concept = word.to_lowercase();
+                        let ids = rebuilt_concepts
+                            .entry(concept_index_key(&codec, &concept))
+                            .or_default();
+                        if !ids.contains(&record.id) {
+                            ids.push(record.id);
+                        }
+                    }
+                }
+            }
+
             if !node_rewrites.is_empty() {
                 let mut nodes = txn
                     .open_table(NODES)
@@ -241,6 +260,33 @@ impl SemanticStore {
                 for (key, payload) in edge_rewrites {
                     edges
                         .insert(key.as_slice(), payload.as_slice())
+                        .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                }
+            }
+
+            {
+                let mut concepts = txn
+                    .open_table(CONCEPTS)
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                let keys: Vec<String> = concepts
+                    .iter()
+                    .map_err(|e| CerememoryError::Storage(e.to_string()))?
+                    .map(|entry| {
+                        entry
+                            .map(|(key, _)| key.value().to_string())
+                            .map_err(|e| CerememoryError::Storage(e.to_string()))
+                    })
+                    .collect::<Result<_, _>>()?;
+                for key in keys {
+                    concepts
+                        .remove(key.as_str())
+                        .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                }
+                for (key, ids) in rebuilt_concepts {
+                    let encoded = rmp_serde::to_vec(&ids)
+                        .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                    concepts
+                        .insert(key.as_str(), encoded.as_slice())
                         .map_err(|e| CerememoryError::Storage(e.to_string()))?;
                 }
             }
@@ -519,13 +565,15 @@ impl SemanticStore {
     /// Index a record under a concept string.
     fn index_concepts_for_record(
         concepts_table: &mut redb::Table<&str, &[u8]>,
+        codec: &StoreRecordCodec,
         record: &MemoryRecord,
     ) -> Result<(), CerememoryError> {
         if let Some(ref summary) = record.content.summary {
             let words: Vec<&str> = summary.split_whitespace().collect();
             for word in words {
                 let concept = word.to_lowercase();
-                let mut ids: Vec<Uuid> = match concepts_table.get(concept.as_str()) {
+                let concept_key = concept_index_key(codec, &concept);
+                let mut ids: Vec<Uuid> = match concepts_table.get(concept_key.as_str()) {
                     Ok(Some(val)) => rmp_serde::from_slice(val.value())
                         .map_err(|e| CerememoryError::Serialization(e.to_string()))?,
                     Ok(None) => Vec::new(),
@@ -536,7 +584,7 @@ impl SemanticStore {
                     let encoded = rmp_serde::to_vec(&ids)
                         .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
                     concepts_table
-                        .insert(concept.as_str(), encoded.as_slice())
+                        .insert(concept_key.as_str(), encoded.as_slice())
                         .map_err(|e| CerememoryError::Storage(e.to_string()))?;
                 }
             }
@@ -547,15 +595,17 @@ impl SemanticStore {
     /// Remove a record's ID from all concept entries (best-effort).
     fn deindex_concepts_for_record(
         concepts_table: &mut redb::Table<&str, &[u8]>,
+        codec: &StoreRecordCodec,
         record: &MemoryRecord,
     ) -> Result<(), CerememoryError> {
         if let Some(ref summary) = record.content.summary {
             let words: Vec<&str> = summary.split_whitespace().collect();
             for word in words {
                 let concept = word.to_lowercase();
+                let concept_key = concept_index_key(codec, &concept);
                 // Read into owned data, then drop the guard before mutating.
                 let existing: Option<Vec<Uuid>> = {
-                    match concepts_table.get(concept.as_str()) {
+                    match concepts_table.get(concept_key.as_str()) {
                         Ok(Some(val)) => {
                             let ids: Vec<Uuid> = rmp_serde::from_slice(val.value())
                                 .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
@@ -569,13 +619,13 @@ impl SemanticStore {
                     ids.retain(|uid| uid != &record.id);
                     if ids.is_empty() {
                         concepts_table
-                            .remove(concept.as_str())
+                            .remove(concept_key.as_str())
                             .map_err(|e| CerememoryError::Storage(e.to_string()))?;
                     } else {
                         let encoded = rmp_serde::to_vec(&ids)
                             .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
                         concepts_table
-                            .insert(concept.as_str(), encoded.as_slice())
+                            .insert(concept_key.as_str(), encoded.as_slice())
                             .map_err(|e| CerememoryError::Storage(e.to_string()))?;
                     }
                 }
@@ -587,7 +637,9 @@ impl SemanticStore {
     /// Look up record IDs indexed under a concept string.
     pub async fn get_concept_ids(&self, concept: &str) -> Result<Vec<Uuid>, CerememoryError> {
         let db = self.db.clone();
+        let codec = self.codec.clone();
         let concept = concept.to_lowercase();
+        let concept_key = concept_index_key(&codec, &concept);
         tokio::task::spawn_blocking(move || {
             let txn = db
                 .begin_read()
@@ -595,10 +647,38 @@ impl SemanticStore {
             let concepts = txn
                 .open_table(CONCEPTS)
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-            match concepts.get(concept.as_str()) {
+            match concepts.get(concept_key.as_str()) {
                 Ok(Some(val)) => {
                     let ids: Vec<Uuid> = rmp_serde::from_slice(val.value())
                         .map_err(|e| CerememoryError::Serialization(e.to_string()))?;
+                    Ok(ids)
+                }
+                Ok(None) if codec.encrypts_new_records() => {
+                    let nodes = txn
+                        .open_table(NODES)
+                        .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                    let mut ids = Vec::new();
+                    for entry in nodes
+                        .iter()
+                        .map_err(|e| CerememoryError::Storage(e.to_string()))?
+                    {
+                        let (_, value_guard) =
+                            entry.map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                        let record: MemoryRecord = codec.decode(value_guard.value())?;
+                        let matches_concept = record
+                            .content
+                            .summary
+                            .as_deref()
+                            .map(|summary| {
+                                summary
+                                    .split_whitespace()
+                                    .any(|word| word.to_lowercase() == concept)
+                            })
+                            .unwrap_or(false);
+                        if matches_concept {
+                            ids.push(record.id);
+                        }
+                    }
                     Ok(ids)
                 }
                 Ok(None) => Ok(Vec::new()),
@@ -608,6 +688,10 @@ impl SemanticStore {
         .await
         .map_err(|e| CerememoryError::Internal(e.to_string()))?
     }
+}
+
+fn concept_index_key(codec: &StoreRecordCodec, concept: &str) -> String {
+    codec.protect_index_key(SEMANTIC_CONCEPT_INDEX_SCOPE, concept)
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +713,16 @@ impl Store for SemanticStore {
                 let mut nodes = txn
                     .open_table(NODES)
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
+                let existing: Option<MemoryRecord> = match nodes.get(id.as_bytes().as_slice()) {
+                    Ok(Some(val)) => {
+                        let rec: MemoryRecord = codec.decode(val.value())?;
+                        drop(val);
+                        Some(rec)
+                    }
+                    Ok(None) => None,
+                    Err(e) => return Err(CerememoryError::Storage(e.to_string())),
+                };
+
                 nodes
                     .insert(id.as_bytes().as_slice(), bytes.as_slice())
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
@@ -636,7 +730,10 @@ impl Store for SemanticStore {
                 let mut concepts = txn
                     .open_table(CONCEPTS)
                     .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                SemanticStore::index_concepts_for_record(&mut concepts, &record)?;
+                if let Some(existing) = &existing {
+                    SemanticStore::deindex_concepts_for_record(&mut concepts, &codec, existing)?;
+                }
+                SemanticStore::index_concepts_for_record(&mut concepts, &codec, &record)?;
             }
             txn.commit()
                 .map_err(|e| CerememoryError::Storage(e.to_string()))?;
@@ -701,7 +798,7 @@ impl Store for SemanticStore {
                     let mut concepts = txn
                         .open_table(CONCEPTS)
                         .map_err(|e| CerememoryError::Storage(e.to_string()))?;
-                    SemanticStore::deindex_concepts_for_record(&mut concepts, rec)?;
+                    SemanticStore::deindex_concepts_for_record(&mut concepts, &codec, rec)?;
                 }
 
                 // Clean up edges: forward (source=id) and reverse (target=id)
@@ -977,9 +1074,13 @@ impl Store for SemanticStore {
                     if old_summary.is_some() {
                         let mut old_rec = rec.clone();
                         old_rec.content.summary = old_summary;
-                        SemanticStore::deindex_concepts_for_record(&mut concepts, &old_rec)?;
+                        SemanticStore::deindex_concepts_for_record(
+                            &mut concepts,
+                            &codec,
+                            &old_rec,
+                        )?;
                     }
-                    SemanticStore::index_concepts_for_record(&mut concepts, &rec)?;
+                    SemanticStore::index_concepts_for_record(&mut concepts, &codec, &rec)?;
                 }
 
                 let bytes = codec.encode(&rec)?;
@@ -1096,6 +1197,16 @@ mod tests {
         rec
     }
 
+    fn concept_index_keys(store: &SemanticStore) -> Vec<String> {
+        let txn = store.db.begin_read().unwrap();
+        let table = txn.open_table(CONCEPTS).unwrap();
+        table
+            .iter()
+            .unwrap()
+            .map(|entry| entry.unwrap().0.value().to_string())
+            .collect()
+    }
+
     fn temp_store() -> SemanticStore {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.redb");
@@ -1157,11 +1268,17 @@ mod tests {
         let db_path = tmp_dir.path().join("semantic.redb");
         let plaintext = SemanticStore::open(&db_path).unwrap();
         let id1 = plaintext
-            .store(make_record("Legacy semantic one"))
+            .store(make_record_with_summary(
+                "Legacy semantic one",
+                "Legacy semantic one",
+            ))
             .await
             .unwrap();
         let id2 = plaintext
-            .store(make_record("Legacy semantic two"))
+            .store(make_record_with_summary(
+                "Legacy semantic two",
+                "Legacy semantic two",
+            ))
             .await
             .unwrap();
         plaintext
@@ -1187,6 +1304,10 @@ mod tests {
             Some("Legacy semantic one")
         );
         assert_eq!(encrypted.get_neighbors(id1).await.unwrap().len(), 1);
+        assert_eq!(encrypted.get_concept_ids("legacy").await.unwrap().len(), 2);
+        let keys = concept_index_keys(&encrypted);
+        assert!(keys.iter().all(|key| key.starts_with("cmh1:")));
+        assert!(!keys.iter().any(|key| key == "legacy"));
 
         let stats = encrypted
             .migrate_plaintext_records_to_encrypted()
@@ -1200,6 +1321,28 @@ mod tests {
         let plaintext_reopen = SemanticStore::open(&db_path).unwrap();
         let err = plaintext_reopen.get(&id1).await.unwrap_err();
         assert!(matches!(err, CerememoryError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn encrypted_store_protects_concept_index_keys() {
+        let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = tmp_dir.path().join("semantic.redb");
+        let store = SemanticStore::open_with_codec(
+            &db_path,
+            StoreRecordCodec::encrypted_from_passphrase("concept passphrase").unwrap(),
+        )
+        .unwrap();
+        let id = store
+            .store(make_record_with_summary("body", "Sensitive Concept"))
+            .await
+            .unwrap();
+
+        assert_eq!(store.get_concept_ids("sensitive").await.unwrap(), vec![id]);
+        let keys = concept_index_keys(&store);
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|key| key.starts_with("cmh1:")));
+        assert!(!keys.iter().any(|key| key == "sensitive"));
+        assert!(!keys.iter().any(|key| key == "concept"));
     }
 
     #[tokio::test]
@@ -1529,5 +1672,24 @@ mod tests {
         store.delete(&id).await.unwrap();
 
         assert_eq!(store.get_concept_ids("quantum").await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn concept_index_cleaned_on_store_overwrite() {
+        let store = temp_store();
+
+        let old = make_record_with_summary("data", "Quantum legacy");
+        let id = old.id;
+        store.store(old).await.unwrap();
+
+        let mut new = make_record_with_summary("data", "Neural current");
+        new.id = id;
+        store.store(new).await.unwrap();
+
+        let old_ids = store.get_concept_ids("quantum").await.unwrap();
+        assert!(!old_ids.contains(&id));
+
+        let new_ids = store.get_concept_ids("neural").await.unwrap();
+        assert_eq!(new_ids, vec![id]);
     }
 }

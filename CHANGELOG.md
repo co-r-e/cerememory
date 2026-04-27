@@ -197,7 +197,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - If you scrape `/metrics`, set `http.metrics_enabled = true` and provide auth when `auth.enabled = true`.
 - If you expose gRPC outside loopback or enable auth, configure `grpc.tls_cert_path` and `grpc.tls_key_path`.
 - If you relied on SDK retries for writes, set `retryMutatingRequests` / `retry_mutating_requests` explicitly.
-- See [docs/migration-0.2.0.md](/Users/okuwakimasato/Projects/dev_cerememory/cerememory/docs/migration-0.2.0.md).
+- See [docs/migration-0.2.0.md](docs/migration-0.2.0.md).
 
 ## [0.1.0] - 2026-03-16
 
