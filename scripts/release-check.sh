@@ -44,11 +44,13 @@ require_cargo_subcommand deny
 require_cargo_subcommand outdated
 
 cargo fmt --all --check
+cargo check -p cerememory-cli --locked
 cargo check -p cerememory-cli --no-default-features --locked
 cargo check -p cerememory-cli --no-default-features --features llm-openai --locked
 cargo check -p cerememory-cli --no-default-features --features llm-claude --locked
 cargo check -p cerememory-cli --no-default-features --features llm-gemini --locked
 cargo check -p cerememory-cli --all-features --locked
+cargo clippy -p cerememory-cli --all-targets --all-features --locked -- -D warnings
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo bench --workspace --no-run --locked

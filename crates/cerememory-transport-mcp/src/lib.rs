@@ -33,7 +33,7 @@ struct StoreParams {
     store: Option<String>,
     /// Emotional valence label. Options: joy, sadness, anger, fear, surprise, disgust, trust, anticipation (aliases: happy, sad, angry, anticipatory). Affects emotional memory routing.
     emotion: Option<String>,
-    /// Optional structured MetaMemory JSON describing intent, rationale, evidence, and decision context.
+    /// Optional structured MetaMemory JSON supplied by the caller. Prefer providing this when the agent knows intent, rationale, tags, evidence, or decision context; Cerememory does not call external LLM APIs by default.
     meta_json: Option<String>,
 }
 
@@ -45,7 +45,7 @@ struct UpdateParams {
     content: Option<String>,
     /// New emotion label. Options: joy, sadness, anger, fear, surprise, disgust, trust, anticipation.
     emotion: Option<String>,
-    /// Optional structured MetaMemory JSON to replace this record's meta-memory payload.
+    /// Optional structured MetaMemory JSON supplied by the caller to replace this record's meta-memory payload. Cerememory does not infer replacement metadata with external LLM APIs by default.
     meta_json: Option<String>,
 }
 
@@ -67,19 +67,19 @@ struct StoreRawParams {
     visibility: Option<String>,
     /// Secrecy level: public, sensitive, secret.
     secrecy_level: Option<String>,
-    /// Optional structured MetaMemory JSON describing why this raw record is being preserved.
+    /// Optional structured MetaMemory JSON supplied by the caller describing why this raw record is being preserved.
     meta_json: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct BatchStoreParams {
-    /// JSON array of records. Each record: {"content": "...", "store": "episodic" (optional), "emotion": "joy" (optional)}. Example: [{"content": "Meeting notes", "store": "episodic"}]
+    /// JSON array of records. Each record: {"content": "...", "store": "episodic" (optional), "emotion": "joy" (optional), "meta_json": "{...}" (optional)}. Agents should include meta_json when they know why the memory matters.
     records_json: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct BatchStoreRawParams {
-    /// JSON array of raw records. Each record: {"content":"...","session_id":"...","source":"conversation","speaker":"user"}.
+    /// JSON array of raw records. Each record: {"content":"...","session_id":"...","source":"conversation","speaker":"user","meta_json":"{...}" (optional)}.
     records_json: String,
 }
 
@@ -1019,7 +1019,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Store a new memory record. Returns JSON: {record_id, store, initial_fidelity, associations_created}."
+        description = "Store a new memory record. Standard mode uses no external LLM API; provide meta_json when the caller knows intent, rationale, tags, evidence, or decision context. Returns JSON: {record_id, store, initial_fidelity, associations_created}."
     )]
     async fn store(&self, params: Parameters<StoreParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -1033,7 +1033,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Preserve a verbatim text item in the raw journal. Use for conversation turns, tool output, or externalized scratchpad entries that should remain available for forensic recall."
+        description = "Preserve a verbatim text item in the raw journal. Standard mode uses no external LLM API; provide caller-supplied meta_json when the caller knows why it is being preserved. Use for conversation turns, tool output, or externalized scratchpad entries that should remain available for forensic recall."
     )]
     async fn store_raw(
         &self,
@@ -1069,7 +1069,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Update an existing memory record's content, emotion, or meta-memory. Preserves UUID, associations, and fidelity history. Returns no content on success."
+        description = "Update an existing memory record's content, emotion, or caller-supplied meta-memory. Standard mode uses no external LLM API and does not infer replacement metadata. Preserves UUID, associations, and fidelity history. Returns no content on success."
     )]
     async fn update(&self, params: Parameters<UpdateParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -1109,7 +1109,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Store multiple memory records in a batch with automatic cross-record association. Accepts a JSON array string. Returns JSON: {results (array of {record_id, store, initial_fidelity, associations_created}), associations_inferred}."
+        description = "Store multiple memory records in a batch with automatic cross-record association. Standard mode uses no external LLM API; each record may include caller-supplied meta_json. Accepts a JSON array string. Returns JSON: {results (array of {record_id, store, initial_fidelity, associations_created}), associations_inferred}."
     )]
     async fn batch_store(
         &self,
@@ -1152,7 +1152,7 @@ impl CerememoryMcpServer {
     }
 
     #[tool(
-        description = "Preserve multiple raw journal entries in one batch. Accepts a JSON array string. Returns JSON: {results (array of {record_id, session_id, visibility, secrecy_level})}."
+        description = "Preserve multiple raw journal entries in one batch. Standard mode uses no external LLM API; each raw record may include caller-supplied meta_json explaining why it is preserved. Accepts a JSON array string. Returns JSON: {results (array of {record_id, session_id, visibility, secrecy_level})}."
     )]
     async fn batch_store_raw(
         &self,
@@ -1611,15 +1611,16 @@ impl ServerHandler for CerememoryMcpServer {
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("cerememory", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Cerememory is a living memory database. Available tools:\n\
-                  - store: Save a new memory\n\
-                 - store_raw: Preserve a verbatim raw journal entry\n\
-                  - update: Edit an existing memory by UUID\n\
-                  - batch_store: Save multiple memories at once\n\
+                "Cerememory is a living memory database. Standard MCP mode uses no external LLM API. When storing or updating records, callers such as Claude Code should provide meta_json when they know intent, rationale, tags, evidence, or decision context.\n\
+                 Available tools:\n\
+                 - store: Save a new memory with optional caller-supplied meta_json\n\
+                 - store_raw: Preserve a verbatim raw journal entry with optional caller-supplied meta_json\n\
+                 - update: Edit an existing memory by UUID, including caller-supplied meta_json\n\
+                 - batch_store: Save multiple memories at once\n\
                  - batch_store_raw: Preserve multiple raw journal entries at once\n\
                  - recall: Search memories by query, or list recent memories (omit query)\n\
                  - recall_raw: Explicit forensic recall over preserved raw journal entries\n\
-                - timeline: Browse memories by time period\n\
+                 - timeline: Browse memories by time period\n\
                  - associate: Find connected memories via spreading activation\n\
                  - inspect: View full details of a memory by UUID\n\
                  - forget: Permanently delete memories by UUID (requires confirm=true)\n\
@@ -1686,6 +1687,21 @@ mod tests {
             McpBackend::Remote(client) => assert_eq!(client.base_url, "http://127.0.0.1:8420"),
             McpBackend::Local(_) => panic!("expected remote backend"),
         }
+    }
+
+    #[test]
+    fn server_info_documents_no_external_api_metadata_contract() {
+        let engine = Arc::new(CerememoryEngine::in_memory().unwrap());
+        let server = CerememoryMcpServer::new(engine);
+        let info = server.get_info();
+        let instructions = info.instructions.as_deref().unwrap_or_default();
+
+        assert!(
+            instructions.contains("Standard MCP mode uses no external LLM API"),
+            "{instructions}"
+        );
+        assert!(instructions.contains("provide meta_json"), "{instructions}");
+        assert!(instructions.contains("Claude Code"), "{instructions}");
     }
 
     #[test]

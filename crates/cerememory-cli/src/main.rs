@@ -96,7 +96,7 @@ enum Commands {
         #[arg(long)]
         embedding: Option<String>,
 
-        /// Structured MetaMemory JSON describing intent, rationale, evidence, and decision context.
+        /// Caller-supplied MetaMemory JSON describing intent, rationale, evidence, and decision context.
         #[arg(long)]
         meta_json: Option<String>,
     },
@@ -130,7 +130,7 @@ enum Commands {
         #[arg(long, default_value = "public")]
         secrecy_level: String,
 
-        /// Structured MetaMemory JSON describing why this raw record is being preserved.
+        /// Caller-supplied MetaMemory JSON describing why this raw record is being preserved.
         #[arg(long)]
         meta_json: Option<String>,
     },
@@ -598,6 +598,8 @@ fn require_llm_api_key(config: &ServerConfig) -> Result<String> {
     config
         .llm
         .api_key_exposed()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| {
             anyhow::anyhow!("LLM provider '{}' requires an API key", config.llm.provider)

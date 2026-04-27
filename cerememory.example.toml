@@ -41,8 +41,15 @@ api_keys = []  # ["sk-key1", "sk-key2"]
 # audit_log_path = "/path/to/audit.jsonl"
 
 [llm]
-provider = "none"  # "openai", "claude", "gemini", or "none"
-# api_key = "sk-..."
+# External LLM providers are disabled by default. The standard Cerememory
+# operating mode uses no OpenAI/Anthropic/Gemini API key; MCP clients such as
+# Claude Code should provide useful meta_json when they know intent, tags,
+# rationale, evidence, or context edges.
+provider = "none"
+# Optional experimental provider values: "openai", "claude", "gemini".
+# The CLI must also be built with the matching feature, for example:
+# cargo build -p cerememory-cli --release --features llm-openai
+# api_key = "sk-..."  # only needed when provider is not "none"
 # model = "gpt-4o"
 # base_url = "https://api.openai.com"
 

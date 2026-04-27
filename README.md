@@ -42,11 +42,18 @@ Cerememory is an open-source memory architecture inspired by the human brain's m
 
 ## Quick Start
 
+Cerememory's standard operating mode uses no external LLM API keys. It can run as
+a local memory server for Claude Code and other MCP clients with
+`[llm].provider = "none"`, which is the default.
+
 Cerememory is distributed as source. Build the `cerememory` binary locally:
 
 ```bash
 cargo build -p cerememory-cli --release
 ```
+
+External LLM adapters are not part of the default binary. Experimental provider
+support must be built explicitly, for example with `--features llm-openai`.
 
 Run exactly one long-lived server for the data directory:
 
@@ -92,6 +99,12 @@ edges that explain why the memory exists and how it relates to other memories.
 When no explicit meta-memory is supplied, Cerememory records that absence as a
 structured `unavailable` capture state instead of pretending to know the reason.
 
+MCP callers are encouraged to pass `meta_json` when they already know why a
+memory is worth storing. This keeps Cerememory API-free by default: the calling
+agent supplies intent, tags, rationale, evidence, or relation hints, and
+Cerememory persists and indexes that structured context without calling OpenAI,
+Anthropic, Gemini, or any other external LLM provider.
+
 ---
 
 ## The Architecture
@@ -100,8 +113,9 @@ Cerememory's design draws directly from neuroscience. The human brain does not s
 
 ```
                         ┌─────────────────────────────────┐
-                        │     LLM Adapter Layer           │
-                        │  (Claude, GPT, Gemini, ...)     │
+                        │  Agent / Application Layer      │
+                        │  (Claude Code, MCP clients,     │
+                        │   SDKs, local apps)             │
                         └──────────────┬──────────────────┘
                                        │ CMP (Cerememory Protocol)
                         ┌──────────────┴──────────────────┐
@@ -132,6 +146,10 @@ Cerememory's design draws directly from neuroscience. The human brain does not s
               │   Noise)        │    │                   │
               └─────────────────┘    └──────────────────┘
 ```
+
+External LLM adapters exist only as optional, experimental extensions for
+auto-embedding, summarization, relation extraction, and transcription. They are
+not required for the default MCP memory-server path.
 
 ### Five Memory Stores
 
@@ -239,8 +257,11 @@ api_keys = []  # ["sk-key1", "sk-key2"]
 # audit_log_path = "/path/to/audit.jsonl"
 
 [llm]
-provider = "none"  # "openai", "claude", "gemini"
-# api_key = "sk-..."
+provider = "none"  # standard default; no external LLM API key is used
+# Optional experimental providers require an explicit CLI build feature:
+#   cargo build -p cerememory-cli --release --features llm-openai
+# Provider values: "openai", "claude", "gemini"
+# api_key = "sk-..."  # only needed when provider is not "none"
 
 [decay]
 background_interval_secs = 3600  # once per hour
@@ -319,9 +340,9 @@ cerememory/
     cerememory-cli/               # CLI tool + `cerememory` binary
     cerememory-config/            # Configuration management
   adapters/
-    adapter-claude/               # Anthropic Claude adapter
-    adapter-openai/               # OpenAI GPT adapter
-    adapter-gemini/               # Google Gemini adapter
+    adapter-claude/               # Optional experimental Anthropic Claude adapter
+    adapter-openai/               # Optional experimental OpenAI adapter
+    adapter-gemini/               # Optional experimental Google Gemini adapter
   docs/                           # Whitepaper, CMP spec, ADRs
   tests/integration/              # Cross-crate integration tests
   benches/                        # Performance benchmarks
@@ -333,14 +354,14 @@ cerememory/
 
 | Phase | Status | Focus |
 |-------|--------|-------|
-| **Phase 1: Foundation** | Done | Core stores, decay engine, CMP protocol, LLM adapters |
+| **Phase 1: Foundation** | Done | Core stores, decay engine, CMP protocol, optional adapter boundary |
 | **Phase 2: Dynamics** | Done | Cross-modal associations, emotional metadata, reconsolidation |
 | **Phase 3: Hardening** | Done | Error handling, observability, performance optimization |
 | **Phase 4: Intelligence** | Done | Evolution engine, self-tuning parameters |
 | **Phase 5: Production** | Done | CLI, config management, CI/CD |
 | **Phase 7: Benchmarks** | Done | Performance benchmarks (store, decay, association, index) |
 | **Phase 8: Multimodal** | Done | Image, audio, and structured data memory |
-| **Phase 10: Integrations** | Done | LLM adapter integration tests |
+| **Phase 10: Integrations** | Done | Optional adapter integration tests |
 | **Phase 11: Encryption** | Done | Encrypted CMA export/import |
 | **Phase 12: Best Practices** | Done | MCP UX overhaul, security hardening, reliability improvements |
 
@@ -350,6 +371,7 @@ cerememory/
 
 - [Whitepaper](docs/cerememory-whitepaper.pdf): Philosophy, neuroscience foundations, and system design
 - [CMP Specification v1.0](docs/cmp-spec-v1.pdf): Complete protocol definition
+- [MCP Agent Metadata](docs/mcp-agent-metadata.md): How MCP clients should pass MetaMemory without external LLM API keys
 - [Architecture Decision Records](docs/adr/): Technology stack decisions with full rationale
 - [Human-Plus Memory Phase 1](docs/human-plus-memory-phase1.md): Design for raw journal, dream tick, suppression, and forensic recall
 
@@ -365,7 +387,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 Areas where we especially need help:
 - Rust core engine development
-- LLM adapter implementations
+- Local/API-free retrieval, metadata, and optional adapter implementations
 - Neuroscience review of decay and association models
 - Documentation and translations
 

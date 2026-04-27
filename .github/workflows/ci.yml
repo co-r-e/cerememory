@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      run_llm_e2e:
+        description: "Run external LLM adapter E2E tests with provider API secrets"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -77,6 +83,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - feature_set: default
+            command: cargo check -p cerememory-cli --locked
           - feature_set: no-default
             command: cargo check -p cerememory-cli --no-default-features --locked
           - feature_set: llm-openai
@@ -86,13 +94,15 @@ jobs:
           - feature_set: llm-gemini
             command: cargo check -p cerememory-cli --no-default-features --features llm-gemini --locked
           - feature_set: all-features
-            command: cargo check -p cerememory-cli --all-features --locked
+            command: cargo clippy -p cerememory-cli --all-targets --all-features --locked -- -D warnings
 
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo registry & build
         uses: actions/cache@v5
@@ -119,7 +129,7 @@ jobs:
   llm-e2e:
     name: LLM E2E tests
     needs: [check, feature-matrix]
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[llm-e2e]')
+    if: github.event_name == 'workflow_dispatch' && inputs.run_llm_e2e == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

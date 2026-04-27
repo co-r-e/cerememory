@@ -13,7 +13,7 @@ name = "cerememory"
 path = "src/main.rs"
 
 [features]
-default = ["llm-openai", "llm-claude", "llm-gemini"]
+default = []
 llm-openai = ["dep:cerememory-adapter-openai"]
 llm-claude = ["dep:cerememory-adapter-claude"]
 llm-gemini = ["dep:cerememory-adapter-gemini"]

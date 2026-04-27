@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a tamper-evident plaintext JSONL audit log with startup verification and `cerememory audit-verify`
 - Added `security.store_encryption_passphrase`, `security.persist_search_indexes`, `security.audit_log_enabled`, and `security.audit_log_path` configuration
 - Added ADRs for secure-at-rest scope and tamper-evident audit logging
+- Added MCP agent metadata guidance for passing caller-supplied MetaMemory without external LLM API keys
 
 ### Changed
 
@@ -22,10 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persistent full-text search indexes now default to in-memory rebuilds when store encryption is enabled, unless `security.persist_search_indexes = true` is set
 - Security documentation now distinguishes live-store encryption, encrypted CMA archives, plaintext derived indexes, and audit-log integrity guarantees
 - Vector search now uses a deterministic redb-backed exact cosine scan and exposes `vector_search_backend` / `vector_index_records` in stats
+- Documentation now treats `[llm].provider = "none"` as the standard operating mode and external LLM providers as optional experimental extensions
+- `cerememory-cli` default features now exclude external LLM adapters; provider builds require explicit `llm-openai`, `llm-claude`, or `llm-gemini` features
 
 #### Dependencies
 - Updated Rust dependencies to their latest compatible releases, including major updates for `redb`, `tantivy`, `criterion`, `ordered-float`, `rand`, and `sha2`
 - Updated GitHub Actions usage to Node 24-capable `actions/checkout@v6` and `actions/cache@v5`
+- CI workflow dispatch now runs external LLM E2E tests only when explicitly opted in
 - Removed the HNSW vector backend and its `hnsw_rs` / `bincode` advisory surface before release
 - Removed stale security advisory ignores that are no longer present after the dependency refresh
 - CI now runs Clippy across all targets and checks a dedicated CLI feature matrix
@@ -36,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Reliability and Security
 - Hardened API key validation so configured keys are scanned without early-exit match behavior
 - Hardened exact vector search so redb iterator/count failures are surfaced and mismatched stored embedding dimensions are skipped
+- LLM provider configuration now rejects missing or blank provider API keys before startup instead of failing later during provider initialization
 - CLI builds without LLM adapter features now report configured LLM providers as unsupported instead of silently disabling them
 - Removed stale SQLite/archive wording from docs and crate metadata
 

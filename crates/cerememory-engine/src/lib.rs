@@ -8174,6 +8174,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_none_supports_text_recall_without_vector_embedding() {
+        let engine = make_engine().await;
+        engine
+            .encode_store(text_store_req(
+                "Provider none should still recall text through local indexes",
+                Some(StoreType::Episodic),
+            ))
+            .await
+            .unwrap();
+
+        let stats = engine.introspect_stats().await.unwrap();
+        assert_eq!(stats.vector_index_records, 0);
+        assert_eq!(stats.vector_search_backend, "brute_force");
+
+        let resp = engine
+            .recall_query(RecallQueryRequest {
+                header: None,
+                cue: RecallCue {
+                    text: Some("local indexes".to_string()),
+                    image: None,
+                    audio: None,
+                    emotion: None,
+                    temporal: None,
+                    spatial: None,
+                    semantic: None,
+                    embedding: None,
+                },
+                stores: Some(vec![StoreType::Episodic]),
+                limit: 10,
+                min_fidelity: None,
+                include_decayed: false,
+                reconsolidate: false,
+                activation_depth: 0,
+                recall_mode: RecallMode::Perfect,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.memories.len(), 1);
+        assert_eq!(
+            resp.memories[0].record.text_content().unwrap(),
+            "Provider none should still recall text through local indexes"
+        );
+    }
+
+    #[tokio::test]
     async fn engine_existing_embedding_not_overwritten() {
         let provider = Arc::new(MockLLMProvider::new(4));
         let engine = CerememoryEngine::new(EngineConfig {

@@ -1,6 +1,7 @@
 //! LLM Adapter E2E tests.
 //!
-//! These tests call real LLM APIs and are gated behind environment variables:
+//! These optional tests call real LLM APIs. They are not part of the standard
+//! no-external-API release gate and must be explicitly opted into:
 //! - `CEREMEMORY_LLM_E2E=1` — master switch (required)
 //! - `OPENAI_API_KEY` — enables OpenAI tests
 //! - `ANTHROPIC_API_KEY` — enables Claude tests

@@ -519,6 +519,49 @@ impl ServerConfig {
             );
         }
 
+        if self
+            .llm
+            .api_key_raw
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(
+                "llm.api_key must not be blank. Remove it for provider = \"none\" or provide a non-empty provider API key."
+                    .to_string(),
+            );
+        }
+
+        if self.llm.provider != LlmProvider::None && self.llm.api_key_raw.is_none() {
+            return Err(format!(
+                "llm.provider '{}' requires llm.api_key. Set [llm].api_key or CEREMEMORY_LLM__API_KEY, or use provider = \"none\" for the standard no-external-API mode.",
+                self.llm.provider
+            ));
+        }
+
+        if self
+            .llm
+            .model
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(
+                "llm.model must not be blank. Remove it or provide a non-empty model name."
+                    .to_string(),
+            );
+        }
+
+        if self
+            .llm
+            .base_url
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(
+                "llm.base_url must not be blank. Remove it or provide a non-empty provider base URL."
+                    .to_string(),
+            );
+        }
+
         for (idx, cidr) in self.http.trusted_proxy_cidrs.iter().enumerate() {
             validate_cidr(cidr).map_err(|msg| {
                 format!(
@@ -789,6 +832,43 @@ port = 9999
         let mut config = ServerConfig::default();
         config.security.audit_log_path = Some("   ".to_string());
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_llm_provider_without_api_key() {
+        let mut config = ServerConfig::default();
+        config.llm.provider = LlmProvider::OpenAI;
+
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("requires llm.api_key"), "{err}");
+        assert!(err.contains("provider = \"none\""), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_blank_llm_api_key() {
+        let mut config = ServerConfig::default();
+        config.llm.provider = LlmProvider::OpenAI;
+        config.llm.api_key_raw = Some("   ".to_string());
+
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("llm.api_key must not be blank"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_blank_llm_model_and_base_url() {
+        let mut config = ServerConfig::default();
+        config.llm.model = Some("   ".to_string());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("llm.model must not be blank"));
+
+        let mut config = ServerConfig::default();
+        config.llm.base_url = Some("   ".to_string());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("llm.base_url must not be blank"));
     }
 
     #[test]
