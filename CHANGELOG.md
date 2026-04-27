@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-04-28
+
 ### Added
 
 #### Security and Storage
@@ -40,9 +42,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Reliability and Security
 - Hardened API key validation so configured keys are scanned without early-exit match behavior
 - Hardened exact vector search so redb iterator/count failures are surfaced and mismatched stored embedding dimensions are skipped
+- Rejected unauthenticated non-loopback HTTP API binds instead of allowing public API access with only a warning
+- Rejected MCP proxy API keys over non-loopback plaintext HTTP upstreams
+- Hardened MCP export output paths against overwrite, symlink, missing-parent, and parent-traversal writes
+- Included raw journal records in MCP export archives to match backup expectations
+- Preserved raw journal durability when Tantivy text-index updates fail after redb commit, surfacing degraded index status instead of failing the durable write
+- Removed stale text/vector and structured secondary-index entries on same-ID overwrite
+- Protected encrypted raw session and semantic concept index keys from plaintext-derived storage
+- Capped recall association depth and limit to bound traversal cost
+- Made opted-in LLM E2E CI fail when no provider API secret is configured
 - LLM provider configuration now rejects missing or blank provider API keys before startup instead of failing later during provider initialization
 - CLI builds without LLM adapter features now report configured LLM providers as unsupported instead of silently disabling them
 - Removed stale SQLite/archive wording from docs and crate metadata
+
+#### Toolchain and Release
+- Pinned the workspace, CI, and release checks to Rust 1.95.0
+- Added MSRV coverage for Rust 1.95 and pinned cargo audit tooling used by CI
+- Added `cargo deny` bans coverage to audit and release checks
 
 ## [0.2.5] - 2026-04-26
 
