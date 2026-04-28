@@ -1,0 +1,30 @@
+[package]
+name = "cerememory-recorder"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Companion recorder that normalizes observed events into Cerememory raw journal batches"
+rust-version.workspace = true
+
+[[bin]]
+name = "cerememory-recorder"
+path = "src/main.rs"
+
+[dependencies]
+cerememory-core = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+wiremock = { workspace = true }

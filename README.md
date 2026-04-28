@@ -73,6 +73,21 @@ This keeps the embedded `redb` and Tantivy stores owned by one process while all
 
 If the shared HTTP server requires auth, set `CEREMEMORY_SERVER_API_KEY` in the MCP client environment instead of passing secrets on the command line. For long-running upstream operations, `--server-timeout-secs` can be used to set an explicit request timeout; if omitted, per-request timeout is disabled.
 
+Optional observed-event recording lives in a separate companion binary:
+
+```bash
+cargo build -p cerememory-recorder --release
+printf '%s\n' '{"session_id":"demo","event_type":"user_message","content":"hello recorder"}' \
+  | target/release/cerememory-recorder ingest --server-url http://127.0.0.1:8420
+```
+
+The recorder accepts Capture Event JSONL, redacts obvious secrets, and writes
+safe raw batches to `/v1/encode/raw/batch`. It defaults automatic records to
+`visibility=normal` and `secrecy_level=sensitive`; curated memory promotion still
+belongs to `dream_tick`.
+If `CEREMEMORY_SERVER_API_KEY` is set, recorder refuses non-loopback plaintext
+HTTP upstreams; use HTTPS for remote servers.
+
 Once connected, the client can use the core memory tools plus raw/dream workflows:
 
 | Tool | Description |
@@ -374,6 +389,7 @@ cerememory/
 - [MCP Agent Metadata](docs/mcp-agent-metadata.md): How MCP clients should pass MetaMemory without external LLM API keys
 - [Architecture Decision Records](docs/adr/): Technology stack decisions with full rationale
 - [Human-Plus Memory Phase 1](docs/human-plus-memory-phase1.md): Design for raw journal, dream tick, suppression, and forensic recall
+- [Recorder Companion](docs/recorder.md): Capture Event JSONL, Codex hook helper, diagnostics, and spool behavior
 
 The landing page and documentation site live in a separate repository at `~/Projects/dev_cerememory/cerememory-docs`.
 
