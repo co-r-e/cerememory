@@ -446,7 +446,7 @@ checksum = "4f4c707c6a209cbe82d10abd08e1ea8995e9ea937d2550646e02798948992be0"
 
 [[package]]
 name = "cerememory-adapter-claude"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-adapter-common",
  "cerememory-core",
@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-adapter-common"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "reqwest",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-adapter-gemini"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "base64",
  "cerememory-adapter-common",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-adapter-openai"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "base64",
  "cerememory-adapter-common",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-archive"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "argon2",
  "cerememory-core",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-association"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-cli"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-config"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "cerememory-engine",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "chacha20poly1305",
  "chrono",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-decay"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-engine"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-archive",
  "cerememory-association",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-evolution"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-index"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "cerememory-store-common",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-recorder"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "cerememory-core",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-common"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "argon2",
  "cerememory-core",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-emotional"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "cerememory-store-common",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-episodic"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "cerememory-store-common",
@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-procedural"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "cerememory-store-common",
@@ -794,7 +794,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-raw"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "cerememory-store-common",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-semantic"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "cerememory-store-common",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-store-working"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "chrono",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-transport-grpc"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cerememory-core",
  "cerememory-engine",
@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-transport-http"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "axum",
  "axum-extra",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "cerememory-transport-mcp"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "cerememory-core",
