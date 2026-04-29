@@ -741,12 +741,41 @@ fn init_logging(config: &ServerConfig) {
     }
 }
 
+/// Initialize logging for stdio transports.
+///
+/// MCP stdio reserves stdout for JSON-RPC messages, so diagnostics must not be
+/// written there.
+fn init_stdio_logging(config: &ServerConfig) {
+    // RUST_LOG env var takes priority over config
+    let filter = if std::env::var("RUST_LOG").is_ok() {
+        EnvFilter::from_default_env()
+    } else {
+        EnvFilter::try_new(config.log.level.to_string()).unwrap_or_else(|_| EnvFilter::new("info"))
+    };
+
+    match config.log.format {
+        cerememory_config::LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .init();
+        }
+        cerememory_config::LogFormat::Pretty => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .init();
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if let Some(remote) = remote_mcp_options(&cli) {
-        init_logging(&ServerConfig::default());
+        init_stdio_logging(&ServerConfig::default());
         install_panic_hook();
         cerememory_transport_mcp::serve_stdio_http(
             remote.server_url,
